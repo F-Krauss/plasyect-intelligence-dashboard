@@ -1,0 +1,6 @@
+{
+  "name": "Plasyect Intelligence Dashboard",
+  "description": "Industrial intelligence and production tracking platform for Plasyect EVA products.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

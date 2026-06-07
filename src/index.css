@@ -1,0 +1,43 @@
+@import "tailwindcss";
+
+@theme {
+  /* High contrast light theme mapping that perfectly inverts the dark layout */
+  --color-slate-50: #0d111d;        /* Deepest charcoal black for bold emphasis */
+  --color-slate-100: #0d111d;       /* Deepest charcoal black for bold emphasis */
+  --color-slate-200: #0f172a;       /* Dark charcoal for body headers */
+  --color-slate-205: #1e293b;       /* Dark charcoal content text */
+  --color-slate-250: #1e293b;       /* Dark slate content text */
+  --color-slate-300: #1e293b;       /* Dark slate text */
+  --color-slate-350: #334155;       /* Medium slate text for labels */
+  --color-slate-400: #334155;       /* Medium slate text for labels */
+  --color-slate-450: #475569;       /* Slate gray text for secondary subtext */
+  --color-slate-500: #475569;       /* Slate gray text for secondary subtext */
+  --color-slate-550: #556070;       /* Slate gray text for secondary subtext */
+  --color-slate-600: #64748b;       /* Desaturated utility gray */
+  --color-slate-700: #cbd5e1;       /* Clean borders / active indicators */
+  --color-slate-800: #e2e8f0;       /* Clean light border partition */
+  --color-slate-850: #f1f5f9;       /* Very light card background / hover state */
+  --color-slate-900: #f8fafc;       /* Secondary crystal background */
+  --color-slate-905: #f1f5f9;       /* Secondary partition backgrounds */
+  --color-slate-950: #ffffff;       /* Main card and container sheets (pure white) */
+  --color-slate-955: #f8fafc;       /* Base app layout sheet background */
+
+  /* Inverting neon glowing colors to professional high-contrast dark-mode friendly values on white context */
+  --color-blue-400: #1d4ed8;        /* Vivid blue-700 for link and action indicators */
+  --color-blue-450: #1e40af;        /* Deeper indigo-blue */
+  --color-indigo-400: #4338ca;      /* Vivid indigo-700 */
+  --color-cyan-400: #0e7490;        /* Sharp cyan-700 */
+  --color-emerald-400: #047857;     /* Solid green-700 for positive statuses */
+  --color-emerald-555: #059669;     /* Solid green-600 for positive action hov */
+  --color-sky-450: #0369a1;         /* Sky-700 */
+  --color-amber-400: #b45309;       /* Amber-700 for warning text */
+  --color-rose-450: #be123c;        /* Red-700 for strict errors / vencidos */
+}
+
+/* Base style resets to guarantee a full high-contrast white layout standard */
+@layer base {
+  body {
+    background-color: #f8fafc;
+    color: #0f172a;
+  }
+}
