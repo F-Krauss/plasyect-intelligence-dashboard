@@ -8,6 +8,10 @@ const configSchema = z.object({
   CORS_ORIGINS: z.string().default('http://localhost:3000,http://localhost:5173'),
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+  // Conexion Postgres directa a Supabase (mismo credential que el sync-service).
+  // Es la via preferida: lee tablas bigzap_* y la vista tarjetas_viajeras.
+  DATABASE_URL: z.string().optional(),
+  PGSSL: z.string().default('true'),
   GCP_PROJECT_ID: z.string().default('dashboard-plasyect'),
   DOCUMENT_AI_LOCATION: z.string().default('us'),
   DOCUMENT_AI_PROCESSOR_ID: z.string().optional(),
@@ -26,3 +30,4 @@ export const corsOrigins = config.CORS_ORIGINS.split(',')
   .filter(Boolean);
 
 export const hasSupabaseConfig = Boolean(config.SUPABASE_URL && config.SUPABASE_SERVICE_ROLE_KEY);
+export const hasDatabaseUrl = Boolean(config.DATABASE_URL);

@@ -83,19 +83,35 @@ describe('mapPedidoToOrder', () => {
     temporada: 'V26'
   };
 
-  it('maps a pedido to the dashboard Order shape with avance and risk', () => {
-    const order = mapPedidoToOrder(pedido, 'plasyect_matriz') as Record<string, unknown>;
+  it('prefiere los pares agregados de lotes y calcula avance', () => {
+    const order = mapPedidoToOrder(
+      { ...pedido, pares_lotes_total: 1000, pares_lotes_entregados: 250 },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
     expect(order.id).toBe('PED-547');
     expect(order.cliente).toBe('ZAMISKA');
     expect(order.oc).toBe('OC-XYZ');
     expect(order.totalPares).toBe(1000);
-    expect(order.paresEntregados).toBe(456);
-    expect(order.porcentajeAvance).toBe(46);
-    expect(order.estatus).toBe('ENTREGADO'); // tiene fecha_salida
+    expect(order.paresEntregados).toBe(250);
+    expect(order.porcentajeAvance).toBe(25);
+    expect(order.estatus).toBe('PROCESANDO'); // 250 < 1000
   });
 
-  it('marks cancelled pedidos', () => {
-    const order = mapPedidoToOrder({ ...pedido, fecha_cancelacion: '2026-04-15' }, 'plasyect_matriz') as Record<string, unknown>;
-    expect(order.estatus).toBe('CANCELADO');
+  it('marca ENTREGADO cuando los lotes entregados cubren el total', () => {
+    const order = mapPedidoToOrder(
+      { ...pedido, pares_lotes_total: 500, pares_lotes_entregados: 500 },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
+    expect(order.estatus).toBe('ENTREGADO');
+    expect(order.porcentajeAvance).toBe(100);
+  });
+
+  it('NO trata PE_FECCAN (deadline) como cancelacion', () => {
+    const order = mapPedidoToOrder(
+      { ...pedido, fecha_cancelacion: '2026-05-20', pares_lotes_total: 100, pares_lotes_entregados: 0 },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
+    expect(order.estatus).toBe('PROCESANDO');
+    expect(order.fechaLimiteCancelacion).toBe('2026-05-20');
   });
 });

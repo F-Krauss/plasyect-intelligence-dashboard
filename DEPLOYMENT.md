@@ -52,28 +52,40 @@ frontend) se prepara una sola vez desde cualquier equipo con acceso a internet.
 
 ## Paso 2 — Backend API (Cloud Run, una vez)
 
+El backend se conecta a Supabase por **Postgres directo (`DATABASE_URL`)** — el mismo
+credential que el sync-service, sin service_role key. El script guarda `DATABASE_URL` como
+secreto de Google y reutiliza el `JWT_SECRET` existente si ya está creado.
+
 ```bash
 cd backend
-export JWT_SECRET="$(openssl rand -hex 32)"
-export SUPABASE_URL="https://PROJECT_REF.supabase.co"
-export SUPABASE_SERVICE_ROLE_KEY="..."
-export CORS_ORIGINS="https://tu-dominio-hostinger"
-# Opcionales (tienen default): DEFAULT_TENANT_ID, BIGZAP_BATCH_LIMIT, BIGZAP_ACTIVE_DAYS
+export DATABASE_URL="postgresql://postgres.REF:PASS@aws-1-REGION.pooler.supabase.com:6543/postgres"
+export GCP_PROJECT_ID="dashboard-plasyect"
+export GCP_REGION="us-central1"
+export CORS_ORIGINS="*"   # o tu dominio Hostinger
+# Primera vez (si no existe el secreto): export JWT_SECRET="$(openssl rand -hex 32)"
+# Opcionales (default): DEFAULT_TENANT_ID, BIGZAP_BATCH_LIMIT, BIGZAP_ACTIVE_DAYS, PGSSL
 npm ci && npm run build
 npm run deploy   # = bash scripts/deploy-gcloud.sh
 ```
 
-Al terminar, Cloud Run entrega una URL `https://plasyect-api-xxxxx.run.app`. Verificar:
+Al terminar, Cloud Run entrega/actualiza la URL `https://plasyect-api-xxxxx.run.app`. Verificar:
 
 ```bash
 curl https://plasyect-api-xxxxx.run.app/health
 ```
 
+> El backend degrada con elegancia: mientras las tablas `bigzap_*` estén vacías (antes de
+> correr el sync en el server), sirve datos demo; en cuanto el sync llena Supabase, el mismo
+> backend empieza a servir tarjetas viajeras reales **sin redeploy**.
+
 ## Paso 3 — Frontend (Hostinger, una vez)
+
+`VITE_API_BASE_URL` debe estar presente **en build time** (si falta, el dashboard usa datos
+mock y no llama al backend). Ya quedó en `.env.local`:
 
 ```bash
 # en la raíz del repo
-echo 'VITE_API_BASE_URL="https://plasyect-api-xxxxx.run.app"' >> .env.local
+cat .env.local   # VITE_API_BASE_URL="https://plasyect-api-wjttlfxvua-uc.a.run.app"
 npm ci && npm run build
 # subir el contenido de dist/ a Hostinger (o el hosting estático que uses)
 ```

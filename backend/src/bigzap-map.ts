@@ -68,12 +68,19 @@ export interface PedidoRow {
   fecha_pedido: string | null;
   fecha_recepcion: string | null;
   fecha_salida: string | null;
+  // OJO: en BixApp PE_FECCAN es la FECHA LIMITE de cancelacion (deadline),
+  // no un evento de cancelacion: viene poblada en todos los pedidos. No se usa
+  // para marcar el pedido como cancelado.
   fecha_cancelacion: string | null;
   pares_pedidos: number | null;
   pares_facturados: number | null;
   pedido_cliente: string | null;
   tienda: string | null;
   temporada: string | null;
+  // Pares reales agregados desde los lotes del pedido (los headers PEDIDOS
+  // suelen traer PE_PARPED/PE_PARFAC en 0). Si vienen, mandan sobre los headers.
+  pares_lotes_total?: number | null;
+  pares_lotes_entregados?: number | null;
 }
 
 function resolveStage(row: TarjetaViajeraRow): StageId {
@@ -167,12 +174,12 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
 }
 
 export function mapPedidoToOrder(row: PedidoRow, tenantId: TenantId): Order {
-  const entregado = Boolean(row.fecha_salida);
-  const cancelado = Boolean(row.fecha_cancelacion);
-  const estatus = cancelado ? 'CANCELADO' : entregado ? 'ENTREGADO' : 'PROCESANDO';
-  const paresPedidos = row.pares_pedidos ?? 0;
-  const paresFacturados = row.pares_facturados ?? 0;
-  const avance = paresPedidos > 0 ? Math.min(100, Math.round((paresFacturados / paresPedidos) * 100)) : 0;
+  // Pares reales: preferir el agregado de lotes; si no, los headers del pedido.
+  const totalPares = row.pares_lotes_total ?? row.pares_pedidos ?? 0;
+  const paresEntregados = row.pares_lotes_entregados ?? row.pares_facturados ?? 0;
+  const avance = totalPares > 0 ? Math.min(100, Math.round((paresEntregados / totalPares) * 100)) : 0;
+  const entregado = totalPares > 0 && paresEntregados >= totalPares;
+  const estatus = entregado ? 'ENTREGADO' : 'PROCESANDO';
   const clienteNombre = row.cliente_nombre || row.cliente || 'S/Cliente';
 
   return {
@@ -183,13 +190,13 @@ export function mapPedidoToOrder(row: PedidoRow, tenantId: TenantId): Order {
     modelId: 'varios',
     modelName: 'Varios modelos',
     color: 'N/D',
-    quantity: paresPedidos,
+    quantity: totalPares,
     exchangeRate: 0,
     totalUSD: 0,
     totalMXN: 0,
     createdAt: row.fecha_pedido ?? new Date().toISOString(),
     deliveryDate: row.fecha_salida ?? row.fecha_recepcion ?? new Date().toISOString(),
-    status: cancelado ? 'CANCELADO' : entregado ? 'ENTREGADO' : 'PROCESANDO',
+    status: estatus,
     discountAuthorized: false,
     discountPercentage: 0,
 
@@ -199,13 +206,14 @@ export function mapPedidoToOrder(row: PedidoRow, tenantId: TenantId): Order {
     oc: row.pedido_cliente ?? undefined,
     fechaAlta: row.fecha_pedido ?? undefined,
     fechaCompromiso: row.fecha_salida ?? row.fecha_recepcion ?? undefined,
-    totalPares: paresPedidos,
-    paresEntregados: paresFacturados,
+    fechaLimiteCancelacion: row.fecha_cancelacion ?? undefined,
+    totalPares,
+    paresEntregados,
     estatus,
     prioridad: 'MEDIA',
     responsable: row.tienda ?? undefined,
     porcentajeAvance: avance,
-    riesgoEntrega: deliveryRisk(row.fecha_salida, entregado || cancelado),
+    riesgoEntrega: deliveryRisk(row.fecha_salida, entregado),
     temporada: row.temporada ?? undefined,
     source: 'big_zap_fdb'
   } as Order;

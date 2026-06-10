@@ -1,7 +1,7 @@
 import cors from 'cors';
 import express, { type ErrorRequestHandler } from 'express';
 import { ZodError } from 'zod';
-import { config, corsOrigins, hasSupabaseConfig } from './config.js';
+import { config, corsOrigins, hasDatabaseUrl, hasSupabaseConfig } from './config.js';
 import { createRepository } from './repository.js';
 import { createRoutes } from './routes.js';
 
@@ -30,7 +30,9 @@ app.use(errorHandler);
 
 app.listen(config.PORT, () => {
   console.log(`plasyect-api listening on ${config.PORT}`);
-  if (!hasSupabaseConfig) console.warn('SUPABASE_URL/SUPABASE_SERVICE_ROLE_KEY missing. Using in-memory fallback.');
+  if (hasDatabaseUrl) console.log('Persistencia: Postgres directo (DATABASE_URL).');
+  else if (hasSupabaseConfig) console.log('Persistencia: Supabase REST (service_role).');
+  else console.warn('Sin DATABASE_URL ni Supabase: usando datos en memoria (seed).');
 });
 
 export { app };

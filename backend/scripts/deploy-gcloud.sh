@@ -59,11 +59,23 @@ require_secret() {
   printf '%s' "$value" | gcloud secrets versions add "$name" --data-file=- --project="$PROJECT_ID" >/dev/null
 }
 
-require_secret JWT_SECRET
+# JWT_SECRET: si viene en el entorno se rota; si no, se reutiliza el existente.
+if [[ -n "${JWT_SECRET:-}" ]]; then
+  require_secret JWT_SECRET
+elif ! gcloud secrets describe JWT_SECRET --project="$PROJECT_ID" >/dev/null 2>&1; then
+  echo "Missing env: JWT_SECRET (no existe el secreto y no se proporciono valor)" >&2
+  exit 1
+fi
 
 SET_ENV_VARS="^@^NODE_ENV=production@GCP_PROJECT_ID=${PROJECT_ID}@CORS_ORIGINS=${CORS_ORIGINS:-*}"
-SET_ENV_VARS="${SET_ENV_VARS}@DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-plasyect_matriz}@BIGZAP_BATCH_LIMIT=${BIGZAP_BATCH_LIMIT:-800}@BIGZAP_ACTIVE_DAYS=${BIGZAP_ACTIVE_DAYS:-30}"
+SET_ENV_VARS="${SET_ENV_VARS}@DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-plasyect_matriz}@BIGZAP_BATCH_LIMIT=${BIGZAP_BATCH_LIMIT:-800}@BIGZAP_ACTIVE_DAYS=${BIGZAP_ACTIVE_DAYS:-30}@PGSSL=${PGSSL:-true}"
 SET_SECRETS="JWT_SECRET=JWT_SECRET:latest"
+
+# DATABASE_URL: via preferida (Postgres directo a Supabase, mismo credential que el sync).
+if [[ -n "${DATABASE_URL:-}" ]]; then
+  require_secret DATABASE_URL
+  SET_SECRETS="${SET_SECRETS},DATABASE_URL=DATABASE_URL:latest"
+fi
 
 if [[ -n "${SUPABASE_URL:-}" && -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
   require_secret SUPABASE_URL

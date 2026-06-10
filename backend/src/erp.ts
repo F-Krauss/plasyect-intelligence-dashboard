@@ -1,10 +1,12 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
-import { config, hasSupabaseConfig } from './config.js';
+import { config, hasDatabaseUrl, hasSupabaseConfig } from './config.js';
+import { getPool } from './db.js';
 
 /**
  * Acceso a los datos de BixApp (tarjetas viajeras) sincronizados por
  * sync-service/ hacia las tablas bigzap_* y la vista tarjetas_viajeras.
- * El backend nunca habla con Firebird directamente.
+ * Via preferida: Postgres directo (DATABASE_URL). El backend nunca habla con
+ * Firebird directamente.
  */
 
 export type ErpRecord = Record<string, unknown>;
@@ -33,8 +35,8 @@ export function getTarjetaViajeraStub(id: string) {
     id,
     source: 'big_zap_fdb',
     status: 'unavailable',
-    configured: hasSupabaseConfig,
-    message: 'Supabase no configurado: los datos de tarjetas viajeras llegan via sync-service a las tablas bigzap_*.'
+    configured: hasDatabaseUrl || hasSupabaseConfig,
+    message: 'Sin conexion a Supabase: los datos de tarjetas viajeras llegan via sync-service a las tablas bigzap_*.'
   };
 }
 
@@ -43,6 +45,67 @@ export function parseTarjetaId(id: string): { programa: number; lote: number } |
   const match = /^(\d{1,9})-(\d{1,9})$/.exec(id.trim());
   if (!match) return null;
   return { programa: Number(match[1]), lote: Number(match[2]) };
+}
+
+/** Lee tarjetas viajeras por Postgres directo (DATABASE_URL). Via preferida. */
+class PgErpService implements ErpService {
+  readonly enabled = true;
+
+  private get pool() {
+    return getPool();
+  }
+
+  async listTarjetas(options: ListTarjetasOptions): Promise<ErpRecord[]> {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (options.status) {
+      params.push(options.status);
+      where.push(`status_depto = $${params.length}`);
+    }
+    if (options.stage) {
+      params.push(options.stage);
+      where.push(`stage_id = $${params.length}`);
+    }
+    params.push(options.limit);
+    const sql = `select * from public.tarjetas_viajeras
+      ${where.length ? 'where ' + where.join(' and ') : ''}
+      order by ultimo_escaneo desc nulls last
+      limit $${params.length}`;
+    const { rows } = await this.pool.query<ErpRecord>(sql, params);
+    return rows;
+  }
+
+  async getTarjeta(id: string): Promise<TarjetaDetalle | null> {
+    const parsed = parseTarjetaId(id);
+    if (!parsed) return null;
+    const tarjeta = await this.pool.query<ErpRecord>(
+      'select * from public.tarjetas_viajeras where programa = $1 and lote = $2 limit 1',
+      [parsed.programa, parsed.lote]
+    );
+    if (tarjeta.rows.length === 0) return null;
+
+    const [movimientos, pedidos] = await Promise.all([
+      this.pool.query<ErpRecord>(
+        `select programa, lote, depto, fecha, hora_cs, escaneado_at, gen_por, subdepto
+         from public.bigzap_avance where programa = $1 and lote = $2 order by escaneado_at asc`,
+        [parsed.programa, parsed.lote]
+      ),
+      this.pool.query<ErpRecord>(
+        `select pedido, renglon, cliente, corrida, pares
+         from public.bigzap_lotes_pedidos where programa = $1 and lote = $2`,
+        [parsed.programa, parsed.lote]
+      )
+    ]);
+
+    return { tarjeta: tarjeta.rows[0], movimientos: movimientos.rows, pedidos: pedidos.rows };
+  }
+
+  async getSyncStatus(): Promise<ErpRecord | null> {
+    const { rows } = await this.pool.query<ErpRecord>(
+      'select * from public.erp_sync_runs order by started_at desc limit 1'
+    );
+    return rows[0] ?? null;
+  }
 }
 
 class SupabaseErpService implements ErpService {
@@ -127,9 +190,12 @@ class DisabledErpService implements ErpService {
 }
 
 export function createErpService(): ErpService {
-  if (!hasSupabaseConfig) return new DisabledErpService();
-  const supabase = createClient(config.SUPABASE_URL!, config.SUPABASE_SERVICE_ROLE_KEY!, {
-    auth: { persistSession: false, autoRefreshToken: false }
-  });
-  return new SupabaseErpService(supabase);
+  if (hasDatabaseUrl) return new PgErpService();
+  if (hasSupabaseConfig)
+    return new SupabaseErpService(
+      createClient(config.SUPABASE_URL!, config.SUPABASE_SERVICE_ROLE_KEY!, {
+        auth: { persistSession: false, autoRefreshToken: false }
+      })
+    );
+  return new DisabledErpService();
 }
