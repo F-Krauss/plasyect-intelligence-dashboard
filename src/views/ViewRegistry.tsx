@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useDashboard } from '../context/DashboardContext';
+import { ALL_PERMISSION_KEYS, PERMISSION_LABELS, ROLE_PERMISSION_DEFAULTS, useDashboard } from '../context/DashboardContext';
 import * as d3 from 'd3';
 import { 
   BarChart as RechartsBarChart, 
@@ -21,7 +21,7 @@ import { DataTable } from '../components/DataTable';
 import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
 import { CLIENTS, MODELS, STAGES, COLORS, MOVIMIENTOS, CALIDAD_RECORDS, PRODUCCION_POR_HORA, DEFECTOS_CATALOGO } from '../data/mockData';
-import { StageId, Role } from '../types';
+import { AppUser, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
   DollarSign, 
   Layers, 
@@ -66,6 +66,56 @@ export const DashboardEjecutivoView: React.FC = () => {
   
   // Base date anchor representing the current local time for days-left calculations
   const BASE_DATE = new Date('2026-05-25');
+  const SEMAPHORE = {
+    ok: {
+      fill: '#16a34a',
+      text: 'text-emerald-400',
+      border: 'border-emerald-900/70',
+      bg: 'bg-emerald-950/15',
+      label: 'Dentro de meta'
+    },
+    warning: {
+      fill: '#d97706',
+      text: 'text-amber-500',
+      border: 'border-amber-900/70',
+      bg: 'bg-amber-950/15',
+      label: 'Por debajo'
+    },
+    danger: {
+      fill: '#dc2626',
+      text: 'text-rose-500',
+      border: 'border-rose-900/70',
+      bg: 'bg-rose-950/15',
+      label: 'Muy por debajo'
+    },
+    neutral: {
+      fill: '#2563eb',
+      text: 'text-cyan-400',
+      border: 'border-slate-800',
+      bg: 'bg-slate-900',
+      label: 'Referencia'
+    }
+  } as const;
+  type SemaphoreKey = keyof typeof SEMAPHORE;
+  const getStdDev = (values: number[]) => {
+    if (values.length <= 1) return 0;
+    const avg = values.reduce((sum, value) => sum + value, 0) / values.length;
+    const variance = values.reduce((sum, value) => sum + Math.pow(value - avg, 2), 0) / values.length;
+    return Math.sqrt(variance);
+  };
+  const classifyAgainstTarget = (actual: number, target: number, stdDev: number): SemaphoreKey => {
+    if (target <= 0) return 'neutral';
+    const tolerance = Math.max(stdDev, target * 0.05, 1);
+    if (actual >= target) return 'ok';
+    if (actual >= target - tolerance) return 'warning';
+    return 'danger';
+  };
+  const classifyLowerIsBetter = (actual: number, target: number, stdDev: number): SemaphoreKey => {
+    const tolerance = Math.max(stdDev, target * 0.2, 1);
+    if (actual <= target) return 'ok';
+    if (actual <= target + tolerance) return 'warning';
+    return 'danger';
+  };
 
   // 1. Interactive Filter States (defaulting to encompass our mock dates)
   const [fechaInicio, setFechaInicio] = useState<string>('2026-04-20');
@@ -174,6 +224,16 @@ export const DashboardEjecutivoView: React.FC = () => {
   const totalRealPrs = filteredProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
   const totalMetaPrs = filteredProdHora.reduce((sum, p) => sum + p.metaHora, 0);
   const kpiMetaCompliance = totalMetaPrs > 0 ? Number(((totalRealPrs / totalMetaPrs) * 100).toFixed(1)) : 89.2;
+  const productionStdDev = getStdDev(filteredProdHora.map(p => p.produccionReal - p.metaHora));
+  const complianceStdDev = getStdDev(filteredProdHora.map(p => p.eficiencia));
+  const defectStdDev = getStdDev(filteredQuality.map(q => q.porcentajeDefectivo));
+  const progressStdDev = getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
+  const riskStdDev = getStdDev(filteredOrders.map(o => (o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO') ? 1 : 0));
+  const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, totalMetaPrs, productionStdDev);
+  const kpiProgressStatus = classifyAgainstTarget(kpiGlobalProgress, 70, progressStdDev);
+  const kpiRiskStatus = classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev);
+  const kpiDefectStatus = classifyLowerIsBetter(kpiDefectivePct, 3, defectStdDev);
+  const kpiComplianceStatus = classifyAgainstTarget(kpiMetaCompliance, 100, complianceStdDev);
 
   // Active WIP denominator
   const totalWIPPares = filteredBatches.reduce((sum, b) => sum + (b.totalPares || 0), 0);
@@ -269,20 +329,25 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // 5. Gráficas inferiores computations
   // - Producción por hora del día (grouping from hourly production)
-  const hourlyChartData = filteredProdHora.reduce((acc: Record<string, number>, p) => {
-    acc[p.hora] = (acc[p.hora] || 0) + p.produccionReal;
+  const hourlyChartData = filteredProdHora.reduce((acc: Record<string, { value: number; target: number }>, p) => {
+    acc[p.hora] = acc[p.hora] || { value: 0, target: 0 };
+    acc[p.hora].value += p.produccionReal;
+    acc[p.hora].target += p.metaHora;
     return acc;
   }, {});
-  const finalHourlyData = Object.entries(hourlyChartData)
-    .map(([label, value]) => ({ label, value }))
-    .sort((a,b) => a.label.localeCompare(b.label))
-    .slice(0, 10);
+  const hourlyStdDev = getStdDev(Object.values(hourlyChartData).map(d => d.value - d.target));
+  const finalHourlyData = Array.from({ length: 24 }, (_, hour) => {
+    const label = `${String(hour).padStart(2, '0')}:00`;
+    const data = hourlyChartData[label] || { value: 0, target: 0 };
+      const status = classifyAgainstTarget(data.value, data.target, hourlyStdDev);
+      return { label, value: data.value, target: data.target, color: SEMAPHORE[status].fill, status };
+  });
 
   // - Pares por etapa
   const stageParesChartData = pipelineStages.map(st => ({
     label: st.name.split(' ')[0], // short name
     value: st.paresCount,
-    color: st.id === 'banda' || st.id === 'estabilizacion' ? '#a855f7' : '#2563eb'
+    color: st.saturation === 'CRITICO' ? SEMAPHORE.danger.fill : st.saturation === 'SATURADO' ? SEMAPHORE.warning.fill : SEMAPHORE.ok.fill
   }));
 
   // - Top 5 modelos producidos
@@ -317,6 +382,30 @@ export const DashboardEjecutivoView: React.FC = () => {
     value: value as number,
     color: label === 'COMPLETADO' ? '#10b981' : label === 'PROCESANDO' ? '#3b82f6' : '#f59e0b'
   }));
+  const productionStatusData = [
+    { label: 'Óptimo', value: filteredBatches.filter(b => b.status === 'OPTIMO').length, color: SEMAPHORE.ok.fill },
+    { label: 'Alerta', value: filteredBatches.filter(b => b.status === 'ALERTA').length, color: SEMAPHORE.warning.fill },
+    { label: 'Crítico', value: filteredBatches.filter(b => b.status === 'CRITICO').length, color: SEMAPHORE.danger.fill },
+    { label: 'Detenido', value: filteredBatches.filter(b => b.status === 'DETENIDO').length, color: '#475569' }
+  ];
+  const shiftComplianceData = ['1', '2', '3'].map(turno => {
+    const rows = filteredProdHora.filter(p => p.turno === turno);
+    const real = rows.reduce((sum, p) => sum + p.produccionReal, 0);
+    const target = rows.reduce((sum, p) => sum + p.metaHora, 0);
+    const pct = target > 0 ? Number(((real / target) * 100).toFixed(1)) : 0;
+    const std = getStdDev(rows.map(p => p.eficiencia));
+    const status = classifyAgainstTarget(pct, 100, std);
+    return { label: `Turno ${turno}`, value: pct, real, target, color: SEMAPHORE[status].fill, status };
+  });
+  const qualityAreaData = ['INYECCION', 'BANDA'].map(area => {
+    const rows = filteredQuality.filter(q => q.area === area);
+    const inspected = rows.reduce((sum, q) => sum + q.totalInspeccionado, 0);
+    const defectsCount = rows.reduce((sum, q) => sum + q.merma + q.segundas, 0);
+    const pct = inspected > 0 ? Number(((defectsCount / inspected) * 100).toFixed(2)) : 0;
+    const std = getStdDev(rows.map(q => q.porcentajeDefectivo));
+    const status = classifyLowerIsBetter(pct, 3, std);
+    return { label: area === 'INYECCION' ? 'Inyección' : 'Banda', value: pct, defectsCount, inspected, color: SEMAPHORE[status].fill, status };
+  });
 
   // 6. Top 10 pedidos en riesgo
   const top10RiskOrders = filteredOrders
@@ -350,7 +439,7 @@ export const DashboardEjecutivoView: React.FC = () => {
     .slice(0, 10);
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col gap-6">
       
       {/* 1. Header & Quick Actions */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center bg-slate-900 border border-slate-800 p-5 rounded-lg shadow-xl gap-4">
@@ -509,7 +598,7 @@ export const DashboardEjecutivoView: React.FC = () => {
       </div>
 
       {/* 3. Primera Fila de KPIs (8 clean, executive cards) */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         {/* Card 1: Pedidos Activos */}
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PEDIDOS ACTIVOS</span>
@@ -538,61 +627,60 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Card 4: Producción del Día */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md border-l-2 border-l-emerald-500">
+        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md border-l-4 ${SEMAPHORE[kpiDailyStatus].border} ${SEMAPHORE[kpiDailyStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PROD. DEL DÍA</span>
-          <div className="mt-2 text-xl font-black font-mono text-emerald-400">
+          <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
             {kpiDailyProdCount.toLocaleString()}
           </div>
-          <span className="text-[10px] text-slate-550 block mt-1 font-mono">Pares inyectados</span>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
+            Meta {totalMetaPrs.toLocaleString()} / σ {Math.round(productionStdDev)}
+          </span>
         </div>
 
         {/* Card 5: Avance Global */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
+        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiProgressStatus].border} ${SEMAPHORE[kpiProgressStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">AVANCE GLOBAL</span>
           <div className="mt-2 flex items-baseline gap-1">
-            <span className="text-2xl font-black font-mono text-pink-400">{kpiGlobalProgress}%</span>
+            <span className={`text-2xl font-black font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>{kpiGlobalProgress}%</span>
           </div>
           <div className="w-full bg-slate-950 rounded-full h-1 mt-1.5 overflow-hidden">
-            <div className="bg-pink-400 h-full transition-all duration-300" style={{ width: `${Math.min(kpiGlobalProgress, 100)}%` }} />
+            <div className="h-full transition-all duration-300" style={{ width: `${Math.min(kpiGlobalProgress, 100)}%`, backgroundColor: SEMAPHORE[kpiProgressStatus].fill }} />
           </div>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>Meta 70% / σ {Math.round(progressStdDev)}</span>
         </div>
 
         {/* Card 6: Pedidos en Riesgo */}
-        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md transition-colors ${
-          kpiOrdersInRiskCount > 0 ? 'border-red-900/60 bg-red-950/20' : 'border-slate-800'
-        }`}>
+        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md transition-colors ${SEMAPHORE[kpiRiskStatus].border} ${SEMAPHORE[kpiRiskStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PEDIDOS EN RIESGO</span>
-          <div className="mt-2 text-2xl font-black font-mono text-red-500">
+          <div className={`mt-2 text-2xl font-black font-mono ${SEMAPHORE[kpiRiskStatus].text}`}>
             {kpiOrdersInRiskCount}
           </div>
-          <span className={`text-[10px] block mt-1 font-mono ${kpiOrdersInRiskCount > 0 ? 'text-red-400' : 'text-slate-550'}`}>
-            {kpiOrdersInRiskCount > 0 ? '¡Próximas demoras!' : 'Cero rezago'}
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiRiskStatus].text}`}>
+            Meta 0 / σ {riskStdDev.toFixed(1)}
           </span>
         </div>
 
         {/* Card 7: Porcentaje Defectivo */}
-        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${
-          kpiDefectivePct > 3 ? 'border-amber-900 bg-amber-950/10' : 'border-slate-800'
-        }`}>
+        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiDefectStatus].border} ${SEMAPHORE[kpiDefectStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">DEFECTIVO GBL</span>
-          <div className="mt-2 text-xl font-black font-mono text-amber-500">
+          <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiDefectStatus].text}`}>
             {kpiDefectivePct}%
           </div>
-          <span className="text-[10px] text-slate-550 block mt-1 font-mono">Margen Tolerancia: 3%</span>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDefectStatus].text}`}>Meta máx 3% / σ {defectStdDev.toFixed(1)}</span>
         </div>
 
         {/* Card 8: Cumplimiento Meta */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
+        <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiComplianceStatus].border} ${SEMAPHORE[kpiComplianceStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">EFICIENCIA META</span>
-          <div className="mt-2 text-xl font-black font-mono text-teal-400">
+          <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>
             {kpiMetaCompliance}%
           </div>
-          <span className="text-[10px] text-slate-550 block mt-1 font-mono">Contra plan de planta</span>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>Meta 100% / σ {complianceStdDev.toFixed(1)}</span>
         </div>
       </div>
 
-      {/* 4. Second Section: Pipeline horizontal por etapa + Panel derecho de alertas */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+      {/* 5. Second Section: Pipeline horizontal por etapa + Panel derecho de alertas */}
+      <div className="order-1 grid grid-cols-1 lg:grid-cols-12 gap-6">
         
         {/* Pipeline Horizontal (WIP Flow) */}
         <div className="lg:col-span-8 flex flex-col justify-between bg-slate-900 border border-slate-800 p-5 rounded-lg shadow-xl">
@@ -608,24 +696,20 @@ export const DashboardEjecutivoView: React.FC = () => {
             </div>
 
             {/* Stage Cards Layout */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-2">
+            <div className="flex gap-3 overflow-x-auto pb-2">
               {pipelineStages.map((st, sidx) => {
                 const isCritical = st.saturation === 'CRITICO';
                 const isSaturated = st.saturation === 'SATURADO';
                 return (
                   <div 
                     key={st.id} 
-                    className={`relative p-3 rounded-lg border flex flex-col justify-between bg-slate-950/60 ${
+                    className={`relative p-3 rounded-lg border flex flex-col justify-between bg-slate-950/60 min-w-[150px] ${
                       isCritical ? 'border-red-900/80 bg-red-950/10' :
                       isSaturated ? 'border-amber-900/60 bg-amber-955/10' :
                       'border-slate-850'
                     }`}
                   >
                     {/* Directional arrow between stages (except last) */}
-                    {sidx < pipelineStages.length - 1 && (
-                      <div className="hidden lg:block absolute -right-1.5 top-1/2 -translate-y-1/2 z-10 text-slate-700 font-bold">&rarr;</div>
-                    )}
-
                     {/* Stage Name */}
                     <div>
                       <div className="flex items-center justify-between gap-1">
@@ -723,31 +807,40 @@ export const DashboardEjecutivoView: React.FC = () => {
 
       </div>
 
-      {/* 5. Gráficas Inferiores */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+      {/* 4. Gráficas */}
+      <div className="order-0 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         
         {/* Chart 1: Producción por hora */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg">
+        <div className="md:col-span-2 xl:col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[300px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Activity className="w-3.5 h-3.5" />
               PRODUCCIÓN HORARIA
             </h4>
-            <p className="text-[9px] text-slate-500 font-sans mt-1">Real acumulada en ventanas de turno activo</p>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">24 horas. Verde meta, amarillo bajo 1σ, rojo bajo 1σ+</p>
           </div>
-          <div className="h-28 mt-4 flex items-end justify-between gap-1 pt-4">
+          <div className="h-52 mt-4 flex items-end justify-between gap-1 pt-5">
             {finalHourlyData.map((d, i) => {
-              const maxVal = Math.max(...finalHourlyData.map(item => item.value), 1);
+              const maxVal = Math.max(...finalHourlyData.map(item => Math.max(item.value, item.target)), 1);
               const pct = (d.value / maxVal) * 100;
+              const targetPct = d.target > 0 ? (d.target / maxVal) * 100 : 0;
               return (
-                <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative" title={`${d.value} pares`}>
+                <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative" title={`${d.value} pares / meta ${d.target}`}>
                   <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-slate-950 border border-slate-800 text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-cyan-400 whitespace-nowrap">
-                    {d.value.toLocaleString()} prs
+                    {d.value.toLocaleString()} / {d.target.toLocaleString()} prs
                   </div>
-                  <div 
-                    className="w-full bg-cyan-500 rounded-t-sm hover:bg-cyan-400 hover:shadow-cyan-500/30 hover:shadow-md transition-all duration-300" 
-                    style={{ height: `${pct}%` }} 
-                  />
+                  <div className="w-full h-full flex items-end relative">
+                    {d.target > 0 && (
+                      <span
+                        className="absolute left-0 right-0 border-t border-dashed border-slate-500/80"
+                        style={{ bottom: `${targetPct}%` }}
+                      />
+                    )}
+                    <div
+                      className="w-full rounded-t-sm hover:shadow-md transition-all duration-300"
+                      style={{ height: `${Math.max(pct, d.value > 0 ? 3 : 1)}%`, backgroundColor: d.target > 0 ? d.color : '#cbd5e1' }}
+                    />
+                  </div>
                   <span className="text-[8px] font-mono text-slate-550 mt-1">{d.label.split(':')[0]}h</span>
                 </div>
               );
@@ -756,15 +849,15 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 2: Pares por etapa */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Layers className="w-3.5 h-3.5" />
               PARES POR ETAPA
             </h4>
-            <p className="text-[9px] text-slate-500 font-sans mt-1">Inventario activo en circulación WIP</p>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">Color por saturación de WIP y tiempo en etapa</p>
           </div>
-          <div className="h-28 mt-4 flex items-end justify-between gap-1 pt-4">
+          <div className="h-40 mt-4 flex items-end justify-between gap-1.5 pt-5">
             {stageParesChartData.map((d, i) => {
               const maxVal = Math.max(...stageParesChartData.map(item => item.value), 1);
               const pct = (d.value / maxVal) * 100;
@@ -774,8 +867,8 @@ export const DashboardEjecutivoView: React.FC = () => {
                     {d.value.toLocaleString()} prs
                   </div>
                   <div 
-                    className="w-full bg-indigo-500 rounded-t-sm hover:bg-indigo-400 transition-all duration-300" 
-                    style={{ height: `${pct}%` }} 
+                    className="w-full rounded-t-sm transition-all duration-300" 
+                    style={{ height: `${pct}%`, backgroundColor: d.color }} 
                   />
                   <span className="text-[8px] font-mono text-slate-550 mt-1 truncate w-full text-center">{d.label}</span>
                 </div>
@@ -785,7 +878,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 3: Top 5 modelos */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Briefcase className="w-3.5 h-3.5" />
@@ -793,14 +886,14 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Volumen total de pares solicitados</p>
           </div>
-          <div className="space-y-2 mt-3 overflow-y-auto max-h-32 grow flex flex-col justify-center">
+          <div className="space-y-3 mt-3 grow flex flex-col justify-center">
             {top5ModelsData.map((item, id) => {
               const totalSum = top5ModelsData.reduce((acc, current) => acc + current.value, 0);
               const pct = totalSum > 0 ? (item.value / totalSum) * 100 : 0;
               return (
                 <div key={id} className="text-[10px] font-mono space-y-0.5">
                   <div className="flex justify-between text-slate-350">
-                    <span className="truncate pr-1 block max-w-[100px]">{item.label}</span>
+                    <span className="truncate pr-1 block max-w-[170px]">{item.label}</span>
                     <span className="font-bold">{item.value.toLocaleString()} prs</span>
                   </div>
                   <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
@@ -813,7 +906,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 4: Defectos (Pareto) */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-pink-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <AlertTriangle className="w-3.5 h-3.5" />
@@ -821,7 +914,7 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Defectos de soplado e inyección</p>
           </div>
-          <div className="space-y-2 mt-3 overflow-y-auto max-h-32 grow flex flex-col justify-center">
+          <div className="space-y-3 mt-3 grow flex flex-col justify-center">
             {paretoDefectData.length > 0 ? (
               paretoDefectData.map((item, id) => {
                 const totalSum = paretoDefectData.reduce((acc, current) => acc + current.value, 0);
@@ -829,7 +922,7 @@ export const DashboardEjecutivoView: React.FC = () => {
                 return (
                   <div key={id} className="text-[10px] font-mono space-y-0.5">
                     <div className="flex justify-between text-slate-350">
-                      <span className="truncate pr-1 block max-w-[100px] text-red-400">{item.label}</span>
+                      <span className="truncate pr-1 block max-w-[170px] text-red-400">{item.label}</span>
                       <span className="font-bold">{item.value.toLocaleString()} fll</span>
                     </div>
                     <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
@@ -845,7 +938,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 5: Pedidos por estatus */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Activity className="w-3.5 h-3.5" />
@@ -853,7 +946,7 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Distribución de contratos activos</p>
           </div>
-          <div className="space-y-2.5 mt-3 overflow-y-auto max-h-32 grow flex flex-col justify-center">
+          <div className="space-y-3 mt-3 grow flex flex-col justify-center">
             {orderStatusData.map((os, i) => {
               const totalSum = orderStatusData.reduce((acc, cur) => acc + cur.value, 0);
               const pct = totalSum > 0 ? (os.value / totalSum) * 100 : 0;
@@ -870,10 +963,95 @@ export const DashboardEjecutivoView: React.FC = () => {
           </div>
         </div>
 
+        {/* Chart 6: Estados de producción */}
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+          <div>
+            <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
+              <ShieldCheck className="w-3.5 h-3.5" />
+              ESTADOS PRODUCCIÓN
+            </h4>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">Lotes activos por estado operativo</p>
+          </div>
+          <div className="space-y-3 mt-4 grow flex flex-col justify-center">
+            {productionStatusData.map((item) => {
+              const total = productionStatusData.reduce((sum, current) => sum + current.value, 0);
+              const pct = total > 0 ? (item.value / total) * 100 : 0;
+              return (
+                <div key={item.label} className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="flex items-center gap-2 text-slate-400">
+                      <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: item.color }} />
+                      {item.label}
+                    </span>
+                    <span className="font-bold text-slate-200">{item.value} lotes</span>
+                  </div>
+                  <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden">
+                    <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: item.color }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Chart 7: Cumplimiento por turno */}
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+          <div>
+            <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
+              <Clock className="w-3.5 h-3.5" />
+              CUMPLIMIENTO POR TURNO
+            </h4>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">Real contra meta, clasificado con desviación estándar</p>
+          </div>
+          <div className="h-40 mt-4 flex items-end justify-between gap-4 pt-5">
+            {shiftComplianceData.map((d) => {
+              const pct = Math.min(d.value, 120);
+              return (
+                <div key={d.label} className="flex-1 h-full flex flex-col justify-end items-center group relative">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-slate-950 border border-slate-800 text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition z-20 pointer-events-none text-cyan-400 whitespace-nowrap">
+                    {d.real.toLocaleString()} / {d.target.toLocaleString()} prs
+                  </div>
+                  <div className="w-full rounded-t-sm transition" style={{ height: `${pct / 1.2}%`, backgroundColor: d.color }} />
+                  <span className="text-[9px] font-mono text-slate-550 mt-2">{d.label}</span>
+                  <span className="text-[10px] font-mono font-bold" style={{ color: d.color }}>{d.value}%</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Chart 8: Calidad por área */}
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+          <div>
+            <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
+              <ShieldAlert className="w-3.5 h-3.5" />
+              DEFECTIVO POR ÁREA
+            </h4>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">Meta máxima 3%, amarillo hasta 1σ, rojo arriba</p>
+          </div>
+          <div className="space-y-5 mt-4 grow flex flex-col justify-center">
+            {qualityAreaData.map((d) => (
+              <div key={d.label} className="space-y-1">
+                <div className="flex items-center justify-between text-[11px] font-mono">
+                  <span className="text-slate-400">{d.label}</span>
+                  <span className="font-bold" style={{ color: d.color }}>{d.value}%</span>
+                </div>
+                <div className="w-full bg-slate-950 rounded-full h-3 overflow-hidden">
+                  <div className="h-full rounded-full" style={{ width: `${Math.min(d.value * 18, 100)}%`, backgroundColor: d.color }} />
+                </div>
+                <div className="text-[9px] font-mono text-slate-550 flex justify-between">
+                  <span>{d.defectsCount.toLocaleString()} defectivos</span>
+                  <span>{d.inspected.toLocaleString()} inspeccionados</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+
       </div>
 
       {/* 6. Tabla Inferior: Top 10 Pedidos en Riesgo */}
-      <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 shadow-xl space-y-4">
+      <div className="order-2 bg-slate-900 border border-slate-800 rounded-lg p-5 shadow-xl space-y-4">
         <div className="flex justify-between items-center border-b border-slate-850 pb-2">
           <div>
             <h3 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase flex items-center gap-1.5">
@@ -1016,6 +1194,7 @@ export const PipelineLoteView: React.FC = () => {
   const [filtroFechaCompromiso, setFiltroFechaCompromiso] = useState('');
   const [filtroResponsable, setFiltroResponsable] = useState('');
   const [filtroCodigoBarras, setFiltroCodigoBarras] = useState('');
+  const [scannedLots, setScannedLots] = useState<Record<string, boolean>>({});
 
   // Local overrides states for interactive simulation
   const [rescheduledDates, setRescheduledDates] = useState<Record<string, string>>({});
@@ -1041,6 +1220,13 @@ export const PipelineLoteView: React.FC = () => {
   const tenantBatches = batches.filter(
     b => b.tenantId === currentTenant.id && b.status !== ('ARCHIVED' as any)
   );
+  const loteStages = STAGES.filter(stage => stage.id !== 'estabilizacion');
+  const normalizeLoteStage = (stage: StageId) => stage === 'estabilizacion' ? 'aduana' : stage;
+  const getLoteStageName = (stage: StageId) => loteStages.find(s => s.id === normalizeLoteStage(stage))?.name || stage.replace('_', ' ');
+  const getPreviousLoteStageName = (stage: StageId) => {
+    const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(stage));
+    return currentIdx > 0 ? loteStages[currentIdx - 1].name : 'Sin zona previa';
+  };
 
   // Clear filters handler
   const handleLimpiarFiltros = () => {
@@ -1062,7 +1248,6 @@ export const PipelineLoteView: React.FC = () => {
       case 'alta_pedido': return 5;
       case 'almacen': return 10;
       case 'inyeccion': return 30;
-      case 'estabilizacion': return 45;
       case 'aduana': return 60;
       case 'banda': return 80;
       case 'embarque': return 100;
@@ -1117,6 +1302,28 @@ export const PipelineLoteView: React.FC = () => {
     setNewOperator('');
   };
 
+  const handleScannerInput = (value: string) => {
+    setFiltroCodigoBarras(value);
+    const scannedValue = value.trim();
+    if (!scannedValue) return;
+
+    const matchedBatch = tenantBatches.find(b =>
+      b.codigoBarras === scannedValue ||
+      b.tarjetaViajera === scannedValue ||
+      b.id === scannedValue
+    );
+    if (!matchedBatch || scannedLots[matchedBatch.id]) return;
+
+    const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(matchedBatch.stage));
+    const nextStage = loteStages[currentIdx + 1]?.id;
+    setSelectedBatchId(matchedBatch.id);
+    setScannedLots(prev => ({ ...prev, [matchedBatch.id]: true }));
+    if (nextStage) {
+      moveBatchStage(matchedBatch.id, nextStage);
+      addAuditLog('PRODUCCION', 'SCAN_AUTO_ADVANCE', `Escaneo ${scannedValue} avanzó lote ${matchedBatch.id} a ${nextStage}`);
+    }
+  };
+
   // Unique lists from data for filter dropdowns
   const uniqueClientes = Array.from(new Set(tenantBatches.map(b => b.cliente || ''))).filter(Boolean);
   const uniqueModels = Array.from(new Set(tenantBatches.map(b => b.modelo || b.modelName || ''))).filter(Boolean);
@@ -1140,7 +1347,7 @@ export const PipelineLoteView: React.FC = () => {
     if (filtroLote && !b.id.toLowerCase().includes(filtroLote.toLowerCase())) return false;
     if (filtroModelo && modelVal !== filtroModelo) return false;
     if (filtroColor && b.color !== filtroColor) return false;
-    if (filtroEtapa && b.stage !== filtroEtapa) return false;
+    if (filtroEtapa && normalizeLoteStage(b.stage) !== filtroEtapa) return false;
 
     // Estatus filter: En tiempo, Alerta, Crítico, Detenido, Embarcado
     if (filtroEstatus) {
@@ -1148,7 +1355,7 @@ export const PipelineLoteView: React.FC = () => {
       if (filtroEstatus === 'Alerta' && currentStatus !== 'ALERTA') return false;
       if (filtroEstatus === 'Crítico' && currentStatus !== 'CRITICO') return false;
       if (filtroEstatus === 'Detenido' && currentStatus !== 'DETENIDO') return false;
-      if (filtroEstatus === 'Embarcado' && b.stage !== 'embarque') return false;
+      if (filtroEstatus === 'Entregado' && b.stage !== 'embarque') return false;
     }
 
     if (filtroFechaCompromiso && !currentFechaCompromiso.includes(filtroFechaCompromiso)) return false;
@@ -1161,25 +1368,29 @@ export const PipelineLoteView: React.FC = () => {
   // KPI Calculations responsive to filters
   const lotesActivos = filteredBatches.filter(b => b.stage !== 'embarque').length;
   const paresActivos = filteredBatches.filter(b => b.stage !== 'embarque').reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
-  const activeWithTime = filteredBatches.filter(b => b.stage !== 'embarque' && b.tiempoEnEtapaMinutos);
-  const promedioTiempoMinutos = activeWithTime.length > 0 
-    ? Math.round(activeWithTime.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0) / activeWithTime.length) 
-    : 1680; // standard fallback
-
-  const lotesEnRiesgo = filteredBatches.filter(b => b.status === 'CRITICO' && b.stage !== 'embarque').length;
-  const lotesDetenidos = filteredBatches.filter(b => b.status === 'DETENIDO').length;
-  const lotesEmbarcadosHoy = filteredBatches.filter(b => b.stage === 'embarque').length;
+  const baseDateAnchor = new Date('2026-05-25');
+  const lotesVencidos = filteredBatches.filter(b => {
+    const commitment = b.fechaCompromiso ? new Date(b.fechaCompromiso) : null;
+    return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && b.stage !== 'embarque';
+  }).length;
+  const paresVencidos = filteredBatches
+    .filter(b => {
+      const commitment = b.fechaCompromiso ? new Date(b.fechaCompromiso) : null;
+      return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && b.stage !== 'embarque';
+    })
+    .reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
+  const lotesEmbarcadosHoy = filteredBatches.filter(b => b.stage === 'embarque' && (b.lastUpdate || b.ultimoEscaneo || '').startsWith('2026-05-25')).length;
 
   // Bottleneck Stage calculation
-  const stageStatsMap = STAGES.filter(s => s.id !== 'embarque').map(st => {
-    const stBatches = filteredBatches.filter(b => b.stage === st.id);
+  const stageStatsMap = loteStages.filter(s => s.id !== 'embarque').map(st => {
+    const stBatches = filteredBatches.filter(b => normalizeLoteStage(b.stage) === st.id);
     const avgDuration = stBatches.length > 0
       ? stBatches.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0) / stBatches.length
       : 0;
-    return { id: st.id, name: st.name, avgDuration, count: stBatches.length };
+    return { id: st.id, name: st.name, avgDuration, count: stBatches.length, score: avgDuration + (stBatches.length * 180) };
   });
-  const maxStageDuration = stageStatsMap.reduce((max, cur) => cur.avgDuration > max.avgDuration ? cur : max, { id: '', name: 'Ninguno', avgDuration: 0, count: 0 });
-  const bottleneckActual = maxStageDuration.avgDuration > 0 ? maxStageDuration.name : 'Ninguno';
+  const maxStageDuration = stageStatsMap.reduce((max, cur) => cur.score > max.score ? cur : max, { id: '', name: 'Ninguno', avgDuration: 0, count: 0, score: 0 });
+  const bottleneckActual = maxStageDuration.score > 0 ? maxStageDuration.name : 'Ninguno';
 
   // Automatically select first filtered batch as default
   const defaultSelectedBatch = filteredBatches[0] || null;
@@ -1233,17 +1444,17 @@ export const PipelineLoteView: React.FC = () => {
     const batch = batches.find(b => b.id === batchId);
     if (!batch) return;
 
-    const currentIdx = STAGES.findIndex(s => s.id === batch.stage);
+    const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(batch.stage));
     let targetStageIdx = currentIdx;
 
-    if (direction === 'NEXT' && currentIdx < STAGES.length - 1) {
+    if (direction === 'NEXT' && currentIdx < loteStages.length - 1) {
       targetStageIdx += 1;
     } else if (direction === 'PREV' && currentIdx > 0) {
       targetStageIdx -= 1;
     }
 
     if (targetStageIdx !== currentIdx) {
-      const nextStageId = STAGES[targetStageIdx].id;
+      const nextStageId = loteStages[targetStageIdx].id;
       moveBatchStage(batchId, nextStageId);
     }
   };
@@ -1358,7 +1569,7 @@ export const PipelineLoteView: React.FC = () => {
                 type="text"
                 placeholder="Escribe o escanea código (Ej: 7500123...)"
                 value={filtroCodigoBarras}
-                onChange={(e) => setFiltroCodigoBarras(e.target.value)}
+                onChange={(e) => handleScannerInput(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
               />
             </div>
@@ -1454,7 +1665,7 @@ export const PipelineLoteView: React.FC = () => {
               className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-200 focus:outline-none"
             >
               <option value="">-- Todas --</option>
-              {STAGES.map(st => (
+              {loteStages.map(st => (
                 <option key={st.id} value={st.id}>{st.name}</option>
               ))}
             </select>
@@ -1475,7 +1686,7 @@ export const PipelineLoteView: React.FC = () => {
               <option value="Alerta">🟡 Alerta</option>
               <option value="Crítico">🔴 Crítico</option>
               <option value="Detenido">⚪ Detenido</option>
-              <option value="Embarcado">🔵 Embarcado</option>
+              <option value="Entregado">🟢 Entregado</option>
             </select>
           </div>
 
@@ -1519,7 +1730,7 @@ export const PipelineLoteView: React.FC = () => {
       </div>
 
       {/* KPI CARDS SUPERIORES */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-6 gap-4">
         <div className="p-4 bg-slate-950/80 border border-slate-900/60 rounded-xl space-y-1.5 shadow-md">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block">
             Lotes Activos
@@ -1540,44 +1751,34 @@ export const PipelineLoteView: React.FC = () => {
           <span className="text-[9px] font-mono text-slate-450 block">Suelas cargadas</span>
         </div>
 
-        <div className="p-4 bg-slate-950/80 border border-slate-900/60 rounded-xl space-y-1.5 shadow-md">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block">
-            Tiempo Promedio
+        <div className="p-4 bg-rose-950/10 border border-rose-950/40 rounded-xl space-y-1.5 shadow-md">
+          <span className="text-[10px] font-mono font-bold text-rose-400 uppercase tracking-widest block">
+            Lotes Vencidos
           </span>
-          <div className="text-2xl font-black font-mono text-yellow-500">
-            {formatEtapaTime(promedioTiempoMinutos)}
+          <div className="text-2xl font-black font-mono text-rose-400">
+            {lotesVencidos}
           </div>
-          <span className="text-[9px] font-mono text-slate-450 block">Por etapa operativa</span>
+          <span className="text-[9px] font-mono text-rose-500 block">Fuera de compromiso</span>
         </div>
 
-        <div className="p-4 bg-slate-905 border border-slate-900/60 rounded-xl space-y-1.5 shadow-md">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block">
-            En Riesgo (Crit.)
+        <div className="p-4 bg-rose-950/10 border border-rose-950/40 rounded-xl space-y-1.5 shadow-md">
+          <span className="text-[10px] font-mono font-bold text-rose-400 uppercase tracking-widest block">
+            Pares Vencidos
           </span>
-          <div className="text-2xl font-black font-mono text-rose-500">
-            {lotesEnRiesgo}
+          <div className="text-2xl font-black font-mono text-rose-400">
+            {paresVencidos.toLocaleString('es-MX')}
           </div>
-          <span className="text-[9px] font-mono text-rose-455 block">Requieren atención</span>
-        </div>
-
-        <div className="p-4 bg-slate-955 border border-slate-909 rounded-xl space-y-1.5 shadow-md">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block">
-            Lotes Detenidos
-          </span>
-          <div className="text-2xl font-black font-mono text-slate-400">
-            {lotesDetenidos}
-          </div>
-          <span className="text-[9px] font-mono text-slate-450 block">Por merma / soplado</span>
+          <span className="text-[9px] font-mono text-rose-500 block">Pendientes</span>
         </div>
 
         <div className="p-4 bg-slate-950/80 border border-slate-900/60 rounded-xl space-y-1.5 shadow-md">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block">
-            Embarcados Hoy
+            Entregados Hoy
           </span>
           <div className="text-2xl font-black font-mono text-emerald-400">
             {lotesEmbarcadosHoy}
           </div>
-          <span className="text-[9px] font-mono text-slate-450 block">Listos para traslado</span>
+          <span className="text-[9px] font-mono text-slate-450 block">Llegaron a embarque hoy</span>
         </div>
 
         <div className="p-4 bg-amber-950/15 border border-amber-950/40 rounded-xl space-y-1.5 shadow-md col-span-2 sm:col-span-1">
@@ -1598,8 +1799,8 @@ export const PipelineLoteView: React.FC = () => {
         <div className="xl:col-span-3 space-y-3">
           
           <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin snap-x">
-            {STAGES.map(stage => {
-              const colBatches = filteredBatches.filter(b => b.stage === stage.id);
+            {loteStages.map(stage => {
+              const colBatches = filteredBatches.filter(b => normalizeLoteStage(b.stage) === stage.id);
               const colParesCount = colBatches.reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
               const totalStageTime = colBatches.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0);
               const avgStageTime = colBatches.length > 0 ? Math.round(totalStageTime / colBatches.length) : 0;
@@ -1621,7 +1822,6 @@ export const PipelineLoteView: React.FC = () => {
                           stage.id === 'alta_pedido' ? 'bg-blue-500' :
                           stage.id === 'almacen' ? 'bg-slate-400' :
                           stage.id === 'inyeccion' ? 'bg-amber-500' :
-                          stage.id === 'estabilizacion' ? 'bg-purple-500' :
                           stage.id === 'aduana' ? 'bg-rose-500' :
                           stage.id === 'banda' ? 'bg-indigo-500' : 'bg-emerald-500'
                         }`}></span>
@@ -1660,10 +1860,7 @@ export const PipelineLoteView: React.FC = () => {
                     ) : (
                       colBatches.map(b => {
                         const isSelected = selectedBatch?.id === b.id;
-                        const finalRep = b.responsableActual || b.operatorId || 'Téc. Operador';
                         const timeInEstacion = formatEtapaTime(b.tiempoEnEtapaMinutos);
-                        const progress = getStageProgress(b.stage);
-                        const batchEstatus = b.stage === 'embarque' ? 'Embarcado' : b.status || 'OPTIMO';
 
                         // Overrides lookup
                         const computedFechaCompromiso = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '2026-06-03';
@@ -1673,8 +1870,8 @@ export const PipelineLoteView: React.FC = () => {
                         let statusText = "En tiempo";
 
                         if (b.stage === 'embarque') {
-                          statusColorClasses = "border-sky-700/60 bg-sky-950/20 text-sky-400";
-                          statusText = "Embarcado";
+                          statusColorClasses = "border-emerald-700/60 bg-emerald-950/20 text-emerald-400";
+                          statusText = "Entregado";
                         } else if (b.status === 'DETENIDO') {
                           statusColorClasses = "border-slate-700 bg-slate-900/40 text-slate-400";
                           statusText = "Detenido";
@@ -1725,23 +1922,6 @@ export const PipelineLoteView: React.FC = () => {
                               </div>
                             </div>
 
-                            {/* Micro progress bar for stage status */}
-                            <div className="space-y-1">
-                              <div className="flex justify-between text-[9px] font-mono text-slate-500 leading-none">
-                                <span>Avance</span>
-                                <span className="text-cyan-400 font-bold">{progress}%</span>
-                              </div>
-                              <div className="w-full h-1.5 bg-slate-955 rounded-full overflow-hidden">
-                                <div 
-                                  className={`h-full rounded-full ${
-                                    statusText === 'Crítico' ? 'bg-rose-500' :
-                                    statusText === 'Alerta' ? 'bg-amber-500' : 'bg-cyan-500'
-                                  }`}
-                                  style={{ width: `${progress}%` }}
-                                ></div>
-                              </div>
-                            </div>
-
                             {/* Time/Pares and Commitment date block */}
                             <div className="flex justify-between items-center text-[10px] font-mono border-t border-slate-900/85 pt-2 text-slate-400">
                               <div className="flex items-center gap-1">
@@ -1751,34 +1931,6 @@ export const PipelineLoteView: React.FC = () => {
                               <div className="text-right">
                                 <span className="text-slate-500 font-bold block text-[8px] uppercase leading-none mb-0.5">COMPROMISO</span>
                                 <span className="text-slate-300 text-[9px] font-semibold">{computedFechaCompromiso}</span>
-                              </div>
-                            </div>
-
-                            {/* Responsable & Drag Action Controls */}
-                            <div className="flex justify-between items-center border-t border-slate-900/40 pt-2 text-[10px] font-mono">
-                              <span className="text-slate-500 truncate max-w-[110px]" title={finalRep}>
-                                👤 {finalRep}
-                              </span>
-
-                              {/* Stage Transition Shifters (Drag Simulation Sim.) */}
-                              <div className="flex gap-1.5" onClick={(e) => e.stopPropagation()}>
-                                <button 
-                                  onClick={() => handleMoveStageStep(b.id, 'PREV')}
-                                  disabled={b.stage === 'alta_pedido'}
-                                  className="p-1 bg-slate-950 border border-slate-900 hover:border-slate-850 rounded text-slate-500 hover:text-white disabled:opacity-40 disabled:hover:border-slate-900 transition"
-                                  title="Mover a etapa anterior"
-                                >
-                                  <ChevronLeft className="w-3.5 h-3.5" />
-                                </button>
-                                <span className="text-[8px] text-slate-600 self-center uppercase font-bold px-1 bg-slate-950 border border-slate-900 rounded select-none">Mover</span>
-                                <button 
-                                  onClick={() => handleMoveStageStep(b.id, 'NEXT')}
-                                  disabled={b.stage === 'embarque'}
-                                  className="p-1 bg-slate-950 border border-slate-900 hover:border-slate-850 rounded text-slate-500 hover:text-white disabled:opacity-40 disabled:hover:border-slate-900 transition"
-                                  title="Mover a etapa siguiente"
-                                >
-                                  <ChevronRight className="w-3.5 h-3.5" />
-                                </button>
                               </div>
                             </div>
 
@@ -1895,7 +2047,7 @@ export const PipelineLoteView: React.FC = () => {
                     <div className="space-y-1.5">
                       <div className="flex justify-between">
                         <span className="text-slate-500">Estación Actual:</span>
-                        <span className="text-slate-300 capitalize">{selectedBatch.stage.replace('_', ' ')}</span>
+                        <span className="text-slate-300 capitalize">{getLoteStageName(selectedBatch.stage)}</span>
                       </div>
                       <div className="w-full h-1 bg-slate-950 rounded overflow-hidden">
                         <div className="h-full bg-cyan-500" style={{ width: `${getStageProgress(selectedBatch.stage)}%` }}></div>
@@ -1913,8 +2065,8 @@ export const PipelineLoteView: React.FC = () => {
                     {/* Vertical line indicator */}
                     <div className="absolute top-4 bottom-4 left-3 border-l border-slate-800 border-dashed"></div>
 
-                    {STAGES.map((st, sIdx) => {
-                      const currentIdx = STAGES.findIndex(s => s.id === selectedBatch.stage);
+                    {loteStages.map((st, sIdx) => {
+                      const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(selectedBatch.stage));
                       const isPast = sIdx < currentIdx;
                       const isCurrent = sIdx === currentIdx;
 
@@ -2065,9 +2217,9 @@ export const PipelineLoteView: React.FC = () => {
                 <th className="p-3">Modelo</th>
                 <th className="p-3">Color</th>
                 <th className="p-3 text-right">Total Pares</th>
-                <th className="p-3 bg-slate-900/20">Etapa Actual</th>
+                <th className="p-3">Zona Previa</th>
+                <th className="p-3 bg-slate-900/20">Zona Actual</th>
                 <th className="p-3 text-right">Pares en Etapa</th>
-                <th className="p-3 text-center">% Avance</th>
                 <th className="p-3">Tiempo Etapa</th>
                 <th className="p-3">Fecha Compromiso</th>
                 <th className="p-3 text-center">Estatus</th>
@@ -2093,8 +2245,8 @@ export const PipelineLoteView: React.FC = () => {
                   let statusText = "En tiempo";
                   let statClass = "bg-emerald-950/50 text-emerald-400 border border-emerald-900";
                   if (b.stage === 'embarque') {
-                    statusText = "Embarcado";
-                    statClass = "bg-sky-950/50 text-sky-400 border border-sky-900";
+                    statusText = "Entregado";
+                    statClass = "bg-emerald-950/50 text-emerald-400 border border-emerald-900";
                   } else if (currentStatus === 'DETENIDO') {
                     statusText = "Detenido";
                     statClass = "bg-slate-900/50 text-slate-400 border border-slate-850";
@@ -2121,11 +2273,9 @@ export const PipelineLoteView: React.FC = () => {
                       <td className="p-3 text-slate-200">{displayModel}</td>
                       <td className="p-3 text-slate-300">{b.color}</td>
                       <td className="p-3 text-right font-bold">{(b.totalPares || b.quantityShoes || 0).toLocaleString('es-MX')}</td>
-                      <td className="p-3 bg-slate-900/20 text-slate-300 uppercase font-bold text-[9px]">{b.stage.replace('_', ' ')}</td>
+                      <td className="p-3 text-slate-500 uppercase font-bold text-[9px]">{getPreviousLoteStageName(b.stage)}</td>
+                      <td className="p-3 bg-slate-900/20 text-slate-300 uppercase font-bold text-[9px]">{getLoteStageName(b.stage)}</td>
                       <td className="p-3 text-right font-medium">{(b.paresEnEtapa || b.totalPares || b.quantityShoes || 0).toLocaleString('es-MX')}</td>
-                      <td className="p-3 text-center">
-                        <span className="text-cyan-400 font-bold">{getStageProgress(b.stage)}%</span>
-                      </td>
                       <td className="p-3 text-slate-400">{formatEtapaTime(b.tiempoEnEtapaMinutos)}</td>
                       <td className="p-3 text-slate-400">{displayFecha}</td>
                       <td className="p-3 text-center">
@@ -2156,7 +2306,7 @@ export const PipelineLoteView: React.FC = () => {
 
             <form onSubmit={handleCreateBatch} className="space-y-4 text-xs">
               <div className="space-y-1">
-                <label className="text-slate-400 block font-mono">Folio del Lote (Etiqueta de Inyectora):</label>
+                <label className="text-slate-400 block font-mono">Lote / Tarjeta Viajera:</label>
                 <input 
                   type="text" 
                   value={newBatchId}
@@ -2870,8 +3020,6 @@ export const PipelinePedidoView: React.FC = () => {
     ? Math.round(filteredOrders.reduce((sum, o) => sum + o.progress, 0) / filteredOrders.length)
     : 0;
 
-  const ordersInRiskCount = filteredOrders.filter(o => o.risk === 'ROJO').length;
-
   // Overdue count: past commitment date & not fully shipped/completed
   const baseDateAnchor = new Date('2026-05-25');
   const overdueOrdersCount = filteredOrders.filter(o => {
@@ -2923,7 +3071,7 @@ export const PipelinePedidoView: React.FC = () => {
     'Estabilización': o.pairsByStage['estabilizacion'] || 0,
     'Aduana': o.pairsByStage['aduana'] || 0,
     'Banda': o.pairsByStage['banda'] || 0,
-    'Embarque': o.pairsByStage['embarque'] || 0,
+    'Entrega': o.pairsByStage['embarque'] || 0,
   }));
 
   // Line Chart Data: Historical progress simulation
@@ -2954,13 +3102,13 @@ export const PipelinePedidoView: React.FC = () => {
 
   // Generate dynamic array data of pairs per stage for selected order for D3 rendering
   const selectedStagesArray = activeSelectedOrder ? [
-    { name: 'Alta Pedido', value: activeSelectedOrder.pairsByStage['alta_pedido'] || 0, color: '#3b82f6' },
-    { name: 'Almacén', value: activeSelectedOrder.pairsByStage['almacen'] || 0, color: '#64748b' },
-    { name: 'Inyección', value: activeSelectedOrder.pairsByStage['inyeccion'] || 0, color: '#f59e0b' },
-    { name: 'Estabilización', value: activeSelectedOrder.pairsByStage['estabilizacion'] || 0, color: '#a855f7' },
-    { name: 'Aduana', value: activeSelectedOrder.pairsByStage['aduana'] || 0, color: '#f43f5e' },
+    { name: 'Entrega', value: activeSelectedOrder.pairsByStage['embarque'] || 0, color: '#10b981' },
     { name: 'Banda', value: activeSelectedOrder.pairsByStage['banda'] || 0, color: '#6366f1' },
-    { name: 'Embarque', value: activeSelectedOrder.pairsByStage['embarque'] || 0, color: '#10b981' }
+    { name: 'Aduana', value: activeSelectedOrder.pairsByStage['aduana'] || 0, color: '#f43f5e' },
+    { name: 'Estabilización', value: activeSelectedOrder.pairsByStage['estabilizacion'] || 0, color: '#a855f7' },
+    { name: 'Inyección', value: activeSelectedOrder.pairsByStage['inyeccion'] || 0, color: '#f59e0b' },
+    { name: 'Almacén', value: activeSelectedOrder.pairsByStage['almacen'] || 0, color: '#64748b' },
+    { name: 'Alta Pedido', value: activeSelectedOrder.pairsByStage['alta_pedido'] || 0, color: '#3b82f6' }
   ] : [];
 
   // Lookup defects of the batches mapped to selected order
@@ -2983,7 +3131,7 @@ export const PipelinePedidoView: React.FC = () => {
             Pipeline de Pedidos Consolidado
           </h2>
           <p className="text-xs text-slate-400 font-sans">
-            Visibilidad de entrega comercial, avance ponderado de calzado EVA por etapas, riesgos e inventarios.
+            Visibilidad de entrega comercial, lotes por etapa, riesgos e inventarios.
           </p>
         </div>
 
@@ -3155,23 +3303,6 @@ export const PipelinePedidoView: React.FC = () => {
             </select>
           </div>
 
-          {/* Etapa Dominante */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-450 block">
-              Ubicación Dominante
-            </label>
-            <select
-              value={filtroEtapaDominante}
-              onChange={(e) => setFiltroEtapaDominante(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-200 focus:outline-none"
-            >
-              <option value="">-- Todas --</option>
-              {Object.entries(STAGE_NAMES).map(([key, label]) => (
-                <option key={key} value={key}>{label}</option>
-              ))}
-            </select>
-          </div>
-
         </div>
 
         <div className="flex justify-end pt-2 border-t border-slate-900">
@@ -3186,7 +3317,7 @@ export const PipelinePedidoView: React.FC = () => {
       </div>
 
       {/* 2. KPIS SUPERIORES */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-5 gap-4">
         
         <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1.5 shadow-md">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block leading-tight">
@@ -3235,27 +3366,7 @@ export const PipelinePedidoView: React.FC = () => {
           <div className="text-2xl font-black font-mono text-indigo-400 leading-none">
             {pendingBacklog.toLocaleString()}
           </div>
-          <span className="text-[9px] font-mono text-slate-500 block">Resto por fabricar</span>
-        </div>
-
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1.5 shadow-md">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block leading-tight">
-            Avance Ponderado
-          </span>
-          <div className="text-2xl font-black font-mono text-cyan-400 leading-none">
-            {avgProgress}%
-          </div>
-          <span className="text-[9px] font-mono text-slate-500 block">Promedio de pedidos</span>
-        </div>
-
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1.5 shadow-md">
-          <span className="text-[10px] font-mono font-bold text-rose-500 uppercase tracking-widest block leading-tight">
-            SLA en Riesgo
-          </span>
-          <div className="text-2xl font-black font-mono text-rose-400 leading-none">
-            {ordersInRiskCount}
-          </div>
-          <span className="text-[9px] font-mono text-rose-500 block">Retraso inminente</span>
+          <span className="text-[9px] font-mono text-slate-500 block">En proceso - entregados</span>
         </div>
 
         <div className="p-4 bg-rose-950/10 border border-rose-950/40 rounded-xl space-y-1.5 shadow-md">
@@ -3307,7 +3418,7 @@ export const PipelinePedidoView: React.FC = () => {
                   <RechartsBar dataKey="Estabilización" stackId="a" fill="#a855f7" />
                   <RechartsBar dataKey="Aduana" stackId="a" fill="#f43f5e" />
                   <RechartsBar dataKey="Banda" stackId="a" fill="#6366f1" />
-                  <RechartsBar dataKey="Embarque" stackId="a" fill="#10b981" />
+                  <RechartsBar dataKey="Entrega" stackId="a" fill="#10b981" />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
             )}
@@ -3317,10 +3428,10 @@ export const PipelinePedidoView: React.FC = () => {
         {/* Grafica Avance Histórico Simulado */}
         <div className="xl:col-span-1 bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
-            Desempeño de Avance Histórico
+            Cantidad de pares producida por día
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-tight">
-            Tendencia consolidada de cumplimiento ponderado en los últimos 15 días.
+            Pares acumulados por día en pedidos filtrados.
           </p>
           <div className="h-60">
             <RechartsResponsiveContainer width="100%" height="100%">
@@ -3364,23 +3475,6 @@ export const PipelinePedidoView: React.FC = () => {
               </div>
             </div>
 
-            {/* 2. Mayor Indice de Riesgo */}
-            <div className="space-y-2">
-              <span className="text-[10px] font-mono text-rose-450 font-bold uppercase tracking-wider block">
-                ⚠️ Mayor Riesgo por Desviación de Horas
-              </span>
-              <div className="space-y-1.5">
-                {riskIndexRanking.map((item, idx) => (
-                  <div key={idx} className="flex justify-between items-center bg-slate-900/50 px-2 py-1 rounded border border-slate-900 text-xs">
-                    <span className="font-mono text-slate-300 font-bold">{item.name}</span>
-                    <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded font-mono ${
-                      item.label === 'ROJO' ? 'bg-rose-950 text-rose-400 border border-rose-800' :
-                      item.label === 'AMARILLO' ? 'bg-amber-950 text-amber-500 border border-amber-800' : 'bg-emerald-950 text-green-400'
-                    }`}>{item.label === 'ROJO' ? 'CRÍTICO' : item.label === 'AMARILLO' ? 'ALERTA' : 'ÓPTIMO'}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
           </div>
         </div>
 
@@ -3423,9 +3517,6 @@ export const PipelinePedidoView: React.FC = () => {
                     <th className="py-3 px-2 min-w-[65px] text-center text-rose-450 font-extrabold bg-rose-950/10">Adu.</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-indigo-400 font-extrabold bg-indigo-950/10">Bnd.</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-emerald-400 font-extrabold bg-emerald-950/10">Emb.</th>
-                    <th className="py-3 px-3 min-w-[110px] text-center font-bold">% Avance</th>
-                    <th className="py-3 px-3 min-w-[110px] font-bold">Tiempo Prom.</th>
-                    <th className="py-3 px-3 min-w-[110px] font-bold">Etapa Dom.</th>
                     <th className="py-3 px-3 min-w-[95px] font-bold">Estatus</th>
                     <th className="py-3 px-3 min-w-[105px] font-bold">Riesgo</th>
                   </tr>
@@ -3433,7 +3524,7 @@ export const PipelinePedidoView: React.FC = () => {
                 <tbody className="divide-y divide-slate-900 text-[11px] font-mono">
                   {filteredOrders.length === 0 ? (
                     <tr>
-                      <td colSpan={18} className="py-12 text-center text-slate-500 text-xs">
+                      <td colSpan={15} className="py-12 text-center text-slate-500 text-xs">
                         ⚠️ No se encontraron pedidos con los criterios ingresados.
                       </td>
                     </tr>
@@ -3479,23 +3570,6 @@ export const PipelinePedidoView: React.FC = () => {
                           <td className="py-3 px-2 text-center text-indigo-300 bg-indigo-950/5">{(o.pairsByStage['banda'] || 0).toLocaleString()}</td>
                           <td className="py-3 px-2 text-center text-emerald-400 bg-emerald-950/5">{(o.pairsByStage['embarque'] || 0).toLocaleString()}</td>
                           
-                          {/* Avance Ponderado percentage */}
-                          <td className="py-3 px-3">
-                            <div className="flex flex-col justify-center items-center gap-1">
-                              <span className="font-extrabold text-cyan-400">{o.progress}%</span>
-                              <div className="w-16 h-1.5 bg-slate-900 rounded-full overflow-hidden">
-                                <div 
-                                  className={`h-full rounded-full ${o.progress >= 100 ? 'bg-emerald-500' : 'bg-cyan-500'}`}
-                                  style={{ width: `${o.progress}%` }}
-                                ></div>
-                              </div>
-                            </div>
-                          </td>
-
-                          <td className="py-3 px-3 text-slate-400">{formatTimeMinutes(o.avgTimeMin)}</td>
-                          <td className="py-3 px-3 text-slate-300 font-bold text-[10px] truncate max-w-[90px]" title={STAGE_NAMES[o.dominantStage] || o.dominantStage}>
-                            {STAGE_NAMES[o.dominantStage] || o.dominantStage}
-                          </td>
                           <td className="py-3 px-3">
                             <span className="px-1.5 py-0.5 rounded-md uppercase font-black text-[9px] bg-slate-900 text-slate-300 border border-slate-800">
                               {o.status}
@@ -3517,10 +3591,7 @@ export const PipelinePedidoView: React.FC = () => {
           </div>
 
           <div className="pt-4 flex justify-between items-center text-xs text-slate-500 font-mono border-t border-slate-900 mt-4">
-            <span>Formula: Avance = sum(Pares × Peso_Etapa) / Total Pares</span>
-            <div className="flex gap-2">
-              <span className="bg-slate-900 px-2 py-1 rounded text-slate-400 border border-slate-850">Pesos: Alta (5) Alm (10) Iny (30) Est (45) Adu (60) Banda (80) Emb (100)</span>
-            </div>
+            <span>Vista conserva riesgo por pedido y pares por etapa.</span>
           </div>
 
         </div>
@@ -3566,8 +3637,8 @@ export const PipelinePedidoView: React.FC = () => {
                       <strong className="text-slate-100 truncate max-w-[130px] font-sans" title={activeSelectedOrder.cliente || activeSelectedOrder.clientName}>{activeSelectedOrder.cliente || activeSelectedOrder.clientName}</strong>
                     </div>
                     <div className="flex justify-between text-slate-350">
-                      <span>Total Piezas (Prs):</span>
-                      <strong className="text-cyan-400 font-mono font-black">{activeSelectedOrder.totalPares.toLocaleString()}</strong>
+                      <span>Pares Entregados:</span>
+                      <strong className="text-emerald-400 font-mono font-black">{activeSelectedOrder.shippedPairs.toLocaleString()}</strong>
                     </div>
                     <div className="flex justify-between text-slate-350">
                       <span>Alta del Folio:</span>
@@ -3580,22 +3651,7 @@ export const PipelinePedidoView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* 2. D3 Arc gauge progress visualization */}
-                <div className="grid grid-cols-2 gap-3 items-center">
-                  <div className="space-y-1">
-                    <span className="text-[9px] font-mono font-bold text-slate-500 uppercase tracking-widest block">
-                      Avance Consolidado
-                    </span>
-                    <span className="text-[10px] text-slate-400 leading-normal block font-sans">
-                      Cálculo ponderado por pares activos cargados en celdas de inyección.
-                    </span>
-                  </div>
-                  <div>
-                    <D3OrderGauge progress={activeSelectedOrder.progress} />
-                  </div>
-                </div>
-
-                {/* 3. D3 Stage distribution visualization */}
+                {/* 2. D3 Stage distribution visualization */}
                 <div className="space-y-1.5">
                   <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block leading-tight">
                     Inventario de Calzado por Etapa
@@ -3603,16 +3659,8 @@ export const PipelinePedidoView: React.FC = () => {
                   <D3OrderTimeline stagesData={selectedStagesArray} />
                 </div>
 
-                {/* 4. Tiempos promedio y desviaciones */}
+                {/* 3. Entrega y WIP */}
                 <div className="bg-slate-900/40 border border-slate-900 rounded-lg p-3 text-xs space-y-1">
-                  <div className="flex justify-between text-slate-350">
-                    <span>Permanencia Promedio:</span>
-                    <strong className="text-yellow-500 font-mono">{formatTimeMinutes(activeSelectedOrder.avgTimeMin)}</strong>
-                  </div>
-                  <div className="flex justify-between text-slate-350">
-                    <span>Etapa Dominante:</span>
-                    <strong className="text-slate-200 uppercase font-mono text-[10px]">{STAGE_NAMES[activeSelectedOrder.dominantStage] || activeSelectedOrder.dominantStage}</strong>
-                  </div>
                   <div className="flex justify-between text-slate-350">
                     <span>Pares Embarcados (Prs):</span>
                     <strong className="text-emerald-400 font-mono">{activeSelectedOrder.shippedPairs.toLocaleString()}</strong>
@@ -3700,7 +3748,8 @@ interface HourlyProductionLog {
   fecha: string;        // YYYY-MM-DD
   hora: string;         // HH:00
   turno: 'MAÑANA' | 'TARDE' | 'NOCHE';
-  area: 'almacen' | 'inyeccion' | 'estabilizacion' | 'aduana' | 'banda' | 'embarque';
+  area: 'almacen' | 'inyeccion' | 'aduana' | 'banda' | 'embarque' | 'entregas' | 'salidas_tercera';
+  tarjetaViajera: string;
   responsable: string;
   modeloName: string;
   color: string;
@@ -3718,16 +3767,17 @@ const generateInitialProductionLogs = (tenantId: string): HourlyProductionLog[] 
   const models = ['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Suela Comfort'];
   const colors = ['Negro', 'Blanco', 'Arena', 'Azul Marino', 'Rojo', 'Gris'];
   const shifts: ('MAÑANA' | 'TARDE' | 'NOCHE')[] = ['MAÑANA', 'TARDE', 'NOCHE'];
-  const areas: ('almacen' | 'inyeccion' | 'estabilizacion' | 'aduana' | 'banda' | 'embarque')[] = [
-    'almacen', 'inyeccion', 'estabilizacion', 'aduana', 'banda', 'embarque'
+  const areas: HourlyProductionLog['area'][] = [
+    'almacen', 'inyeccion', 'aduana', 'banda', 'embarque', 'entregas', 'salidas_tercera'
   ];
   const repsByArea: Record<string, string[]> = {
     almacen: ['Manuel Torres (Jefe Almacén)', 'Marcos V. (Materiales)'],
     inyeccion: ['Carlos Mendoza (Líder Inyección)', 'Fabián H. (Inyección)'],
-    estabilizacion: ['Sofía Estrada (Supervisor Calidad)', 'Sandra M. (Estabilizado)'],
     aduana: ['Elena G. (Garantía de Calidad)', 'Arturo J. (Inspector)'],
     banda: ['Diana Pérez (Recortadora Línea)', 'Rogelio Cruz (Banda A)'],
-    embarque: ['Jorge Ruiz (Logística)', 'Clara S. (Embarques)']
+    embarque: ['Jorge Ruiz (Logística)', 'Clara S. (Embarques)'],
+    entregas: ['Clara S. (Entregas)', 'Jorge Ruiz (Entrega cliente)'],
+    salidas_tercera: ['Rogelio Cruz (Tercera)', 'Diana Pérez (Calidad tercera)']
   };
 
   // Generate logs spanning 14 days up to 2026-05-25
@@ -3766,6 +3816,7 @@ const generateInitialProductionLogs = (tenantId: string): HourlyProductionLog[] 
           hora: `${String(h).padStart(2, '0')}:00`,
           turno: shift,
           area,
+          tarjetaViajera: `TV-${dateString.replace(/-/g, '').slice(2)}-${String(aIdx + 1).padStart(2, '0')}${hIdx}`,
           responsable: resp,
           modeloName: model,
           color,
@@ -3783,7 +3834,7 @@ const generateInitialProductionLogs = (tenantId: string): HourlyProductionLog[] 
 };
 
 export const ProduccionAreaView: React.FC = () => {
-  const { currentTenant, addAuditLog, machines, bands } = useDashboard();
+  const { currentTenant, addAuditLog, machines, bands, users, can, getGoalForAreaTurn } = useDashboard();
 
   // Load production logs isolated by tenant
   const [logs, setLogs] = useState<HourlyProductionLog[]>(() => {
@@ -3844,6 +3895,7 @@ export const ProduccionAreaView: React.FC = () => {
   // 4. Modal de nuevo registro state
   const [showAddLogModal, setShowAddLogModal] = useState(false);
   const [formArea, setFormArea] = useState<HourlyProductionLog['area']>('inyeccion');
+  const [formTarjetaViajera, setFormTarjetaViajera] = useState('TV-260525-010');
   const [formFecha, setFormFecha] = useState('2026-05-25');
   const [formHora, setFormHora] = useState('08:00');
   const [formTurno, setFormTurno] = useState<HourlyProductionLog['turno']>('MAÑANA');
@@ -3861,23 +3913,26 @@ export const ProduccionAreaView: React.FC = () => {
   const AREA_NAMES: Record<string, string> = {
     'almacen': 'Almacén',
     'inyeccion': 'Inyección',
-    'estabilizacion': 'Estabilización',
     'aduana': 'Aduana',
     'banda': 'Banda',
-    'embarque': 'Embarque'
+    'embarque': 'Embarque',
+    'entregas': 'Entregas',
+    'salidas_tercera': 'Salidas de tercera'
   };
 
   const AREA_COLORS: Record<string, string> = {
     'almacen': '#64748b',
     'inyeccion': '#f59e0b',
-    'estabilizacion': '#a855f7',
     'aduana': '#f43f5e',
     'banda': '#6366f1',
-    'embarque': '#10b981'
+    'embarque': '#10b981',
+    'entregas': '#14b8a6',
+    'salidas_tercera': '#f97316'
   };
 
   // Distinct values for filter options
-  const uniqueResponsables = Array.from(new Set(logs.map(l => l.responsable))).filter(Boolean);
+  const activeResponsables = users.filter(user => user.active).map(user => user.username);
+  const uniqueResponsables = activeResponsables.length > 0 ? activeResponsables : Array.from(new Set(logs.map(l => l.responsable))).filter(Boolean);
   const uniqueModels = Array.from(new Set(logs.map(l => l.modeloName))).filter(Boolean);
   const uniqueColors = Array.from(new Set(logs.map(l => l.color))).filter(Boolean);
 
@@ -3919,6 +3974,7 @@ export const ProduccionAreaView: React.FC = () => {
 
   const finalFilteredLogs = timeFilteredLogs.filter(log => {
     // Area Tab Filter
+    if (!AREA_NAMES[log.area]) return false;
     if (activeArea !== 'TODAS' && log.area !== activeArea) return false;
 
     // Filter properties
@@ -3937,20 +3993,30 @@ export const ProduccionAreaView: React.FC = () => {
 
     return true;
   });
+  const configuredFilteredLogs = finalFilteredLogs.map(log => ({
+    ...log,
+    metaHora: getGoalForAreaTurn(log.area, log.turno)?.metaHora || log.metaHora
+  }));
+
+  const groupedHourlyLogs = [...configuredFilteredLogs].sort((a, b) =>
+    (a.tarjetaViajera || '').localeCompare(b.tarjetaViajera || '') ||
+    a.fecha.localeCompare(b.fecha) ||
+    a.hora.localeCompare(b.hora)
+  );
 
   // Calculate top KPIs
-  const totalRealProduction = finalFilteredLogs.reduce((sum, l) => sum + l.produccionReal, 0);
-  const totalTargetProduction = finalFilteredLogs.reduce((sum, l) => sum + l.metaHora, 0);
+  const totalRealProduction = configuredFilteredLogs.reduce((sum, l) => sum + l.produccionReal, 0);
+  const totalTargetProduction = configuredFilteredLogs.reduce((sum, l) => sum + l.metaHora, 0);
   const metaCompliance = totalTargetProduction > 0 ? Math.round((totalRealProduction / totalTargetProduction) * 100) : 0;
   
   // Production average per hour
-  const distinctLoggedCount = finalFilteredLogs.length || 1;
+  const distinctLoggedCount = configuredFilteredLogs.length || 1;
   const avgProductionPerHour = Math.round(totalRealProduction / distinctLoggedCount);
 
   // Best / Worst productive hour segments
   // Group by hour
   const hourVolumes: Record<string, number> = {};
-  finalFilteredLogs.forEach(l => {
+  configuredFilteredLogs.forEach(l => {
     hourVolumes[l.hora] = (hourVolumes[l.hora] || 0) + l.produccionReal;
   });
   
@@ -3983,15 +4049,15 @@ export const ProduccionAreaView: React.FC = () => {
   const tiempoSinRegistroMinutos = unloggedHoursCount * 60;
 
   // Average Efficiency across matching records
-  const totalEfficiencySum = finalFilteredLogs.reduce((sum, l) => {
+  const totalEfficiencySum = configuredFilteredLogs.reduce((sum, l) => {
     const eff = l.metaHora > 0 ? (l.produccionReal / l.metaHora) * 100 : 0;
     return sum + eff;
   }, 0);
-  const avgEfficiency = finalFilteredLogs.length > 0 ? Math.round(totalEfficiencySum / finalFilteredLogs.length) : 0;
+  const avgEfficiency = configuredFilteredLogs.length > 0 ? Math.round(totalEfficiencySum / configuredFilteredLogs.length) : 0;
 
   // Waste indicators
-  const totalReprocesos = finalFilteredLogs.reduce((sum, l) => sum + l.reprocesos, 0);
-  const totalSegundas = finalFilteredLogs.reduce((sum, l) => sum + l.segundas, 0);
+  const totalReprocesos = configuredFilteredLogs.reduce((sum, l) => sum + l.reprocesos, 0);
+  const totalSegundas = configuredFilteredLogs.reduce((sum, l) => sum + l.segundas, 0);
 
   // Submission handler for new Hourly Production log
   const handleAddHourlyLogSubmit = (e: React.FormEvent) => {
@@ -4005,6 +4071,7 @@ export const ProduccionAreaView: React.FC = () => {
       hora: formHora,
       turno: formTurno,
       area: formArea,
+      tarjetaViajera: formTarjetaViajera,
       responsable: formResponsable,
       modeloName: formModelo,
       color: formColor,
@@ -4046,9 +4113,9 @@ export const ProduccionAreaView: React.FC = () => {
   
   // 1. Producción por Hora
   // Map hours chronologically
-  const hoursSorted = Array.from(new Set(finalFilteredLogs.map(l => l.hora))).sort();
+  const hoursSorted = Array.from(new Set(configuredFilteredLogs.map(l => l.hora))).sort();
   const prodHourChartData = hoursSorted.map(h => {
-    const filteredByHour = finalFilteredLogs.filter(l => l.hora === h);
+    const filteredByHour = configuredFilteredLogs.filter(l => l.hora === h);
     const real = filteredByHour.reduce((sum, l) => sum + l.produccionReal, 0);
     const meta = filteredByHour.reduce((sum, l) => sum + l.metaHora, 0);
     return { hour: h, 'Producción': real, 'Meta': meta };
@@ -4058,7 +4125,7 @@ export const ProduccionAreaView: React.FC = () => {
   let accumulatedReal = 0;
   let accumulatedMeta = 0;
   const prodAccumulatedChartData = hoursSorted.map(h => {
-    const filteredByHour = finalFilteredLogs.filter(l => l.hora === h);
+    const filteredByHour = configuredFilteredLogs.filter(l => l.hora === h);
     const real = filteredByHour.reduce((sum, l) => sum + l.produccionReal, 0);
     const meta = filteredByHour.reduce((sum, l) => sum + l.metaHora, 0);
     accumulatedReal += real;
@@ -4068,14 +4135,14 @@ export const ProduccionAreaView: React.FC = () => {
 
   // 3. Producción por Área
   const prodByAreaChartData = Object.entries(AREA_NAMES).map(([key, value]) => {
-    const areaLogs = finalFilteredLogs.filter(l => l.area === key);
+    const areaLogs = configuredFilteredLogs.filter(l => l.area === key);
     const realSum = areaLogs.reduce((sum, l) => sum + l.produccionReal, 0);
     return { name: value, 'Pares': realSum };
   });
 
   // 4. Producción por Responsable
   const repsMap: Record<string, number> = {};
-  finalFilteredLogs.forEach(l => {
+  configuredFilteredLogs.forEach(l => {
     repsMap[l.responsable] = (repsMap[l.responsable] || 0) + l.produccionReal;
   });
   const prodByRepChartData = Object.entries(repsMap).map(([name, val]) => ({
@@ -4085,7 +4152,7 @@ export const ProduccionAreaView: React.FC = () => {
 
   // 5. Producción por Modelo
   const modelsMap: Record<string, number> = {};
-  finalFilteredLogs.forEach(l => {
+  configuredFilteredLogs.forEach(l => {
     modelsMap[l.modeloName] = (modelsMap[l.modeloName] || 0) + l.produccionReal;
   });
   const prodByModelChartData = Object.entries(modelsMap).map(([name, val]) => ({
@@ -4099,7 +4166,7 @@ export const ProduccionAreaView: React.FC = () => {
     'TARDE': { sum: 0, count: 0 },
     'NOCHE': { sum: 0, count: 0 }
   };
-  finalFilteredLogs.forEach(l => {
+  configuredFilteredLogs.forEach(l => {
     const eff = l.metaHora > 0 ? (l.produccionReal / l.metaHora) * 100 : 0;
     if (shiftEffMap[l.turno]) {
       shiftEffMap[l.turno].sum += eff;
@@ -4130,24 +4197,28 @@ export const ProduccionAreaView: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-          <button 
-            onClick={() => {
-              addAuditLog('PRODUCCION', 'DATA_EXPORT', `Descarga simulada de reporte operativo de eficiencia para el tenant ${currentTenant.id}`);
-              alert(`📥 Descarga Simulada: El reporte "Produccion_OEE_Eficiencia_${currentTenant.id}.csv" ha sido compilado con ${finalFilteredLogs.length} registros horarios.`);
-            }}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-bold border border-slate-705 border-slate-700 transition cursor-pointer"
-          >
-            <Download className="w-4 h-4 text-indigo-400" />
-            Descargar Reporte OEE
-          </button>
+          {can('produccion_area.export') && (
+            <button 
+              onClick={() => {
+                addAuditLog('PRODUCCION', 'DATA_EXPORT', `Descarga simulada de reporte operativo de eficiencia para el tenant ${currentTenant.id}`);
+                alert(`📥 Descarga Simulada: El reporte "Produccion_OEE_Eficiencia_${currentTenant.id}.csv" ha sido compilado con ${finalFilteredLogs.length} registros horarios.`);
+              }}
+              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-bold border border-slate-705 border-slate-700 transition cursor-pointer"
+            >
+              <Download className="w-4 h-4 text-indigo-400" />
+              Descargar Reporte OEE
+            </button>
+          )}
           
-          <button
-            onClick={() => setShowAddLogModal(true)}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-650 hover:bg-indigo-600 text-slate-950 font-sans font-extrabold rounded-lg text-xs tracking-wide transition cursor-pointer"
-          >
-            <PlusCircle className="w-4 h-4 text-slate-950" />
-            Registrar Log Horario
-          </button>
+          {can('produccion_area.create_log') && (
+            <button
+              onClick={() => setShowAddLogModal(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-650 hover:bg-indigo-600 text-slate-950 font-sans font-extrabold rounded-lg text-xs tracking-wide transition cursor-pointer"
+            >
+              <PlusCircle className="w-4 h-4 text-slate-950" />
+              Registrar Log Horario
+            </button>
+          )}
         </div>
       </div>
 
@@ -4371,103 +4442,93 @@ export const ProduccionAreaView: React.FC = () => {
       </div>
 
       {/* 2. KPIS OPERATIVOS SUPERIORES */}
-      <div className="grid grid-cols-2 md:grid-cols-5 xl:grid-cols-10 gap-4">
+      <div className="w-full grid grid-cols-[repeat(auto-fit,minmax(130px,1fr))] gap-3">
         
-        <div className="p-4 bg-slate-950 border border-slate-905 border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-905 border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Producción Total
           </span>
-          <div className="text-xl font-bold font-mono text-cyan-400">
+          <div className="text-lg font-bold font-mono text-cyan-400">
             {totalRealProduction.toLocaleString()}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Pares fabricados</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Meta Acumulada
           </span>
-          <div className="text-xl font-bold font-mono text-slate-350">
+          <div className="text-lg font-bold font-mono text-slate-350">
             {totalTargetProduction.toLocaleString()}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Meta esperada</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             % Cumplimiento
           </span>
-          <div className={`text-xl font-bold font-mono ${metaCompliance >= 95 ? 'text-green-400' : 'text-amber-500'}`}>
+          <div className={`text-lg font-bold font-mono ${metaCompliance >= 95 ? 'text-green-400' : 'text-amber-500'}`}>
             {metaCompliance}%
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Alcance de meta</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Pares / Hora
           </span>
-          <div className="text-xl font-bold font-mono text-slate-200">
+          <div className="text-lg font-bold font-mono text-slate-200">
             {avgProductionPerHour.toLocaleString()}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Pares de ritmo</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-505 text-slate-500 uppercase block tracking-wider leading-none">
             Mejor Hora
           </span>
-          <div className="text-xl font-bold font-mono text-emerald-400">
+          <div className="text-lg font-bold font-mono text-emerald-400">
             {bestHour}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Max rendimiento</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Peor Hora
           </span>
-          <div className="text-xl font-bold font-mono text-rose-500">
+          <div className="text-lg font-bold font-mono text-rose-500">
             {worstHour}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Garganta de botella</span>
         </div>
 
-        <div className="p-4 bg-slate-955 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none text-rose-450">
-            Sin Registro
-          </span>
-          <div className="text-xl font-bold font-mono text-orange-450 text-orange-400">
-            {tiempoSinRegistroMinutos}m
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Tiempo muerto</span>
-        </div>
-
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Eficiencia OEE
+            OEE Promedio
           </span>
-          <div className={`text-xl font-bold font-mono ${avgEfficiency >= 95 ? 'text-green-400' : avgEfficiency >= 80 ? 'text-amber-500' : 'text-rose-450'}`}>
+          <div className={`text-lg font-bold font-mono ${avgEfficiency >= 95 ? 'text-green-400' : avgEfficiency >= 80 ? 'text-amber-500' : 'text-rose-450'}`}>
             {avgEfficiency}%
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Promedio de OEE</span>
         </div>
 
-        <div className="p-4 bg-red-950/10 border border-red-950/30 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-red-950/10 border border-red-950/30 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-red-400 uppercase block tracking-wider leading-none">
             Reprocesos
           </span>
-          <div className="text-xl font-bold font-mono text-rose-400">
+          <div className="text-lg font-bold font-mono text-rose-400">
             {totalReprocesos.toLocaleString()}
           </div>
           <span className="text-[9px] font-mono text-red-500 block">Pares a repasar</span>
         </div>
 
-        <div className="p-4 bg-amber-950/10 border border-amber-950/30 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-amber-950/10 border border-amber-950/30 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-amber-500 uppercase block tracking-wider leading-none">
             Salidas / 2das
           </span>
-          <div className="text-xl font-bold font-mono text-amber-400">
+          <div className="text-lg font-bold font-mono text-amber-400">
             {totalSegundas.toLocaleString()}
           </div>
           <span className="text-[9px] font-mono text-amber-550 block">Menor especificación</span>
@@ -4476,20 +4537,21 @@ export const ProduccionAreaView: React.FC = () => {
       </div>
 
       {/* 4. GRAFICAS RECHARTS COMPLETO (6 GRÁFICAS REQUERIDAS) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
 
         {/* Gráfica 1: Producción por Hora */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             📊 Producción Real vs Meta por Hora
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Eficiencia instantánea del calzado comparada con la capacidad nominal.
           </p>
-          <div className="h-48">
+          <div className="h-56 overflow-x-auto">
             {prodHourChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN DATOS OPERATIVOS</div>
             ) : (
+              <div className="min-w-[420px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart data={prodHourChartData} margin={{ top: 5, right: 5, left: -30, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -4501,22 +4563,24 @@ export const ProduccionAreaView: React.FC = () => {
                   <RechartsBar dataKey="Meta" fill="#3b82f6" name="Meta Target" />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             )}
           </div>
         </div>
 
         {/* Gráfica 2: Meta vs Real Acumulado */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             📈 Tendencia Acumulada vs Meta
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Análisis de las pendientes de manufactura y desfases en volumen.
           </p>
-          <div className="h-48">
+          <div className="h-56 overflow-x-auto">
             {prodAccumulatedChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN DATOS OPERATIVOS</div>
             ) : (
+              <div className="min-w-[420px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={prodAccumulatedChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -4528,19 +4592,21 @@ export const ProduccionAreaView: React.FC = () => {
                   <RechartsLine type="monotone" dataKey="Meta Acumulada" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={{ r: 1 }} />
                 </RechartsLineChart>
               </RechartsResponsiveContainer>
+              </div>
             )}
           </div>
         </div>
 
         {/* Gráfica 3: Producción por Área */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🏭 Volumen de Producción por Área
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Carga de manufactura real consolidada por subestación técnica.
           </p>
-          <div className="h-48">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={prodByAreaChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -4558,46 +4624,23 @@ export const ProduccionAreaView: React.FC = () => {
                 </RechartsBar>
               </RechartsBarChart>
             </RechartsResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Gráfica 4: Producción por Responsable */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
-          <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
-            🧑🏼‍🏭 Rendimiento de Operarios y Supervisores
-          </h3>
-          <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
-            Volumen real gestionado por los principales 5 responsables del turno.
-          </p>
-          <div className="h-48">
-            {prodByRepChartData.length === 0 ? (
-              <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN REGISTROS</div>
-            ) : (
-              <RechartsResponsiveContainer width="100%" height="100%">
-                <RechartsBarChart data={prodByRepChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
-                  <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                  <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '8px' }} />
-                  <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                  <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '4px', fontSize: '10px' }} />
-                  <RechartsBar dataKey="Pares" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                </RechartsBarChart>
-              </RechartsResponsiveContainer>
-            )}
+            </div>
           </div>
         </div>
 
         {/* Gráfica 5: Producción por Modelo */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🏷️ Volumen por Modelo de Calzado EVA
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Distribución por molde (Spider, Ruby, Snap, Atenea, etc).
           </p>
-          <div className="h-48">
+          <div className="h-56 overflow-x-auto">
             {prodByModelChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN REGISTROS</div>
             ) : (
+              <div className="min-w-[420px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart data={prodByModelChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -4607,19 +4650,21 @@ export const ProduccionAreaView: React.FC = () => {
                   <RechartsBar dataKey="Pares" fill="#f59e0b" radius={[4, 4, 0, 0]} />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             )}
           </div>
         </div>
 
         {/* Gráfica 6: Eficiencia por Turno */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🔄 Eficiencia OEE Promedio por Turno
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Análisis de rendimiento entre Mañana, Tarde y Noche.
           </p>
-          <div className="h-48">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[360px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={efficiencyByShiftChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -4634,6 +4679,7 @@ export const ProduccionAreaView: React.FC = () => {
                 </RechartsBar>
               </RechartsBarChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
@@ -4650,7 +4696,7 @@ export const ProduccionAreaView: React.FC = () => {
             </h3>
           </div>
           <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">
-            Mostrando {finalFilteredLogs.length} reportes consolidados
+            Mostrando {groupedHourlyLogs.length} reportes consolidados por Tarjeta Viajera
           </span>
         </div>
 
@@ -4660,6 +4706,7 @@ export const ProduccionAreaView: React.FC = () => {
             <thead>
               <tr className="bg-slate-900 border-b border-slate-800 text-[10px] font-mono text-slate-400 uppercase tracking-wider leading-none">
                 <th className="py-3 px-3 font-bold">Fecha</th>
+                <th className="py-3 px-3 font-bold">Tarjeta Viajera</th>
                 <th className="py-3 px-3 font-bold">Hora segment</th>
                 <th className="py-3 px-3 font-bold">Turno</th>
                 <th className="py-3 px-3 font-bold">Estación/Área</th>
@@ -4674,14 +4721,14 @@ export const ProduccionAreaView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-900 text-[11px] font-mono">
-              {finalFilteredLogs.length === 0 ? (
+              {groupedHourlyLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={12} className="py-12 text-center text-slate-500 text-xs">
+                  <td colSpan={13} className="py-12 text-center text-slate-500 text-xs">
                     ⚠️ No se encontraron registros de producción para esta área en los plazos indicados.
                   </td>
                 </tr>
               ) : (
-                finalFilteredLogs.map((log) => {
+                groupedHourlyLogs.map((log) => {
                   const diff = log.produccionReal - log.metaHora;
                   const eff = log.metaHora > 0 ? Math.round((log.produccionReal / log.metaHora) * 100) : 0;
                   
@@ -4699,6 +4746,7 @@ export const ProduccionAreaView: React.FC = () => {
                   return (
                     <tr key={log.id} className="hover:bg-slate-900/40 transition">
                       <td className="py-3 px-3 text-slate-450">{log.fecha}</td>
+                      <td className="py-3 px-3 text-cyan-400 font-bold">{log.tarjetaViajera || 'TV-S/R'}</td>
                       <td className="py-3 px-3 font-bold text-cyan-400">{log.hora}</td>
                       <td className="py-3 px-3 text-slate-300 font-semibold">{log.turno}</td>
                       <td className="py-3 px-3 font-bold">
@@ -4777,10 +4825,11 @@ export const ProduccionAreaView: React.FC = () => {
                       const defaults: Record<string, string> = {
                         almacen: 'Manuel Torres (Jefe Almacén)',
                         inyeccion: 'Carlos Mendoza (Líder Inyección)',
-                        estabilizacion: 'Sofía Estrada (Supervisor Calidad)',
                         aduana: 'Elena G. (Garantía de Calidad)',
                         banda: 'Diana Pérez (Recortadora Línea)',
-                        embarque: 'Jorge Ruiz (Logística)'
+                        embarque: 'Jorge Ruiz (Logística)',
+                        entregas: 'Clara S. (Entregas)',
+                        salidas_tercera: 'Rogelio Cruz (Tercera)'
                       };
                       setFormResponsable(defaults[val] || 'Operador Especialista');
                     }}
@@ -4834,14 +4883,32 @@ export const ProduccionAreaView: React.FC = () => {
 
                 {/* Responsable */}
                 <div className="col-span-2 space-y-1">
-                  <label className="text-[10px] font-mono uppercase font-bold text-slate-400 block">Ingeniero / Técnico Responsable</label>
+                  <label className="text-[10px] font-mono uppercase font-bold text-slate-400 block">Tarjeta Viajera</label>
                   <input
                     type="text"
+                    required
+                    value={formTarjetaViajera}
+                    onChange={(e) => setFormTarjetaViajera(e.target.value)}
+                    className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-205 focus:outline-none focus:ring-1 focus:ring-cyan-500 font-mono"
+                  />
+                </div>
+
+                {/* Responsable */}
+                <div className="col-span-2 space-y-1">
+                  <label className="text-[10px] font-mono uppercase font-bold text-slate-400 block">Ingeniero / Técnico Responsable</label>
+                  <select
                     required
                     value={formResponsable}
                     onChange={(e) => setFormResponsable(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-105 text-slate-205 focus:outline-none focus:ring-1 focus:ring-cyan-500"
-                  />
+                  >
+                    {!uniqueResponsables.includes(formResponsable) && (
+                      <option value={formResponsable}>{formResponsable}</option>
+                    )}
+                    {uniqueResponsables.map(responsable => (
+                      <option key={responsable} value={responsable}>{responsable}</option>
+                    ))}
+                  </select>
                 </div>
 
                 {/* Modelo */}
@@ -5119,6 +5186,7 @@ export const ModelosProductosView: React.FC = () => {
 
   // Track selected model for detail view (Master-Detail)
   const [selectedProductModel, setSelectedProductModel] = useState<string>('Spider');
+  const [aiInsightsGenerated, setAiInsightsGenerated] = useState(false);
 
   // Interactive filters
   const [filtroModelo, setFiltroModelo] = useState<string>('');
@@ -5259,6 +5327,9 @@ export const ModelosProductosView: React.FC = () => {
     return bComp - aComp;
   });
   const modeloMejorCumplimiento = sortedByCompliance[0]?.name || 'Ninguno';
+  const cumplimientoPromedioPedido = summariesList.length > 0
+    ? Math.round(summariesList.reduce((sum, m) => sum + (m.count > 0 ? (m.compliedOnes / m.count) * 100 : 0), 0) / summariesList.length)
+    : 0;
 
   // 6. Porcentaje participación del modelo principal
   const maxVolume = sortedByVol[0]?.producido || 0;
@@ -5524,97 +5595,98 @@ export const ModelosProductosView: React.FC = () => {
       </div>
 
       {/* 2. KPIS SUPERIORES COMPLETO */}
-      <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-4">
+      <div className="w-full grid grid-cols-[repeat(auto-fit,minmax(140px,1fr))] gap-3">
         
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Pares Producidos
           </span>
-          <div className="text-xl font-bold font-mono text-cyan-400">
+          <div className="text-lg font-bold font-mono text-cyan-400">
             {totalPares.toLocaleString()}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Muestra consolidada</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Modelo Líder Vol.
           </span>
-          <div className="text-lg font-bold font-sans text-slate-100 truncate">
+          <div className="text-base font-bold font-sans text-slate-100 truncate">
             {modeloMasProducido}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Mayor volumen</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Mayor Eficiencia
           </span>
-          <div className="text-lg font-bold font-sans text-green-400 truncate">
+          <div className="text-base font-bold font-sans text-green-400 truncate">
             {modeloMayorEficiencia}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Menor mermas de lote</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Mayor Defectivo
           </span>
-          <div className="text-lg font-bold font-sans text-red-400 truncate">
+          <div className="text-base font-bold font-sans text-red-400 truncate">
             {modeloMayorDefectivo}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Tasa de rechazo crítica</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Máximo Lead Time
-          </span>
-          <div className="text-lg font-bold font-sans text-amber-500 truncate">
-            {modeloMayorLeadTime}
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Ciclo largo promedio</span>
-        </div>
-
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Mejor Cumplimiento
           </span>
-          <div className="text-lg font-bold font-sans text-indigo-400 truncate">
+          <div className="text-base font-bold font-sans text-indigo-400 truncate">
             {modeloMejorCumplimiento}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Entregas a tiempo</span>
         </div>
 
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
+          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
+            Cumplimiento Prom.
+          </span>
+          <div className="text-lg font-bold font-mono text-indigo-400">
+            {cumplimientoPromedioPedido}%
+          </div>
+          <span className="text-[9px] font-mono text-slate-550 block">Por pedido</span>
+        </div>
+
+        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
             Modelos Activos
           </span>
-          <div className="text-xl font-bold font-mono text-slate-205 text-slate-200">
+          <div className="text-lg font-bold font-mono text-slate-205 text-slate-200">
             {totalModelosActivos}
           </div>
           <span className="text-[9px] font-mono text-slate-550 block">Moldes en corrida</span>
-        </div>
-
-        <div className="p-4 bg-slate-950 border border-slate-900 rounded-xl space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Participación Líder
-          </span>
-          <div className="text-xl font-bold font-mono text-cyan-400">
-            {pctParticipationPrincipal}%
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Representado por {modeloMasProducido}</span>
         </div>
 
       </div>
 
       {/* 6. AUTOMATED INSIGHTS / RECOMENDACIONES SIMULADAS */}
       <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-3">
-        <div className="flex items-center gap-2">
-          <Activity className="w-5 h-5 text-indigo-400" />
-          <h3 className="text-xs font-bold font-mono text-slate-200 uppercase tracking-widest">
-            💡 Insights Automáticos y Diagnóstico Operativo Simulador
-          </h3>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Activity className="w-5 h-5 text-indigo-400" />
+            <h3 className="text-xs font-bold font-mono text-slate-200 uppercase tracking-widest">
+              💡 Insights Automáticos y Diagnóstico Operativo Simulador
+            </h3>
+          </div>
+          <button
+            onClick={() => {
+              setAiInsightsGenerated(true);
+              addAuditLog('MODELOS', 'AI_INSIGHTS_GENERATED', `Insights AI generados con ${filteredRecords.length} registros filtrados`);
+            }}
+            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-slate-950 text-[10px] font-mono font-black uppercase transition"
+          >
+            Generar insights AI
+          </button>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -5639,20 +5711,26 @@ export const ModelosProductosView: React.FC = () => {
             </p>
           </div>
         </div>
+        {aiInsightsGenerated && (
+          <div className="p-3 bg-indigo-950/25 border border-indigo-900/40 rounded-lg text-[11px] text-indigo-200 font-mono">
+            AI listo: {modeloMasProducido} lidera volumen, {modeloMayorDefectivo} concentra defecto y cumplimiento promedio por pedido está en {cumplimientoPromedioPedido}%.
+          </div>
+        )}
       </div>
 
       {/* 3. GRÁFIQUES DE RENDIMIENTO (7 TOTAL PANELS) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
 
         {/* Gráfica 1: Ranking por Pares */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🥇 Ranking de Modelos por Pares
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Volumen consolidado de inyecciones exitosas.
           </p>
-          <div className="h-44">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={rankingModelosData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -5662,18 +5740,20 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsBar dataKey="Pares" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
         {/* Gráfica 2: Tendencia de Producción */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             📈 Tendencia por Modelo (Pares/Día)
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Análisis de las ultimas corridas diarias.
           </p>
-          <div className="h-44">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsLineChart data={tendenciaModelosData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -5685,18 +5765,20 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsLine type="monotone" dataKey="Dragon" stroke="#f59e0b" strokeWidth={2} dot={{ r: 1 }} />
               </RechartsLineChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
         {/* Gráfica 3: Pareto de Defectos por Modelo */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             ⚠️ Pareto de Defectos por Modelo
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Volumen absoluto de merma y % acumulado.
           </p>
-          <div className="h-44">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={paretoDefectosData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -5706,18 +5788,20 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsBar dataKey="Defectos" fill="#ef4444" radius={[4, 4, 0, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
         {/* Gráfica 4: Lead Time promedio */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             ⏳ Lead Time Promedio (Horas)
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Tiempo de ciclo desde almacén hasta embarque.
           </p>
-          <div className="h-44">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={leadTimeChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -5727,39 +5811,20 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsBar dataKey="Lead Time Hrs" fill="#a855f7" radius={[4, 4, 0, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Gráfica 5: Productividad por Modelo */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
-          <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
-            ⚡ Productividad Promedio por Moldes
-          </h3>
-          <p className="text-[10px] text-slate-500 mb-4 leading-none">
-            Promedio de pares de calzado logrados por corrida.
-          </p>
-          <div className="h-44">
-            <RechartsResponsiveContainer width="100%" height="100%">
-              <RechartsBarChart data={productividadModelData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
-                <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
-                <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '7px' }} />
-                <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
-                <RechartsBar dataKey="Prod. Promedio Batch" fill="#e11d48" radius={[4, 4, 0, 0]} />
-              </RechartsBarChart>
-            </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
         {/* Gráfica 6: Cumplimiento de Entrega */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             📦 Cumplimiento de entrega (%)
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Porcentaje de pedidos cerrados a tiempo real.
           </p>
-          <div className="h-44">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={cumplimientoModelData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -5769,18 +5834,20 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsBar dataKey="Cumplimiento %" fill="#06b6d4" />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
         {/* Gráfica 7: Producción por Color */}
-        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl md:col-span-2">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl xl:col-span-2 overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🎨 Volumen de Producción por Color Pigmento
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Análisis de distribución de tintas y materias primas EVA.
           </p>
-          <div className="h-44">
+          <div className="h-56 overflow-x-auto">
+            <div className="min-w-[560px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsBarChart data={produccionColorData} layout="vertical" margin={{ top: 5, right: 5, left: -10, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
@@ -5790,6 +5857,7 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsBar dataKey="Pares" fill="#8b5cf6" radius={[0, 4, 4, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
@@ -5821,38 +5889,21 @@ export const ModelosProductosView: React.FC = () => {
                   <th className="py-3 px-3 font-bold text-slate-300">Modelo</th>
                   <th className="py-3 px-3 text-right font-bold">Total Pares</th>
                   <th className="py-3 px-3 text-right font-bold">% Partic.</th>
-                  <th className="py-3 px-3 text-right font-bold">LeadTime Prom.</th>
-                  <th className="py-3 px-3 text-right font-bold">Iny. Prom</th>
-                  <th className="py-3 px-3 text-right font-bold">Estb. Prom</th>
-                  <th className="py-3 px-3 text-right font-bold">Banda Prom</th>
+                  <th className="py-3 px-3 text-right font-bold">LeadTime Acum.</th>
+                  <th className="py-3 px-3 text-right font-bold">Iny. Acum</th>
+                  <th className="py-3 px-3 text-right font-bold">Estb. Acum</th>
+                  <th className="py-3 px-3 text-right font-bold">Banda Acum</th>
                   <th className="py-3 px-3 text-right font-bold text-red-400">% Defect.</th>
                   <th className="py-3 px-3 text-right font-bold">Segundas</th>
-                  <th className="py-3 px-3 text-right font-bold">Reprocesos</th>
                   <th className="py-3 px-3 text-right font-bold">Cumplimiento</th>
-                  <th className="py-3 px-3 text-center font-bold">Estatus</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-900/40 bg-slate-950">
                 {summariesList.map((m) => {
                   const part = totalPares > 0 ? ((m.producido / totalPares) * 100).toFixed(1) : '0';
-                  const leadAvg = m.count > 0 ? (m.leadTimeSum / m.count).toFixed(1) : '0';
-                  const inyAvg = m.count > 0 ? Math.round(m.timeInySum / m.count) : '0';
-                  const estAvg = m.count > 0 ? Math.round(m.timeEstSum / m.count) : '0';
-                  const bndAvg = m.count > 0 ? Math.round(m.timeBndSum / m.count) : '0';
                   const defRate = m.producido > 0 ? ((m.defectuosos / m.producido) * 100).toFixed(1) : '0';
                   const compliance = m.count > 0 ? Math.round((m.compliedOnes / m.count) * 100) : 0;
                   const isSelected = selectedProductModel === m.name;
-
-                  // Determine color status based on yield of defects
-                  let statusLabel = '🟢 ACTIVO';
-                  let statusBg = 'text-green-400';
-                  if (Number(defRate) > 4.5) {
-                    statusLabel = '🔴 CRÍTICO';
-                    statusBg = 'text-rose-400';
-                  } else if (Number(defRate) > 2.5 || compliance < 85) {
-                    statusLabel = '🟡 ALERTA';
-                    statusBg = 'text-amber-500';
-                  }
 
                   return (
                     <tr 
@@ -5868,19 +5919,13 @@ export const ModelosProductosView: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-3 text-right text-slate-300 font-mono font-semibold">{m.producido.toLocaleString()}</td>
                       <td className="py-3.5 px-3 text-right text-slate-400 font-mono">{part}%</td>
-                      <td className="py-3.5 px-3 text-right text-slate-300 font-mono">{leadAvg} hrs</td>
-                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{inyAvg}m</td>
-                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{estAvg}m</td>
-                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{bndAvg}m</td>
+                      <td className="py-3.5 px-3 text-right text-slate-300 font-mono">{m.leadTimeSum.toLocaleString()} hrs</td>
+                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{m.timeInySum.toLocaleString()}m</td>
+                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{m.timeEstSum.toLocaleString()}m</td>
+                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{m.timeBndSum.toLocaleString()}m</td>
                       <td className="py-3.5 px-3 text-right text-red-400 font-mono font-bold">{defRate}%</td>
                       <td className="py-3.5 px-3 text-right text-slate-400 font-mono">{m.segundas.toLocaleString()}</td>
-                      <td className="py-3.5 px-3 text-right text-slate-400 font-mono">{m.reprocesos.toLocaleString()}</td>
                       <td className="py-3.5 px-3 text-right font-mono font-bold text-cyan-400">{compliance}%</td>
-                      <td className="py-3.5 px-3 text-center">
-                        <span className={`text-[10px] font-mono font-black ${statusBg}`}>
-                          {statusLabel}
-                        </span>
-                      </td>
                     </tr>
                   );
                 })}
@@ -6522,14 +6567,6 @@ export const CalidadView: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-          <button 
-            onClick={() => setIsFormOpen(true)}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-pink-900 hover:bg-pink-850 text-white text-xs font-mono font-bold rounded-lg transition border border-pink-700 cursor-pointer"
-          >
-            <PlusCircle className="w-4 h-4 text-pink-200" />
-            + Registrar Incidencia Física
-          </button>
-          
           <button 
             onClick={() => {
               addAuditLog('QUALITY', 'EXPORT_PERFORMANCE_METRICS', `Exportación exitosa de matriz de mermas e inspección`);
@@ -7633,7 +7670,7 @@ const seedInjectionRecords = (tenantId: string): InjectionProductionRecord[] => 
 };
 
 export const InyeccionView: React.FC = () => {
-  const { currentTenant, addAuditLog } = useDashboard();
+  const { currentTenant, addAuditLog, users, can, getGoalForAreaTurn } = useDashboard();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [chartTab, setChartTab] = useState<'prod' | 'def' | 'eff'>('prod');
 
@@ -7681,6 +7718,9 @@ export const InyeccionView: React.FC = () => {
   const [newMerma, setNewMerma] = useState(5);
   const [newDefecto, setNewDefecto] = useState('Burbuja de Aire');
   const [newObservaciones, setNewObservaciones] = useState('Temperatura controlada');
+  const activeResponsables = users.filter(user => user.active).map(user => user.username);
+  const responsibleOptions = activeResponsables.length > 0 ? activeResponsables : ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz'];
+  const leaderOptions = activeResponsables.length > 0 ? activeResponsables : ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
 
   // Distinct filter states
   const [filtroFecha, setFiltroFecha] = useState('');
@@ -7774,13 +7814,14 @@ export const InyeccionView: React.FC = () => {
   // KPI Calculations
   const baseGoal = 15000;
   const hoyDate = '2026-05-25';
+  const selectedTurnCode = filtroTurno === '2' ? 'TARDE' : filtroTurno === '3' ? 'NOCHE' : 'MAÑANA';
   
   // 1. Pares inyectados hoy matching standard 2026-05-25 or latest date
   const recordsHoy = filteredRecords.filter(r => r.fecha === (filtroFecha || hoyDate));
   const paresInyectadosHoy = recordsHoy.reduce((sum, r) => sum + r.totalInspeccionado, 0);
 
   // 2. Meta diaria
-  const metaDiariaInyeccion = baseGoal;
+  const metaDiariaInyeccion = getGoalForAreaTurn('inyeccion', selectedTurnCode)?.metaTurno || baseGoal;
 
   // 3. Cumplimiento meta
   const cumplimientoMeta = metaDiariaInyeccion > 0 ? Number(((paresInyectadosHoy / metaDiariaInyeccion) * 100).toFixed(1)) : 0;
@@ -7982,26 +8023,30 @@ export const InyeccionView: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-          <button 
-            id="register_inj_report_btn"
-            onClick={() => setIsFormOpen(true)}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-amber-600 hover:bg-amber-550 text-slate-950 text-xs font-mono font-black rounded-lg transition border border-amber-500 cursor-pointer"
-          >
-            <PlusCircle className="w-4 h-4 text-slate-950" />
-            + Nuevo reporte de inyección
-          </button>
+          {can('inyeccion.create_log') && (
+            <button 
+              id="register_inj_report_btn"
+              onClick={() => setIsFormOpen(true)}
+              className="flex items-center gap-1.5 px-4.5 py-2 bg-amber-600 hover:bg-amber-550 text-slate-950 text-xs font-mono font-black rounded-lg transition border border-amber-500 cursor-pointer"
+            >
+              <PlusCircle className="w-4 h-4 text-slate-950" />
+              + Nuevo reporte de inyección
+            </button>
+          )}
           
-          <button 
-            id="export_inj_btn"
-            onClick={() => {
-              addAuditLog('PRODUCTION', 'EXPORT_INJECTION_SHEET', `Descarga de matriz de eficiencia de inyección`);
-              alert(`📥 Descarga iniciada: "Matriz_EVA_TermoInyeccion_${currentTenant.id}.csv" generada exitosamente.`);
-            }}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition"
-          >
-            <Download className="w-4 h-4 text-amber-400" />
-            Exportar XLS
-          </button>
+          {can('inyeccion.export') && (
+            <button 
+              id="export_inj_btn"
+              onClick={() => {
+                addAuditLog('PRODUCTION', 'EXPORT_INJECTION_SHEET', `Descarga de matriz de eficiencia de inyección`);
+                alert(`📥 Descarga iniciada: "Matriz_EVA_TermoInyeccion_${currentTenant.id}.csv" generada exitosamente.`);
+              }}
+              className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition"
+            >
+              <Download className="w-4 h-4 text-amber-400" />
+              Exportar XLS
+            </button>
+          )}
         </div>
       </div>
 
@@ -8828,27 +8873,29 @@ export const InyeccionView: React.FC = () => {
                 {/* Inspector */}
                 <div className="space-y-1">
                   <label className="text-[10px] uppercase font-mono text-slate-400 font-bold block">Inspector de calidad</label>
-                  <input 
-                    type="text"
+                  <select 
                     required
                     value={newInspector}
                     onChange={(e) => setNewInspector(e.target.value)}
-                    placeholder="Ej. Ins. Carlos Baca"
                     className="w-full bg-slate-950 border border-slate-850 rounded p-1.5 text-slate-200 focus:outline-none focus:border-amber-500"
-                  />
+                  >
+                    {!responsibleOptions.includes(newInspector) && <option value={newInspector}>{newInspector}</option>}
+                    {responsibleOptions.map(option => <option key={option} value={option}>{option}</option>)}
+                  </select>
                 </div>
 
                 {/* Líder */}
                 <div className="space-y-1">
                   <label className="text-[10px] uppercase font-mono text-slate-400 font-bold block">Líder de Turno</label>
-                  <input 
-                    type="text"
+                  <select 
                     required
                     value={newLider}
                     onChange={(e) => setNewLider(e.target.value)}
-                    placeholder="Ej. Líd. Sonia Juárez"
                     className="w-full bg-slate-950 border border-slate-850 rounded p-1.5 text-slate-200 focus:outline-none focus:border-amber-500"
-                  />
+                  >
+                    {!leaderOptions.includes(newLider) && <option value={newLider}>{newLider}</option>}
+                    {leaderOptions.map(option => <option key={option} value={option}>{option}</option>)}
+                  </select>
                 </div>
 
                 {/* Lote */}
@@ -9110,7 +9157,7 @@ const seedBandaRecords = (tenantId: string): BandaProductionRecord[] => {
 };
 
 export const BandaView: React.FC = () => {
-  const { currentTenant, addAuditLog } = useDashboard();
+  const { currentTenant, addAuditLog, users, can, getGoalForAreaTurn } = useDashboard();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [chartTab, setChartTab] = useState<'prod' | 'def' | 'eff'>('prod');
 
@@ -9158,6 +9205,9 @@ export const BandaView: React.FC = () => {
   const [newDefecto, setNewDefecto] = useState('Plastisol Despegado');
   const [newAccion, setNewAccion] = useState('Ajustar temperatura de horno de curado');
   const [newObservaciones, setNewObservaciones] = useState('Optimización de secado rápido');
+  const activeResponsables = users.filter(user => user.active).map(user => user.username);
+  const responsibleOptions = activeResponsables.length > 0 ? activeResponsables : ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz'];
+  const leaderOptions = activeResponsables.length > 0 ? activeResponsables : ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
 
   // Distinct filter states
   const [filtroFecha, setFiltroFecha] = useState('');
@@ -9248,12 +9298,13 @@ export const BandaView: React.FC = () => {
 
   // KPI Calculations
   const baseGoal = 12000;
-  const metaDiariaBanda = baseGoal;
+  const selectedTurnCode = filtroTurno === '2' ? 'TARDE' : filtroTurno === '3' ? 'NOCHE' : 'MAÑANA';
+  const metaDiariaBanda = getGoalForAreaTurn('banda', selectedTurnCode)?.metaTurno || baseGoal;
   const hoyDate = '2026-05-25';
   
   const recordsHoy = filteredRecords.filter(r => r.fecha === (filtroFecha || hoyDate));
   const paresProcesadosHoy = recordsHoy.reduce((sum, r) => sum + r.totalProcesado, 0);
-  const cumplimientoMeta = baseGoal > 0 ? Number(((paresProcesadosHoy / baseGoal) * 100).toFixed(1)) : 0;
+  const cumplimientoMeta = metaDiariaBanda > 0 ? Number(((paresProcesadosHoy / metaDiariaBanda) * 100).toFixed(1)) : 0;
   const promedioParesPorHora = paresProcesadosHoy > 0 ? Math.round(paresProcesadosHoy / 8) : 0;
 
   const totalProcesadoScope = filteredRecords.reduce((sum, r) => sum + r.totalProcesado, 0);
@@ -9399,26 +9450,30 @@ export const BandaView: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-          <button 
-            id="register_bnd_report_btn"
-            onClick={() => setIsFormOpen(true)}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-indigo-600 hover:bg-indigo-550 text-white text-xs font-mono font-black rounded-lg transition border border-indigo-500 cursor-pointer"
-          >
-            <PlusCircle className="w-4 h-4 text-white" />
-            + Nuevo reporte de banda
-          </button>
+          {can('banda.create_log') && (
+            <button 
+              id="register_bnd_report_btn"
+              onClick={() => setIsFormOpen(true)}
+              className="flex items-center gap-1.5 px-4.5 py-2 bg-indigo-600 hover:bg-indigo-550 text-white text-xs font-mono font-black rounded-lg transition border border-indigo-500 cursor-pointer"
+            >
+              <PlusCircle className="w-4 h-4 text-white" />
+              + Nuevo reporte de banda
+            </button>
+          )}
           
-          <button 
-            id="export_bnd_btn"
-            onClick={() => {
-              addAuditLog('PRODUCTION', 'EXPORT_BANDA_SHEET', `Descarga de matriz de eficiencia de banda`);
-              alert(`📥 Descarga iniciada: "Matriz_Banda_${currentTenant.id}.csv"`);
-            }}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition pointer"
-          >
-            <Download className="w-4 h-4 text-indigo-400" />
-            Exportar XLS
-          </button>
+          {can('banda.export') && (
+            <button 
+              id="export_bnd_btn"
+              onClick={() => {
+                addAuditLog('PRODUCTION', 'EXPORT_BANDA_SHEET', `Descarga de matriz de eficiencia de banda`);
+                alert(`📥 Descarga iniciada: "Matriz_Banda_${currentTenant.id}.csv"`);
+              }}
+              className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition pointer"
+            >
+              <Download className="w-4 h-4 text-indigo-400" />
+              Exportar XLS
+            </button>
+          )}
         </div>
       </div>
 
@@ -9956,18 +10011,16 @@ export const BandaView: React.FC = () => {
                 <div className="space-y-1">
                   <label className="text-slate-400 block font-bold">Inspector:</label>
                   <select value={newInspector} onChange={(e) => setNewInspector(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:outline-none">
-                    {['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz'].map((ins, idx) => (
-                      <option key={idx} value={ins}>{ins}</option>
-                    ))}
+                    {!responsibleOptions.includes(newInspector) && <option value={newInspector}>{newInspector}</option>}
+                    {responsibleOptions.map(option => <option key={option} value={option}>{option}</option>)}
                   </select>
                 </div>
 
                 <div className="space-y-1">
                   <label className="text-slate-400 block font-bold">Líder:</label>
                   <select value={newLider} onChange={(e) => setNewLider(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:outline-none">
-                    {['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'].map((lid, idx) => (
-                      <option key={idx} value={lid}>{lid}</option>
-                    ))}
+                    {!leaderOptions.includes(newLider) && <option value={newLider}>{newLider}</option>}
+                    {leaderOptions.map(option => <option key={option} value={option}>{option}</option>)}
                   </select>
                 </div>
 
@@ -12529,7 +12582,186 @@ export const CatalogosView: React.FC = () => {
 
 /* 14. Configuración View */
 export const ConfiguracionView: React.FC = () => {
-  const { currentTenant, currentUser, exchangeRate, isOffline, toggleOffline } = useDashboard();
+  const {
+    currentTenant,
+    currentUser,
+    isOffline,
+    toggleOffline,
+    users,
+    turns,
+    productionGoals,
+    addUser,
+    updateUser,
+    toggleUserActive,
+    activateUser,
+    addTurn,
+    updateTurn,
+    addProductionGoal,
+    updateProductionGoal,
+    getEffectivePermissions,
+    can
+  } = useDashboard();
+
+  const roles: Role[] = ['DIRECTOR_GENERAL', 'LIDER_ADMINISTRACION', 'LIDER_INYECCION', 'SUPERVISOR_CALIDAD'];
+  const areaOptions: { id: ProductionAreaId; label: string }[] = [
+    { id: 'almacen', label: 'Almacén' },
+    { id: 'inyeccion', label: 'Inyección' },
+    { id: 'aduana', label: 'Aduana' },
+    { id: 'banda', label: 'Banda' },
+    { id: 'embarque', label: 'Embarque' },
+    { id: 'entregas', label: 'Entregas' },
+    { id: 'salidas_tercera', label: 'Salidas de tercera' }
+  ];
+  const activeUsers = users.filter(user => user.active);
+  const [activeTab, setActiveTab] = useState<'usuarios' | 'permisos' | 'metas' | 'turnos'>('usuarios');
+
+  const [editingUserId, setEditingUserId] = useState<string | null>(null);
+  const [selectedPermissionUserId, setSelectedPermissionUserId] = useState<string>('');
+  const [userUsername, setUserUsername] = useState('');
+  const [userPassword, setUserPassword] = useState('');
+  const [userRoles, setUserRoles] = useState<Role[]>(['LIDER_INYECCION']);
+  const selectedPermissionUser = users.find(user => user.id === selectedPermissionUserId) || users[0];
+
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
+  const [turnCode, setTurnCode] = useState('MAÑANA');
+  const [turnName, setTurnName] = useState('Turno Mañana');
+  const [turnStart, setTurnStart] = useState('07:00');
+  const [turnEnd, setTurnEnd] = useState('14:59');
+  const [turnActive, setTurnActive] = useState(true);
+  const [turnResponsable, setTurnResponsable] = useState('');
+
+  const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
+  const [goalArea, setGoalArea] = useState<ProductionAreaId>('inyeccion');
+  const [goalTurnId, setGoalTurnId] = useState(turns[0]?.id || '');
+  const [goalMetaHora, setGoalMetaHora] = useState(150);
+  const [goalMetaTurno, setGoalMetaTurno] = useState(15000);
+  const [goalResponsable, setGoalResponsable] = useState(activeUsers[0]?.id || '');
+  const [goalActive, setGoalActive] = useState(true);
+
+  useEffect(() => {
+    if (!goalTurnId && turns[0]) setGoalTurnId(turns[0].id);
+    if (!goalResponsable && activeUsers[0]) setGoalResponsable(activeUsers[0].id);
+    if (!turnResponsable && activeUsers[0]) setTurnResponsable(activeUsers[0].id);
+    if (!selectedPermissionUserId && users[0]) setSelectedPermissionUserId(users[0].id);
+  }, [activeUsers, goalResponsable, goalTurnId, selectedPermissionUserId, turnResponsable, turns, users]);
+
+  const roleLabel = (role: Role) => role.replace(/_/g, ' ');
+  const areaLabel = (area: ProductionAreaId) => areaOptions.find(option => option.id === area)?.label || area;
+  const userName = (userId?: string) => users.find(user => user.id === userId)?.username || 'Sin asignar';
+  const turnLabel = (turnId: string) => turns.find(turn => turn.id === turnId)?.name || 'Sin turno';
+
+  const resetUserForm = () => {
+    setEditingUserId(null);
+    setUserUsername('');
+    setUserPassword('');
+    setUserRoles(['LIDER_INYECCION']);
+  };
+
+  const handleEditUser = (user: AppUser) => {
+    setEditingUserId(user.id);
+    setUserUsername(user.username);
+    setUserPassword(user.password);
+    setUserRoles(user.roles);
+    setActiveTab('usuarios');
+  };
+
+  const handleSaveUser = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userUsername.trim() || !userPassword.trim()) return;
+    const payload = { username: userUsername.trim(), password: userPassword.trim(), roles: userRoles.length ? userRoles : ['LIDER_INYECCION'] };
+    if (editingUserId) updateUser(editingUserId, payload);
+    else addUser(payload);
+    resetUserForm();
+  };
+
+  const toggleUserRole = (role: Role) => {
+    setUserRoles(prev => prev.includes(role) ? prev.filter(item => item !== role) : [...prev, role]);
+  };
+
+  const togglePermission = (user: AppUser, permission: PermissionKey) => {
+    const effective = getEffectivePermissions(user).has(permission);
+    updateUser(user.id, {
+      permissionOverrides: {
+        ...user.permissionOverrides,
+        [permission]: !effective
+      }
+    });
+  };
+
+  const resetUserPermissions = (user: AppUser) => {
+    updateUser(user.id, { permissionOverrides: {} });
+  };
+
+  const handleEditTurn = (turn: typeof turns[number]) => {
+    setEditingTurnId(turn.id);
+    setTurnCode(turn.code);
+    setTurnName(turn.name);
+    setTurnStart(turn.startTime);
+    setTurnEnd(turn.endTime);
+    setTurnActive(turn.active);
+    setTurnResponsable(turn.responsableUserId || activeUsers[0]?.id || '');
+    setActiveTab('turnos');
+  };
+
+  const resetTurnForm = () => {
+    setEditingTurnId(null);
+    setTurnCode('MAÑANA');
+    setTurnName('Turno Mañana');
+    setTurnStart('07:00');
+    setTurnEnd('14:59');
+    setTurnActive(true);
+    setTurnResponsable(activeUsers[0]?.id || '');
+  };
+
+  const handleSaveTurn = (e: React.FormEvent) => {
+    e.preventDefault();
+    const payload = { code: turnCode.trim(), name: turnName.trim(), startTime: turnStart, endTime: turnEnd, active: turnActive, responsableUserId: turnResponsable };
+    if (editingTurnId) updateTurn(editingTurnId, payload);
+    else addTurn(payload);
+    resetTurnForm();
+  };
+
+  const handleEditGoal = (goal: typeof productionGoals[number]) => {
+    setEditingGoalId(goal.id);
+    setGoalArea(goal.area);
+    setGoalTurnId(goal.turnId);
+    setGoalMetaHora(goal.metaHora);
+    setGoalMetaTurno(goal.metaTurno);
+    setGoalResponsable(goal.responsableUserId);
+    setGoalActive(goal.active);
+    setActiveTab('metas');
+  };
+
+  const resetGoalForm = () => {
+    setEditingGoalId(null);
+    setGoalArea('inyeccion');
+    setGoalTurnId(turns[0]?.id || '');
+    setGoalMetaHora(150);
+    setGoalMetaTurno(15000);
+    setGoalResponsable(activeUsers[0]?.id || '');
+    setGoalActive(true);
+  };
+
+  const handleSaveGoal = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!goalTurnId || !goalResponsable) return;
+    const payload = {
+      area: goalArea,
+      turnId: goalTurnId,
+      metaHora: Number(goalMetaHora),
+      metaTurno: Number(goalMetaTurno),
+      responsableUserId: goalResponsable,
+      active: goalActive
+    };
+    if (editingGoalId) updateProductionGoal(editingGoalId, payload);
+    else addProductionGoal(payload);
+    resetGoalForm();
+  };
+
+  const tabClass = (tab: typeof activeTab) =>
+    `px-3 py-2 rounded-lg text-[10px] font-mono font-black uppercase tracking-wider transition ${
+      activeTab === tab ? 'bg-cyan-500 text-slate-950' : 'bg-slate-950 text-slate-400 hover:text-slate-100 border border-slate-850'
+    }`;
 
   return (
     <div className="space-y-6">
@@ -12540,8 +12772,15 @@ export const ConfiguracionView: React.FC = () => {
           Configuración Global Plasyect Intelligence
         </h2>
         <p className="text-xs text-slate-550">
-          Privilegios de seguridad RBAC, aislamiento de base de datos mock e integración.
+          Usuarios, permisos RBAC, metas por turno y responsables de producción.
         </p>
+      </div>
+
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setActiveTab('usuarios')} className={tabClass('usuarios')}>Usuarios</button>
+        <button onClick={() => setActiveTab('permisos')} className={tabClass('permisos')}>Permisos</button>
+        <button onClick={() => setActiveTab('metas')} className={tabClass('metas')}>Metas</button>
+        <button onClick={() => setActiveTab('turnos')} className={tabClass('turnos')}>Turnos</button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -12617,6 +12856,176 @@ export const ConfiguracionView: React.FC = () => {
         </div>
 
       </div>
+
+      {activeTab === 'usuarios' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <form onSubmit={handleSaveUser} className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
+            <h3 className="text-xs font-mono font-black text-cyan-400 uppercase">{editingUserId ? 'Editar usuario' : 'Crear usuario'}</h3>
+            <input value={userUsername} onChange={(e) => setUserUsername(e.target.value)} disabled={!can('configuracion.manage_users')} placeholder="username" className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" required />
+            <input value={userPassword} onChange={(e) => setUserPassword(e.target.value)} disabled={!can('configuracion.manage_users')} placeholder="password" className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" required />
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              {roles.map(role => (
+                <label key={role} className="flex items-center gap-2 bg-slate-950 border border-slate-850 rounded p-2 text-[10px] font-mono text-slate-300">
+                  <input type="checkbox" disabled={!can('configuracion.manage_users')} checked={userRoles.includes(role)} onChange={() => toggleUserRole(role)} />
+                  {roleLabel(role)}
+                </label>
+              ))}
+            </div>
+            <div className="flex gap-2">
+              <button disabled={!can('configuracion.manage_users')} className="px-3 py-2 bg-cyan-500 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 rounded text-[10px] font-mono font-black uppercase">
+                {editingUserId ? 'Guardar' : 'Crear'}
+              </button>
+              {editingUserId && <button type="button" onClick={resetUserForm} className="px-3 py-2 bg-slate-800 text-slate-300 rounded text-[10px] font-mono font-bold uppercase">Nuevo</button>}
+            </div>
+          </form>
+
+          <div className="xl:col-span-2 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-950 text-slate-500 font-mono uppercase text-[10px]">
+                <tr>
+                  <th className="p-3 text-left">Usuario</th>
+                  <th className="p-3 text-left">Roles</th>
+                  <th className="p-3 text-left">Password</th>
+                  <th className="p-3 text-left">Estado</th>
+                  <th className="p-3 text-right">Acciones</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-850">
+                {users.map(user => (
+                  <tr key={user.id}>
+                    <td className="p-3 font-bold text-slate-100">{user.username}</td>
+                    <td className="p-3 text-slate-400 font-mono">{user.roles.map(roleLabel).join(', ')}</td>
+                    <td className="p-3 text-slate-500 font-mono">{'•'.repeat(Math.min(user.password.length, 10))}</td>
+                    <td className="p-3"><span className={user.active ? 'text-emerald-400' : 'text-rose-400'}>{user.active ? 'ACTIVO' : 'INACTIVO'}</span></td>
+                    <td className="p-3 text-right space-x-2 whitespace-nowrap">
+                      <button onClick={() => activateUser(user.id)} disabled={!user.active} className="text-[10px] text-cyan-400 disabled:text-slate-600 font-mono font-bold">Activar usuario</button>
+                      <button onClick={() => handleEditUser(user)} className="text-[10px] text-amber-400 font-mono font-bold">Editar</button>
+                      <button onClick={() => toggleUserActive(user.id)} disabled={!can('configuracion.manage_users')} className="text-[10px] text-slate-400 disabled:text-slate-700 font-mono font-bold">{user.active ? 'Desactivar' : 'Activar'}</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'permisos' && selectedPermissionUser && (
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
+            <h3 className="text-xs font-mono font-black text-cyan-400 uppercase">Usuario permisos</h3>
+            <select value={selectedPermissionUser.id} onChange={(e) => setSelectedPermissionUserId(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
+              {users.map(user => <option key={user.id} value={user.id}>{user.username}</option>)}
+            </select>
+            <div className="text-[10px] text-slate-500 font-mono">
+              Base por rol: {selectedPermissionUser.roles.map(roleLabel).join(', ')}
+            </div>
+            <button onClick={() => resetUserPermissions(selectedPermissionUser)} disabled={!can('configuracion.manage_permissions')} className="px-3 py-2 bg-slate-800 disabled:bg-slate-900 text-slate-300 disabled:text-slate-600 rounded text-[10px] font-mono font-bold uppercase">
+              Limpiar overrides
+            </button>
+          </div>
+
+          <div className="xl:col-span-3 bg-slate-900 border border-slate-800 rounded-lg p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
+            {ALL_PERMISSION_KEYS.map(permission => {
+              const effective = getEffectivePermissions(selectedPermissionUser).has(permission);
+              const hasOverride = selectedPermissionUser.permissionOverrides[permission] !== undefined;
+              return (
+                <label key={permission} className={`flex items-start gap-2 border rounded p-2 text-[10px] font-mono ${effective ? 'bg-emerald-950/20 border-emerald-900/40 text-emerald-300' : 'bg-slate-950 border-slate-850 text-slate-500'}`}>
+                  <input type="checkbox" disabled={!can('configuracion.manage_permissions')} checked={effective} onChange={() => togglePermission(selectedPermissionUser, permission)} />
+                  <span>
+                    <span className="block font-bold">{PERMISSION_LABELS[permission]}</span>
+                    {hasOverride && <span className="text-amber-400">override</span>}
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'turnos' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <form onSubmit={handleSaveTurn} className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
+            <h3 className="text-xs font-mono font-black text-cyan-400 uppercase">{editingTurnId ? 'Editar turno' : 'Crear turno'}</h3>
+            <input value={turnCode} onChange={(e) => setTurnCode(e.target.value.toUpperCase())} disabled={!can('configuracion.manage_turns')} placeholder="Código" className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100 font-mono" required />
+            <input value={turnName} onChange={(e) => setTurnName(e.target.value)} disabled={!can('configuracion.manage_turns')} placeholder="Nombre" className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" required />
+            <div className="grid grid-cols-2 gap-2">
+              <input type="time" value={turnStart} onChange={(e) => setTurnStart(e.target.value)} disabled={!can('configuracion.manage_turns')} className="bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" />
+              <input type="time" value={turnEnd} onChange={(e) => setTurnEnd(e.target.value)} disabled={!can('configuracion.manage_turns')} className="bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" />
+            </div>
+            <select value={turnResponsable} onChange={(e) => setTurnResponsable(e.target.value)} disabled={!can('configuracion.manage_turns')} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
+              {activeUsers.map(user => <option key={user.id} value={user.id}>{user.username}</option>)}
+            </select>
+            <label className="flex items-center gap-2 text-xs text-slate-400"><input type="checkbox" checked={turnActive} onChange={(e) => setTurnActive(e.target.checked)} /> Activo</label>
+            <button disabled={!can('configuracion.manage_turns')} className="px-3 py-2 bg-cyan-500 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 rounded text-[10px] font-mono font-black uppercase">{editingTurnId ? 'Guardar' : 'Crear'}</button>
+          </form>
+
+          <div className="xl:col-span-2 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-950 text-slate-500 font-mono uppercase text-[10px]">
+                <tr><th className="p-3 text-left">Turno</th><th className="p-3 text-left">Horario</th><th className="p-3 text-left">Responsable</th><th className="p-3 text-left">Estado</th><th className="p-3 text-right">Acción</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-850">
+                {turns.map(turn => (
+                  <tr key={turn.id}>
+                    <td className="p-3 text-slate-100 font-bold">{turn.name} <span className="text-slate-500 font-mono">({turn.code})</span></td>
+                    <td className="p-3 text-slate-400 font-mono">{turn.startTime} - {turn.endTime}</td>
+                    <td className="p-3 text-slate-400">{userName(turn.responsableUserId)}</td>
+                    <td className="p-3">{turn.active ? <span className="text-emerald-400">ACTIVO</span> : <span className="text-rose-400">INACTIVO</span>}</td>
+                    <td className="p-3 text-right"><button onClick={() => handleEditTurn(turn)} className="text-[10px] text-amber-400 font-mono font-bold">Editar</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'metas' && (
+        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+          <form onSubmit={handleSaveGoal} className="bg-slate-900 border border-slate-800 rounded-lg p-4 space-y-3">
+            <h3 className="text-xs font-mono font-black text-cyan-400 uppercase">{editingGoalId ? 'Editar meta' : 'Crear meta'}</h3>
+            <select value={goalArea} onChange={(e) => setGoalArea(e.target.value as ProductionAreaId)} disabled={!can('configuracion.manage_goals')} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
+              {areaOptions.map(area => <option key={area.id} value={area.id}>{area.label}</option>)}
+            </select>
+            <select value={goalTurnId} onChange={(e) => setGoalTurnId(e.target.value)} disabled={!can('configuracion.manage_goals')} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
+              {turns.map(turn => <option key={turn.id} value={turn.id}>{turn.name}</option>)}
+            </select>
+            <select value={goalResponsable} onChange={(e) => setGoalResponsable(e.target.value)} disabled={!can('configuracion.manage_goals')} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
+              {activeUsers.map(user => <option key={user.id} value={user.id}>{user.username}</option>)}
+            </select>
+            <div className="grid grid-cols-2 gap-2">
+              <input type="number" value={goalMetaHora} onChange={(e) => setGoalMetaHora(Number(e.target.value))} disabled={!can('configuracion.manage_goals')} placeholder="Meta hora" className="bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" />
+              <input type="number" value={goalMetaTurno} onChange={(e) => setGoalMetaTurno(Number(e.target.value))} disabled={!can('configuracion.manage_goals')} placeholder="Meta turno" className="bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" />
+            </div>
+            <label className="flex items-center gap-2 text-xs text-slate-400"><input type="checkbox" checked={goalActive} onChange={(e) => setGoalActive(e.target.checked)} /> Activa</label>
+            <button disabled={!can('configuracion.manage_goals') || !turns.length || !activeUsers.length} className="px-3 py-2 bg-cyan-500 disabled:bg-slate-800 text-slate-950 disabled:text-slate-500 rounded text-[10px] font-mono font-black uppercase">{editingGoalId ? 'Guardar' : 'Crear'}</button>
+          </form>
+
+          <div className="xl:col-span-2 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-950 text-slate-500 font-mono uppercase text-[10px]">
+                <tr><th className="p-3 text-left">Área</th><th className="p-3 text-left">Turno</th><th className="p-3 text-right">Meta hora</th><th className="p-3 text-right">Meta turno</th><th className="p-3 text-left">Responsable</th><th className="p-3 text-right">Acción</th></tr>
+              </thead>
+              <tbody className="divide-y divide-slate-850">
+                {productionGoals.map(goal => (
+                  <tr key={goal.id}>
+                    <td className="p-3 text-slate-100 font-bold">{areaLabel(goal.area)} {!goal.active && <span className="text-rose-400 text-[9px]">(OFF)</span>}</td>
+                    <td className="p-3 text-slate-400">{turnLabel(goal.turnId)}</td>
+                    <td className="p-3 text-right text-slate-300 font-mono">{goal.metaHora.toLocaleString()}</td>
+                    <td className="p-3 text-right text-cyan-400 font-mono font-bold">{goal.metaTurno.toLocaleString()}</td>
+                    <td className="p-3 text-slate-400">{userName(goal.responsableUserId)}</td>
+                    <td className="p-3 text-right"><button onClick={() => handleEditGoal(goal)} className="text-[10px] text-amber-400 font-mono font-bold">Editar</button></td>
+                  </tr>
+                ))}
+                {productionGoals.length === 0 && (
+                  <tr><td colSpan={6} className="p-4 text-center text-slate-500 font-mono text-xs">Sin metas configuradas. Se usan metas fallback.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
     </div>
   );

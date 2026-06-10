@@ -44,7 +44,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({
     : '';
 
   return (
-    <div className="bg-white border border-slate-200 rounded-lg p-5 flex flex-col justify-between shadow-sm">
+    <div className="bg-white border border-slate-200 rounded-lg p-4 flex flex-col justify-between shadow-sm min-w-[260px] overflow-hidden">
       <div>
         <div className="flex justify-between items-start mb-1">
           <h4 className="text-xs font-bold text-slate-700 tracking-widest uppercase font-mono">{title}</h4>
@@ -53,7 +53,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({
         {subtitle && <p className="text-xs text-slate-500 mb-4">{subtitle}</p>}
       </div>
 
-      <div className="grow flex items-center justify-center relative my-2" style={{ height: `${height}px` }}>
+      <div className="grow flex items-center justify-center relative my-2 overflow-x-auto" style={{ height: `${height}px` }}>
         {type === 'bar' && (
           <div className="w-full h-full flex items-end justify-between px-2 gap-2 pt-6">
             {data.map((item, idx) => {

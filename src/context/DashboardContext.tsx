@@ -10,7 +10,12 @@ import {
   Role, 
   UserSession,
   TenantId,
-  StageId
+  StageId,
+  AppUser,
+  PermissionKey,
+  ProductionTurn,
+  ProductionGoal,
+  ProductionAreaId
 } from '../types';
 import { 
   TENANTS, 
@@ -23,6 +28,143 @@ import {
   INITIAL_DEFECTS, 
   INITIAL_AUDITS 
 } from '../data/mockData';
+import { backendEnabled, dashboardApi, sendApiMutation } from '../api/dashboardApi';
+
+export const ALL_PERMISSION_KEYS: PermissionKey[] = [
+  'dashboard.view',
+  'pipeline_lote.view',
+  'pipeline_pedido.view',
+  'produccion_area.view',
+  'modelos_productos.view',
+  'calidad.view',
+  'inyeccion.view',
+  'banda.view',
+  'aduana_liberacion.view',
+  'embarque.view',
+  'ocr_validacion.view',
+  'reportes_historicos.view',
+  'catalogos.view',
+  'configuracion.view',
+  'produccion_area.create_log',
+  'produccion_area.export',
+  'inyeccion.create_log',
+  'inyeccion.export',
+  'banda.create_log',
+  'banda.export',
+  'configuracion.manage_users',
+  'configuracion.manage_permissions',
+  'configuracion.manage_goals',
+  'configuracion.manage_turns'
+];
+
+export const PERMISSION_LABELS: Record<PermissionKey, string> = {
+  'dashboard.view': 'Ver Dashboard',
+  'pipeline_lote.view': 'Ver Pipeline por Lote',
+  'pipeline_pedido.view': 'Ver Pipeline por Pedido',
+  'produccion_area.view': 'Ver Producción por Área',
+  'modelos_productos.view': 'Ver Modelos y Productos',
+  'calidad.view': 'Ver Calidad',
+  'inyeccion.view': 'Ver Inyección',
+  'banda.view': 'Ver Banda',
+  'aduana_liberacion.view': 'Ver Aduana / Liberación',
+  'embarque.view': 'Ver Embarque',
+  'ocr_validacion.view': 'Ver OCR',
+  'reportes_historicos.view': 'Ver Reportes',
+  'catalogos.view': 'Ver Catálogos',
+  'configuracion.view': 'Ver Configuración',
+  'produccion_area.create_log': 'Crear logs Producción',
+  'produccion_area.export': 'Exportar Producción',
+  'inyeccion.create_log': 'Crear logs Inyección',
+  'inyeccion.export': 'Exportar Inyección',
+  'banda.create_log': 'Crear logs Banda',
+  'banda.export': 'Exportar Banda',
+  'configuracion.manage_users': 'Administrar usuarios',
+  'configuracion.manage_permissions': 'Administrar permisos',
+  'configuracion.manage_goals': 'Administrar metas',
+  'configuracion.manage_turns': 'Administrar turnos'
+};
+
+export const ROLE_PERMISSION_DEFAULTS: Record<Role, PermissionKey[]> = {
+  DIRECTOR_GENERAL: ALL_PERMISSION_KEYS,
+  LIDER_ADMINISTRACION: [
+    'dashboard.view',
+    'pipeline_lote.view',
+    'pipeline_pedido.view',
+    'produccion_area.view',
+    'modelos_productos.view',
+    'reportes_historicos.view',
+    'catalogos.view',
+    'configuracion.view',
+    'produccion_area.export',
+    'inyeccion.export',
+    'banda.export',
+    'configuracion.manage_users',
+    'configuracion.manage_permissions',
+    'configuracion.manage_goals',
+    'configuracion.manage_turns'
+  ],
+  LIDER_INYECCION: [
+    'dashboard.view',
+    'pipeline_lote.view',
+    'produccion_area.view',
+    'inyeccion.view',
+    'banda.view',
+    'produccion_area.create_log',
+    'produccion_area.export',
+    'inyeccion.create_log',
+    'inyeccion.export',
+    'banda.create_log',
+    'banda.export'
+  ],
+  SUPERVISOR_CALIDAD: [
+    'dashboard.view',
+    'pipeline_lote.view',
+    'modelos_productos.view',
+    'calidad.view',
+    'aduana_liberacion.view',
+    'ocr_validacion.view',
+    'reportes_historicos.view'
+  ]
+};
+
+const DEFAULT_TURNS: Omit<ProductionTurn, 'tenantId'>[] = [
+  { id: 'turno_manana', code: 'MAÑANA', name: 'Turno Mañana', startTime: '07:00', endTime: '14:59', active: true },
+  { id: 'turno_tarde', code: 'TARDE', name: 'Turno Tarde', startTime: '15:00', endTime: '22:59', active: true },
+  { id: 'turno_noche', code: 'NOCHE', name: 'Turno Noche', startTime: '23:00', endTime: '06:59', active: true }
+];
+
+const createDefaultUsers = (tenantId: TenantId): AppUser[] => [
+  {
+    id: `usr_${tenantId}_director`,
+    tenantId,
+    username: 'Luis Felipe Bedia',
+    password: 'director123',
+    roles: ['DIRECTOR_GENERAL'],
+    permissionOverrides: {},
+    active: true
+  },
+  {
+    id: `usr_${tenantId}_inyeccion`,
+    tenantId,
+    username: 'Carlos Mendoza',
+    password: 'inyeccion123',
+    roles: ['LIDER_INYECCION'],
+    permissionOverrides: {},
+    active: true
+  },
+  {
+    id: `usr_${tenantId}_calidad`,
+    tenantId,
+    username: 'Elena G.',
+    password: 'calidad123',
+    roles: ['SUPERVISOR_CALIDAD'],
+    permissionOverrides: {},
+    active: true
+  }
+];
+
+const createDefaultTurns = (tenantId: TenantId): ProductionTurn[] =>
+  DEFAULT_TURNS.map(turn => ({ ...turn, tenantId }));
 
 interface DashboardContextType {
   tenants: Tenant[];
@@ -30,6 +172,20 @@ interface DashboardContextType {
   setCurrentTenant: (tenantId: TenantId) => void;
   currentUser: UserSession;
   changeRole: (role: Role) => void;
+  users: AppUser[];
+  turns: ProductionTurn[];
+  productionGoals: ProductionGoal[];
+  addUser: (user: Pick<AppUser, 'username' | 'password' | 'roles'>) => void;
+  updateUser: (userId: string, updates: Partial<Pick<AppUser, 'username' | 'password' | 'roles' | 'permissionOverrides' | 'active'>>) => void;
+  toggleUserActive: (userId: string) => void;
+  activateUser: (userId: string) => void;
+  addTurn: (turn: Omit<ProductionTurn, 'id' | 'tenantId'>) => void;
+  updateTurn: (turnId: string, updates: Partial<Omit<ProductionTurn, 'id' | 'tenantId'>>) => void;
+  addProductionGoal: (goal: Omit<ProductionGoal, 'id' | 'tenantId'>) => void;
+  updateProductionGoal: (goalId: string, updates: Partial<Omit<ProductionGoal, 'id' | 'tenantId'>>) => void;
+  getEffectivePermissions: (user?: AppUser) => Set<PermissionKey>;
+  can: (permission: PermissionKey) => boolean;
+  getGoalForAreaTurn: (area: ProductionAreaId, turnCode?: string) => ProductionGoal | undefined;
   verifyOTP: (code: string) => boolean;
   clear2FA: () => void;
   orders: Order[];
@@ -76,6 +232,30 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
   });
 
+  const [users, setUsers] = useState<AppUser[]>(() => {
+    const saved = localStorage.getItem('plasyect_config_users');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (_) {}
+    }
+    return createDefaultUsers('plasyect_matriz');
+  });
+
+  const [turns, setTurns] = useState<ProductionTurn[]>(() => {
+    const saved = localStorage.getItem('plasyect_config_turns');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (_) {}
+    }
+    return createDefaultTurns('plasyect_matriz');
+  });
+
+  const [productionGoals, setProductionGoals] = useState<ProductionGoal[]>(() => {
+    const saved = localStorage.getItem('plasyect_config_goals');
+    if (saved) {
+      try { return JSON.parse(saved); } catch (_) {}
+    }
+    return [];
+  });
+
   const [exchangeRate, setExchangeRateState] = useState<number>(() => {
     return parseFloat(localStorage.getItem('plasyect_exchange_rate') || '18.45');
   });
@@ -116,6 +296,27 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return saved ? JSON.parse(saved) : INITIAL_AUDITS;
   });
 
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let active = true;
+    dashboardApi.bootstrap()
+      .then(data => {
+        if (!active) return;
+        setOrders(data.orders);
+        setBatches(data.batches);
+        setMachines(data.machines);
+        setBands(data.bands);
+        setDefects(data.defects);
+        setAudits(data.audits);
+      })
+      .catch(error => {
+        console.warn('Backend bootstrap failed. Using local dashboard data.', error);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   // Save to Web LocalStorage on change
   useEffect(() => {
     localStorage.setItem('plasyect_tenant_id', currentTenantId);
@@ -124,6 +325,29 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   useEffect(() => {
     localStorage.setItem('plasyect_user', JSON.stringify(currentUser));
   }, [currentUser]);
+
+  useEffect(() => {
+    setUsers(prev => {
+      const hasTenantUsers = prev.some(user => user.tenantId === currentTenantId);
+      return hasTenantUsers ? prev : [...prev, ...createDefaultUsers(currentTenantId)];
+    });
+    setTurns(prev => {
+      const hasTenantTurns = prev.some(turn => turn.tenantId === currentTenantId);
+      return hasTenantTurns ? prev : [...prev, ...createDefaultTurns(currentTenantId)];
+    });
+  }, [currentTenantId]);
+
+  useEffect(() => {
+    localStorage.setItem('plasyect_config_users', JSON.stringify(users));
+  }, [users]);
+
+  useEffect(() => {
+    localStorage.setItem('plasyect_config_turns', JSON.stringify(turns));
+  }, [turns]);
+
+  useEffect(() => {
+    localStorage.setItem('plasyect_config_goals', JSON.stringify(productionGoals));
+  }, [productionGoals]);
 
   useEffect(() => {
     localStorage.setItem('plasyect_orders', JSON.stringify(orders));
@@ -154,6 +378,127 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, [offlineQueue]);
 
   const currentTenant = TENANTS.find(t => t.id === currentTenantId) || TENANTS[0];
+  const tenantUsers = users.filter(user => user.tenantId === currentTenantId);
+  const tenantTurns = turns.filter(turn => turn.tenantId === currentTenantId);
+  const tenantGoals = productionGoals.filter(goal => goal.tenantId === currentTenantId);
+
+  const getCurrentAppUser = () => {
+    return tenantUsers.find(user => user.username === currentUser.username && user.active);
+  };
+
+  const getEffectivePermissions = (user?: AppUser) => {
+    const targetUser = user || getCurrentAppUser();
+    const baseRoles = targetUser?.roles || [currentUser.role];
+    const permissionSet = new Set<PermissionKey>();
+
+    baseRoles.forEach(role => {
+      (ROLE_PERMISSION_DEFAULTS[role] || []).forEach(permission => permissionSet.add(permission));
+    });
+
+    if (targetUser?.permissionOverrides) {
+      Object.entries(targetUser.permissionOverrides).forEach(([permission, allowed]) => {
+        if (allowed) permissionSet.add(permission as PermissionKey);
+        else permissionSet.delete(permission as PermissionKey);
+      });
+    }
+
+    return permissionSet;
+  };
+
+  const can = (permission: PermissionKey) => getEffectivePermissions().has(permission);
+
+  const getGoalForAreaTurn = (area: ProductionAreaId, turnCode?: string) => {
+    const activeTurns = tenantTurns.filter(turn => turn.active);
+    const matchingTurn = turnCode
+      ? activeTurns.find(turn => turn.code === turnCode || turn.name === turnCode || turn.id === turnCode)
+      : activeTurns[0];
+    return tenantGoals.find(goal => goal.active && goal.area === area && (!matchingTurn || goal.turnId === matchingTurn.id));
+  };
+
+  const addUser = (user: Pick<AppUser, 'username' | 'password' | 'roles'>) => {
+    const newUser: AppUser = {
+      id: `usr_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      tenantId: currentTenantId,
+      username: user.username,
+      password: user.password,
+      roles: user.roles.length ? user.roles : ['LIDER_INYECCION'],
+      permissionOverrides: {},
+      active: true
+    };
+    setUsers(prev => [newUser, ...prev]);
+    addAuditLog('CONFIG', 'USER_CREATED', `Usuario ${newUser.username} creado con roles ${newUser.roles.join(', ')}`);
+  };
+
+  const updateUser = (userId: string, updates: Partial<Pick<AppUser, 'username' | 'password' | 'roles' | 'permissionOverrides' | 'active'>>) => {
+    setUsers(prev => prev.map(user => {
+      if (user.id !== userId) return user;
+      const updated = { ...user, ...updates };
+      addAuditLog('CONFIG', 'USER_UPDATED', `Usuario ${updated.username} actualizado`);
+      return updated;
+    }));
+  };
+
+  const toggleUserActive = (userId: string) => {
+    setUsers(prev => prev.map(user => {
+      if (user.id !== userId) return user;
+      const updated = { ...user, active: !user.active };
+      addAuditLog('CONFIG', updated.active ? 'USER_ENABLED' : 'USER_DISABLED', `Usuario ${updated.username} ${updated.active ? 'activado' : 'desactivado'}`);
+      return updated;
+    }));
+  };
+
+  const activateUser = (userId: string) => {
+    const target = users.find(user => user.id === userId);
+    if (!target) return;
+    const primaryRole = target.roles[0] || 'LIDER_INYECCION';
+    const sensitive = primaryRole === 'DIRECTOR_GENERAL' || primaryRole === 'LIDER_ADMINISTRACION';
+    setCurrentUser({
+      username: target.username,
+      email: `${target.username.toLowerCase().replace(/\s+/g, '.')}@plasyect.local`,
+      role: primaryRole,
+      require2FA: sensitive,
+      has2FAVerified: !sensitive
+    });
+    addAuditLog('AUTH', 'USER_ACTIVATED', `Usuario activo cambiado a ${target.username}`);
+  };
+
+  const addTurn = (turn: Omit<ProductionTurn, 'id' | 'tenantId'>) => {
+    const newTurn: ProductionTurn = {
+      ...turn,
+      id: `turn_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      tenantId: currentTenantId
+    };
+    setTurns(prev => [newTurn, ...prev]);
+    addAuditLog('CONFIG', 'TURN_CREATED', `Turno ${newTurn.name} creado (${newTurn.startTime}-${newTurn.endTime})`);
+  };
+
+  const updateTurn = (turnId: string, updates: Partial<Omit<ProductionTurn, 'id' | 'tenantId'>>) => {
+    setTurns(prev => prev.map(turn => {
+      if (turn.id !== turnId) return turn;
+      const updated = { ...turn, ...updates };
+      addAuditLog('CONFIG', 'TURN_UPDATED', `Turno ${updated.name} actualizado`);
+      return updated;
+    }));
+  };
+
+  const addProductionGoal = (goal: Omit<ProductionGoal, 'id' | 'tenantId'>) => {
+    const newGoal: ProductionGoal = {
+      ...goal,
+      id: `goal_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
+      tenantId: currentTenantId
+    };
+    setProductionGoals(prev => [newGoal, ...prev]);
+    addAuditLog('CONFIG', 'PRODUCTION_GOAL_CREATED', `Meta creada para ${newGoal.area}: ${newGoal.metaTurno} pares por turno`);
+  };
+
+  const updateProductionGoal = (goalId: string, updates: Partial<Omit<ProductionGoal, 'id' | 'tenantId'>>) => {
+    setProductionGoals(prev => prev.map(goal => {
+      if (goal.id !== goalId) return goal;
+      const updated = { ...goal, ...updates };
+      addAuditLog('CONFIG', 'PRODUCTION_GOAL_UPDATED', `Meta actualizada para ${updated.area}: ${updated.metaTurno} pares por turno`);
+      return updated;
+    }));
+  };
 
   const setExchangeRate = (rate: number) => {
     setExchangeRateState(rate);
@@ -173,6 +518,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       details
     };
     setAudits(prev => [newLog, ...prev]);
+    sendApiMutation(dashboardApi.createAudit(newLog));
   };
 
   const setTenantIdAndLog = (id: TenantId) => {
@@ -270,6 +616,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     } else {
       setOrders(prev => [newOrder, ...prev]);
       addAuditLog('COMERCIAL', 'ORDER_CREATED', `Nuevo pedido ${newOrder.id} creado para ${newOrder.clientName}. Folio: ${newOrder.id}`);
+      sendApiMutation(dashboardApi.createOrder(newOrder));
     }
   };
 
@@ -286,6 +633,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         addAuditLog('COMERCIAL', 'DISCOUNT_AUTHORIZED_CHECK', 
           `Descuento de ${discount}% para ${orderId} ${authorized ? 'APROBADO por rol superior' : 'SOLICITADO / PENDIENTE'}`
         );
+        sendApiMutation(dashboardApi.updateOrderDiscount(orderId, discount, authorized));
         return updated;
       }
       return o;
@@ -296,7 +644,16 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setBatches(prev => prev.map(b => {
       if (b.id === batchId) {
         const prevStage = b.stage;
-        const updated = { ...b, stage: nextStage, lastUpdate: new Date().toISOString() };
+        const isDelivered = nextStage === 'embarque';
+        const updated = {
+          ...b,
+          stage: nextStage,
+          etapaActual: nextStage,
+          status: isDelivered ? 'ENTREGADO' as Batch['status'] : b.status,
+          estatus: isDelivered ? 'ENTREGADO' as Batch['estatus'] : b.estatus,
+          ultimoEscaneo: new Date().toISOString(),
+          lastUpdate: new Date().toISOString()
+        };
         
         if (isOffline) {
           setOfflineQueue(prevQueue => [...prevQueue, { id: `off_${Date.now()}`, action: 'MOVE_BATCH', payload: { batchId, nextStage }, timestamp: new Date().toISOString() }]);
@@ -304,6 +661,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
           addAuditLog('PRODUCCION', 'BATCH_STAGE_CHANGED', 
             `Lote ${batchId} movido de [${prevStage}] a [${nextStage}]`
           );
+          sendApiMutation(dashboardApi.moveBatchStage(batchId, nextStage));
         }
         return updated;
       }
@@ -319,6 +677,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         addAuditLog('PRODUCCION', 'BATCH_STATUS_CHANGED', 
           `Estatus de lote ${batchId} cambiado de [${prevStatus}] a [${status}]`
         );
+        sendApiMutation(dashboardApi.updateBatchStatus(batchId, status));
         return updated;
       }
       return b;
@@ -352,6 +711,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     } else {
       setBatches(prev => [newBatch, ...prev]);
       addAuditLog('PRODUCCION', 'BATCH_CREATED', `Nuevo Lote ${newBatch.id} asignado para modelo ${newBatch.modelName}`);
+      sendApiMutation(dashboardApi.createBatch(newBatch));
     }
   };
 
@@ -359,6 +719,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setBatches(prev => prev.map(b => {
       if (b.id === batchId) {
         addAuditLog('PRODUCCION', 'BATCH_ARCHIVED', `Lote ${batchId} ARCHIVADO. Purga automática programada en 30 días.`);
+        sendApiMutation(dashboardApi.archiveBatch(batchId));
         return { ...b, status: 'ARCHIVED' as any, archivedAt: new Date().toISOString() };
       }
       return b;
@@ -370,6 +731,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       if (b.id === batchId) {
         addAuditLog('PRODUCCION', 'BATCH_RESTORED', `Lote ${batchId} RESTAURADO desde el archivo.`);
         const { archivedAt, ...rest } = b;
+        sendApiMutation(dashboardApi.restoreBatch(batchId));
         return { ...rest, status: 'OPTIMO', lastUpdate: new Date().toISOString() } as Batch;
       }
       return b;
@@ -389,6 +751,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     };
 
     setDefects(prev => [newDefect, ...prev]);
+    sendApiMutation(dashboardApi.createDefect(newDefect));
 
     // Automatically update related batch status triggers when severe defects appear
     if (newDefect.severity === 'GRAVE') {
@@ -406,6 +769,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setDefects(prev => prev.map(d => {
       if (d.id === defectId) {
         addAuditLog('CALIDAD', 'DEFECT_RESOLVED', `Defecto ${d.defectType} resuelto por inspector en Lote ${d.batchId}`);
+        sendApiMutation(dashboardApi.resolveDefect(defectId));
         return { ...d, resolved: true };
       }
       return d;
@@ -419,6 +783,20 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       setCurrentTenant: setTenantIdAndLog,
       currentUser,
       changeRole,
+      users: tenantUsers,
+      turns: tenantTurns,
+      productionGoals: tenantGoals,
+      addUser,
+      updateUser,
+      toggleUserActive,
+      activateUser,
+      addTurn,
+      updateTurn,
+      addProductionGoal,
+      updateProductionGoal,
+      getEffectivePermissions,
+      can,
+      getGoalForAreaTurn,
       verifyOTP,
       clear2FA,
       orders,

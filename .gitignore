@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+# Copia local de la base BixApp para analisis (167 MB, no va al repo)
+*.FDB
+*.fdb

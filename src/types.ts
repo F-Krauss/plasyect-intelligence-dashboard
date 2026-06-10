@@ -8,12 +8,79 @@ export type Role =
   | 'LIDER_INYECCION' 
   | 'SUPERVISOR_CALIDAD';
 
+export type PermissionKey =
+  | 'dashboard.view'
+  | 'pipeline_lote.view'
+  | 'pipeline_pedido.view'
+  | 'produccion_area.view'
+  | 'modelos_productos.view'
+  | 'calidad.view'
+  | 'inyeccion.view'
+  | 'banda.view'
+  | 'aduana_liberacion.view'
+  | 'embarque.view'
+  | 'ocr_validacion.view'
+  | 'reportes_historicos.view'
+  | 'catalogos.view'
+  | 'configuracion.view'
+  | 'produccion_area.create_log'
+  | 'produccion_area.export'
+  | 'inyeccion.create_log'
+  | 'inyeccion.export'
+  | 'banda.create_log'
+  | 'banda.export'
+  | 'configuracion.manage_users'
+  | 'configuracion.manage_permissions'
+  | 'configuracion.manage_goals'
+  | 'configuracion.manage_turns';
+
+export type ProductionAreaId =
+  | 'almacen'
+  | 'inyeccion'
+  | 'aduana'
+  | 'banda'
+  | 'embarque'
+  | 'entregas'
+  | 'salidas_tercera';
+
 export interface UserSession {
   username: string;
   email: string;
   role: Role;
   require2FA: boolean;
   has2FAVerified: boolean;
+}
+
+export interface AppUser {
+  id: string;
+  tenantId: TenantId;
+  username: string;
+  password: string;
+  roles: Role[];
+  permissionOverrides: Partial<Record<PermissionKey, boolean>>;
+  active: boolean;
+}
+
+export interface ProductionTurn {
+  id: string;
+  tenantId: TenantId;
+  code: string;
+  name: string;
+  startTime: string;
+  endTime: string;
+  active: boolean;
+  responsableUserId?: string;
+}
+
+export interface ProductionGoal {
+  id: string;
+  tenantId: TenantId;
+  area: ProductionAreaId;
+  turnId: string;
+  metaHora: number;
+  metaTurno: number;
+  responsableUserId: string;
+  active: boolean;
 }
 
 export type TenantId = 'plasyect_matriz' | 'plasyect_suelas' | 'plasyect_sandalias';
@@ -76,7 +143,7 @@ export interface Order {
   totalMXN: number;
   createdAt: string;
   deliveryDate: string;
-  status: 'PENDIENTE' | 'PROCESANDO' | 'COMPLETADO' | 'CANCELADO';
+  status: 'PENDIENTE' | 'PROCESANDO' | 'COMPLETADO' | 'CANCELADO' | 'ENTREGADO';
   discountAuthorized: boolean;
   discountPercentage: number;
 
@@ -87,7 +154,7 @@ export interface Order {
   fechaAlta?: string;
   fechaCompromiso?: string;
   totalPares?: number;
-  estatus?: 'PENDIENTE' | 'PROCESANDO' | 'COMPLETADO' | 'CANCELADO';
+  estatus?: 'PENDIENTE' | 'PROCESANDO' | 'COMPLETADO' | 'CANCELADO' | 'ENTREGADO';
   prioridad?: 'ALTA' | 'MEDIA' | 'BAJA';
   responsable?: string;
   porcentajeAvance?: number;
@@ -111,7 +178,7 @@ export interface Batch {
   shrinkageRatio: number;
   temperatureTarget: number;
   cycleTimeSeconds: number;
-  status: 'OPTIMO' | 'ALERTA' | 'CRITICO' | 'DETENIDO' | 'ARCHIVADO';
+  status: 'OPTIMO' | 'ALERTA' | 'CRITICO' | 'DETENIDO' | 'ARCHIVADO' | 'ENTREGADO';
   archivedAt?: string; // Soft delete tracking
   defectRate: number;
   lastUpdate: string;
@@ -130,9 +197,17 @@ export interface Batch {
   ultimoEscaneo?: string;
   tiempoEnEtapaMinutos?: number;
   porcentajeAvance?: number;
-  estatus?: 'OPTIMO' | 'ALERTA' | 'CRITICO' | 'DETENIDO' | 'ARCHIVADO';
+  estatus?: 'OPTIMO' | 'ALERTA' | 'CRITICO' | 'DETENIDO' | 'ARCHIVADO' | 'ENTREGADO';
   responsableActual?: string;
   observaciones?: string;
+
+  // Zona previa / actual reales tomadas de los escaneos de la Tarjeta Viajera (ERP BixApp).
+  // Cuando vienen del ERP llevan el nombre del departamento (DEPA); si no, la vista las
+  // deriva del orden de etapas.
+  zonaPrevia?: string;
+  zonaActual?: string;
+  // Marca el origen del lote: 'erp' = tarjeta viajera real sincronizada desde Firebird.
+  source?: 'mock' | 'erp';
 }
 
 export interface Machine {

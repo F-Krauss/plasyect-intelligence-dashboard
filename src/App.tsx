@@ -3,10 +3,11 @@
  * @license Apache-2.0
  */
 
-import { useState } from 'react';
-import { DashboardProvider } from './context/DashboardContext';
+import { useEffect, useState } from 'react';
+import { DashboardProvider, useDashboard } from './context/DashboardContext';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
+import { ModuleExportActions } from './components/export/ModuleExportActions';
 import { 
   DashboardEjecutivoView, 
   PipelineLoteView, 
@@ -24,11 +25,63 @@ import {
   ConfiguracionView 
 } from './views/ViewRegistry';
 import { motion, AnimatePresence } from 'motion/react';
+import { PermissionKey } from './types';
+
+const TAB_PERMISSIONS: Record<string, PermissionKey> = {
+  dashboard: 'dashboard.view',
+  'pipeline-lote': 'pipeline_lote.view',
+  'pipeline-pedido': 'pipeline_pedido.view',
+  'produccion-area': 'produccion_area.view',
+  'modelos-productos': 'modelos_productos.view',
+  calidad: 'calidad.view',
+  inyeccion: 'inyeccion.view',
+  banda: 'banda.view',
+  'aduana-liberacion': 'aduana_liberacion.view',
+  embarque: 'embarque.view',
+  'ocr-validacion': 'ocr_validacion.view',
+  'reportes-historicos': 'reportes_historicos.view',
+  catalogos: 'catalogos.view',
+  configuracion: 'configuracion.view'
+};
+
+const TAB_LABELS: Record<string, string> = {
+  dashboard: 'Dashboard Ejecutivo',
+  'pipeline-lote': 'Pipeline por Lote',
+  'pipeline-pedido': 'Pipeline por Pedido',
+  'produccion-area': 'Produccion por Area',
+  'modelos-productos': 'Modelos y Productos',
+  calidad: 'Calidad',
+  inyeccion: 'Inyeccion',
+  banda: 'Banda',
+  'aduana-liberacion': 'Aduana Liberacion',
+  embarque: 'Embarque',
+  'ocr-validacion': 'OCR Validacion',
+  'reportes-historicos': 'Reportes Historicos',
+  catalogos: 'Catalogos',
+  configuracion: 'Configuracion'
+};
 
 function DashboardLayout() {
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
+  const { can } = useDashboard();
+
+  useEffect(() => {
+    const currentPermission = TAB_PERMISSIONS[currentTab];
+    if (!currentPermission || can(currentPermission)) return;
+    const fallback = Object.entries(TAB_PERMISSIONS).find(([, permission]) => can(permission))?.[0] || 'dashboard';
+    setCurrentTab(fallback);
+  }, [can, currentTab]);
 
   const renderActiveView = () => {
+    const activePermission = TAB_PERMISSIONS[currentTab];
+    if (activePermission && !can(activePermission)) {
+      return (
+        <div className="bg-slate-900 border border-slate-800 rounded-lg p-6 text-sm text-slate-400">
+          Sin permiso para abrir este módulo.
+        </div>
+      );
+    }
+
     switch (currentTab) {
       case 'dashboard':
         return <DashboardEjecutivoView />;
@@ -86,7 +139,14 @@ function DashboardLayout() {
               transition={{ duration: 0.2, ease: "easeOut" }}
               className="max-w-[1600px] mx-auto w-full"
             >
-              {renderActiveView()}
+              <ModuleExportActions
+                moduleId={currentTab}
+                moduleName={TAB_LABELS[currentTab] || 'Dashboard Ejecutivo'}
+                rootId="module-export-root"
+              />
+              <div id="module-export-root">
+                {renderActiveView()}
+              </div>
             </motion.div>
           </AnimatePresence>
         </main>

@@ -5,11 +5,6 @@ import {
   FileText, 
   Factory, 
   ShoppingBag, 
-  ShieldCheck, 
-  Flame, 
-  Repeat, 
-  FileCheck, 
-  Truck, 
   ScanLine, 
   History, 
   FolderTree, 
@@ -20,6 +15,7 @@ import {
   ChevronRight
 } from 'lucide-react';
 import { useDashboard } from '../context/DashboardContext';
+import { PermissionKey } from '../types';
 
 interface SidebarProps {
   currentTab: string;
@@ -27,28 +23,25 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) => {
-  const { currentTenant, currentUser } = useDashboard();
+  const { currentTenant, can } = useDashboard();
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
 
   const menuItems = [
-    { id: 'dashboard', label: 'Dashboard Ejecutivo', icon: LayoutDashboard, category: 'OPERACIONES' },
-    { id: 'pipeline-lote', label: 'Pipeline por Lote', icon: GitBranch, category: 'PRODUCTIVIDAD' },
-    { id: 'pipeline-pedido', label: 'Pipeline por Pedido', icon: FileText, category: 'PRODUCTIVIDAD' },
-    { id: 'produccion-area', label: 'Producción por Área', icon: Factory, category: 'SEGUIMIENTO' },
-    { id: 'modelos-productos', label: 'Modelos y Productos', icon: ShoppingBag, category: 'SEGUIMIENTO' },
-    { id: 'calidad', label: 'Aduana de Calidad', icon: ShieldCheck, category: 'SEGUIMIENTO' },
-    { id: 'inyeccion', label: 'Área Inyección EVA', icon: Flame, category: 'DISPOSITIVOS' },
-    { id: 'banda', label: 'Banda y Detallado', icon: Repeat, category: 'DISPOSITIVOS' },
-    { id: 'aduana-liberacion', label: 'Aduana / Liberación', icon: FileCheck, category: 'ADMIN' },
-    { id: 'embarque', label: 'Embarque y Logística', icon: Truck, category: 'ADMIN' },
-    { id: 'ocr-validacion', label: 'OCR y Validación EVA', icon: ScanLine, category: 'ADMIN' },
-    { id: 'reportes-historicos', label: 'Reportes Históricos', icon: History, category: 'AUDITORIA' },
-    { id: 'catalogos', label: 'Catálogos Muck', icon: FolderTree, category: 'AUDITORIA' },
-    { id: 'configuracion', label: 'Configuración / RBAC', icon: Settings, category: 'SISTEMA' },
-  ];
+    { id: 'dashboard', label: 'Dashboard Ejecutivo', icon: LayoutDashboard, category: 'OPERACIONES', permission: 'dashboard.view' },
+    { id: 'pipeline-lote', label: 'Pipeline por Lote', icon: GitBranch, category: 'PRODUCTIVIDAD', permission: 'pipeline_lote.view' },
+    { id: 'pipeline-pedido', label: 'Pipeline por Pedido', icon: FileText, category: 'PRODUCTIVIDAD', permission: 'pipeline_pedido.view' },
+    { id: 'produccion-area', label: 'Producción por Área', icon: Factory, category: 'SEGUIMIENTO', permission: 'produccion_area.view' },
+    { id: 'modelos-productos', label: 'Modelos y Productos', icon: ShoppingBag, category: 'SEGUIMIENTO', permission: 'modelos_productos.view' },
+    { id: 'ocr-validacion', label: 'OCR y Validación EVA', icon: ScanLine, category: 'ADMIN', permission: 'ocr_validacion.view' },
+    { id: 'reportes-historicos', label: 'Reportes Históricos', icon: History, category: 'AUDITORIA', permission: 'reportes_historicos.view' },
+    { id: 'catalogos', label: 'Catálogos Muck', icon: FolderTree, category: 'AUDITORIA', permission: 'catalogos.view' },
+    { id: 'configuracion', label: 'Configuración / RBAC', icon: Settings, category: 'SISTEMA', permission: 'configuracion.view' },
+  ] as const;
+
+  const visibleMenuItems = menuItems.filter(item => can(item.permission as PermissionKey));
 
   // Group items by category to make it look like a highly structured industrial enterprise application
-  const categories = ['OPERACIONES', 'PRODUCTIVIDAD', 'SEGUIMIENTO', 'DISPOSITIVOS', 'ADMIN', 'AUDITORIA', 'SISTEMA'];
+  const categories = ['OPERACIONES', 'PRODUCTIVIDAD', 'SEGUIMIENTO', 'ADMIN', 'AUDITORIA', 'SISTEMA'];
 
   const getTenantBadgeColor = () => {
     switch(currentTenant.id) {
@@ -103,7 +96,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) =
       {!isCollapsed ? (
         <nav className="p-4 flex-1 space-y-4">
           {categories.map((cat) => {
-            const items = menuItems.filter(item => item.category === cat);
+            const items = visibleMenuItems.filter(item => item.category === cat);
             if (items.length === 0) return null;
 
             return (
@@ -139,7 +132,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) =
         </nav>
       ) : (
         <nav className="p-2 flex-1 space-y-2 flex flex-col items-center">
-          {menuItems.map((item) => {
+          {visibleMenuItems.map((item) => {
             const Icon = item.icon;
             const isActive = currentTab === item.id;
             

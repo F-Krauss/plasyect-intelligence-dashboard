@@ -46,7 +46,8 @@ export const StatusBadge: React.FC<StatusBadgeProps> = ({ status, type = 'status
       case 'OPTIMO':
       case 'ACTIVA':
       case 'OPERANDO':
-      case 'COMPLETADO': return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+      case 'COMPLETADO':
+      case 'ENTREGADO': return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
       case 'ALERTA':
       case 'PROCESANDO': return 'bg-amber-50 text-amber-700 border border-amber-200';
       case 'CRITICO': return 'bg-red-50 text-red-750 border border-red-200 font-bold';
