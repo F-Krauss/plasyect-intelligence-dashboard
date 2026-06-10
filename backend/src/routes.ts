@@ -3,7 +3,7 @@ import { issueToken, requireAuth } from './auth.js';
 import { createErpService, getTarjetaViajeraStub, type ErpService } from './erp.js';
 import type { DashboardRepository } from './repository.js';
 import { defaultUser } from './seed.js';
-import { discountBodySchema, entitySchema, erpListQuerySchema, idParamSchema, patchSchema, stageBodySchema, statusBodySchema } from './validation.js';
+import { dateRangeQuerySchema, discountBodySchema, entitySchema, erpListQuerySchema, idParamSchema, patchSchema, stageBodySchema, statusBodySchema } from './validation.js';
 
 export function createRoutes(repository: DashboardRepository, erp: ErpService = createErpService()): Router {
   const router = Router();
@@ -133,6 +133,16 @@ export function createRoutes(repository: DashboardRepository, erp: ErpService = 
       const detalle = await erp.getTarjeta(id);
       if (!detalle) return res.status(404).json({ error: 'not_found', id });
       res.json(detalle);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.get('/api/erp/ejecutivo', async (req, res, next) => {
+    try {
+      const { fechaInicio, fechaFin } = dateRangeQuerySchema.parse(req.query);
+      const data = await erp.getEjecutivoDashboard(fechaInicio, fechaFin);
+      res.json(data);
     } catch (error) {
       next(error);
     }

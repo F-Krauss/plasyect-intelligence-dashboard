@@ -1,5 +1,40 @@
 import type { AuditLog, Band, Batch, Client, Machine, Model, Order, QualityDefect, StageId, TenantId, Tenant, UserSession } from '../types';
 
+export interface HourlyProductionRow {
+  area: string;
+  fecha: string;
+  hora: string;
+  turno: string;
+  metaHora: number;
+  produccionReal: number;
+  eficiencia: number;
+  modelo: string;
+  color: string;
+  responsable: string;
+}
+
+export interface CalidadRow {
+  fecha: string;
+  turno: string;
+  area: string;
+  lote: string;
+  modelo: string;
+  color: string;
+  totalInspeccionado: number;
+  primeras: number;
+  segundas: number;
+  reproceso: number;
+  merma: number;
+  defecto: string;
+  cantidadDefecto: number;
+  porcentajeDefectivo: number;
+}
+
+export interface EjecutivoData {
+  produccion: HourlyProductionRow[];
+  calidad: CalidadRow[];
+}
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const TOKEN_KEY = 'plasyect_api_token';
 
@@ -82,7 +117,11 @@ export const dashboardApi = {
     return request<unknown[]>(`/api/erp/tarjetas${suffix}`);
   },
   erpTarjeta: (id: string) => request<unknown>(`/api/erp/tarjetas/${encodeURIComponent(id)}`),
-  erpSyncStatus: () => request<unknown>('/api/erp/sync/status')
+  erpSyncStatus: () => request<unknown>('/api/erp/sync/status'),
+  erpEjecutivo: (fechaInicio: string, fechaFin: string) => {
+    const qs = new URLSearchParams({ fechaInicio, fechaFin });
+    return request<EjecutivoData>(`/api/erp/ejecutivo?${qs}`);
+  }
 };
 
 export function sendApiMutation(task: Promise<unknown>): void {

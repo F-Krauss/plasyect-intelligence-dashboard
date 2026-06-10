@@ -26,3 +26,9 @@ export const erpListQuerySchema = z.object({
   status: z.string().min(1).max(3).optional(),
   stage: z.string().min(1).max(40).optional()
 });
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+export const dateRangeQuerySchema = z.object({
+  fechaInicio: z.string().regex(ISO_DATE, 'Fecha ISO requerida (YYYY-MM-DD)'),
+  fechaFin: z.string().regex(ISO_DATE, 'Fecha ISO requerida (YYYY-MM-DD)')
+});

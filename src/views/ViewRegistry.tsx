@@ -21,6 +21,7 @@ import { DataTable } from '../components/DataTable';
 import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
 import { CLIENTS, MODELS, STAGES, COLORS, MOVIMIENTOS, CALIDAD_RECORDS, PRODUCCION_POR_HORA, DEFECTOS_CATALOGO } from '../data/mockData';
+import { backendEnabled, dashboardApi, type EjecutivoData } from '../api/dashboardApi';
 import { AppUser, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
   DollarSign, 
@@ -128,12 +129,32 @@ export const DashboardEjecutivoView: React.FC = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filtersExpanded, setFiltersExpanded] = useState(false);
 
+  // Real ERP data from BixApp (FDB → Supabase → backend)
+  const [erpData, setErpData] = useState<EjecutivoData>({ produccion: [], calidad: [] });
+  const [erpLoading, setErpLoading] = useState(false);
+
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    setErpLoading(true);
+    dashboardApi.erpEjecutivo(fechaInicio, fechaFin)
+      .then(data => { if (!cancelled) setErpData(data); })
+      .catch(err => { if (!cancelled) console.warn('ERP ejecutivo fetch failed', err); })
+      .finally(() => { if (!cancelled) setErpLoading(false); });
+    return () => { cancelled = true; };
+  }, [fechaInicio, fechaFin]);
+
   // Manual simulation refresh effect
   const handleRefresh = () => {
     setIsRefreshing(true);
-    setTimeout(() => {
-      setIsRefreshing(false);
-    }, 600);
+    if (backendEnabled) {
+      dashboardApi.erpEjecutivo(fechaInicio, fechaFin)
+        .then(data => setErpData(data))
+        .catch(err => console.warn('ERP refresh failed', err))
+        .finally(() => setIsRefreshing(false));
+    } else {
+      setTimeout(() => setIsRefreshing(false), 600);
+    }
   };
 
   const handleClearFilters = () => {
@@ -173,23 +194,37 @@ export const DashboardEjecutivoView: React.FC = () => {
     return true;
   });
 
-  // Filter application - Quality records
-  const filteredQuality = CALIDAD_RECORDS.filter(q => {
-    if (fechaInicio && new Date(q.fecha) < new Date(fechaInicio)) return false;
-    if (fechaFin && new Date(q.fecha) > new Date(fechaFin)) return false;
+  // Source: real ERP data when backend enabled, mock data as fallback
+  const calidadSource = backendEnabled && erpData.calidad.length > 0 ? erpData.calidad : CALIDAD_RECORDS;
+  const prodSource = backendEnabled && erpData.produccion.length > 0 ? erpData.produccion : PRODUCCION_POR_HORA;
+
+  // Filter application - Quality records (date already filtered by API; apply remaining filters)
+  const filteredQuality = calidadSource.filter(q => {
+    if (!backendEnabled) {
+      if (fechaInicio && new Date(q.fecha) < new Date(fechaInicio)) return false;
+      if (fechaFin && new Date(q.fecha) > new Date(fechaFin)) return false;
+    }
     if (selectedModel !== 'TODOS' && q.modelo !== selectedModel) return false;
     if (selectedTurno !== 'TODOS' && q.turno !== selectedTurno) return false;
     return true;
   });
 
-  // Filter application - Hourly production
-  const filteredProdHora = PRODUCCION_POR_HORA.filter(p => {
-    if (fechaInicio && new Date(p.fecha) < new Date(fechaInicio)) return false;
-    if (fechaFin && new Date(p.fecha) > new Date(fechaFin)) return false;
+  // Filter application - Hourly production (date already filtered by API; apply remaining filters)
+  const filteredProdHora = prodSource.filter(p => {
+    if (!backendEnabled) {
+      if (fechaInicio && new Date(p.fecha) < new Date(fechaInicio)) return false;
+      if (fechaFin && new Date(p.fecha) > new Date(fechaFin)) return false;
+    }
     if (selectedModel !== 'TODOS' && p.modelo !== selectedModel) return false;
     if (selectedTurno !== 'TODOS' && p.turno !== selectedTurno) return false;
     return true;
   });
+
+  // Most recent date in filtered production (for hourly chart and "del día" KPI)
+  const mostRecentProdDate = filteredProdHora.reduce((max, p) => p.fecha > max ? p.fecha : max, '');
+  const todayProdHora = mostRecentProdDate
+    ? filteredProdHora.filter(p => p.fecha === mostRecentProdDate)
+    : filteredProdHora;
 
   // 2. 第一 KPI Ratios (8 indicators)
   // - Pedidos activos: Status PENDIENTE or PROCESANDO
@@ -203,8 +238,8 @@ export const DashboardEjecutivoView: React.FC = () => {
     .filter(b => b.etapaActual !== 'embarque')
     .reduce((sum, b) => sum + (b.totalPares || b.quantityShoes || 0), 0);
 
-  // - Producción del día: Suma producciónReal
-  const kpiDailyProdCount = filteredProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
+  // - Producción del día: Suma producciónReal del día más reciente en el rango
+  const kpiDailyProdCount = todayProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
 
   // - Porcentaje de avance global (weighted avg by pairs)
   const activeBatchesForProgress = filteredBatches.filter(b => b.etapaActual !== 'embarque');
@@ -229,7 +264,8 @@ export const DashboardEjecutivoView: React.FC = () => {
   const defectStdDev = getStdDev(filteredQuality.map(q => q.porcentajeDefectivo));
   const progressStdDev = getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
   const riskStdDev = getStdDev(filteredOrders.map(o => (o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO') ? 1 : 0));
-  const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, totalMetaPrs, productionStdDev);
+  const todayMetaPrs = todayProdHora.reduce((sum, p) => sum + p.metaHora, 0);
+  const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, todayMetaPrs, productionStdDev);
   const kpiProgressStatus = classifyAgainstTarget(kpiGlobalProgress, 70, progressStdDev);
   const kpiRiskStatus = classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev);
   const kpiDefectStatus = classifyLowerIsBetter(kpiDefectivePct, 3, defectStdDev);
@@ -328,13 +364,13 @@ export const DashboardEjecutivoView: React.FC = () => {
   }
 
   // 5. Gráficas inferiores computations
-  // - Producción por hora del día (grouping from hourly production)
-  const hourlyChartData = filteredProdHora.reduce((acc: Record<string, { value: number; target: number }>, p) => {
-    acc[p.hora] = acc[p.hora] || { value: 0, target: 0 };
-    acc[p.hora].value += p.produccionReal;
-    acc[p.hora].target += p.metaHora;
-    return acc;
-  }, {});
+  // - Producción por hora del día más reciente en el rango (no acumulado)
+  const hourlyChartData: Record<string, { value: number; target: number }> = {};
+  for (const p of todayProdHora) {
+    if (!hourlyChartData[p.hora]) hourlyChartData[p.hora] = { value: 0, target: 0 };
+    hourlyChartData[p.hora].value += p.produccionReal;
+    hourlyChartData[p.hora].target += p.metaHora;
+  }
   const hourlyStdDev = getStdDev(Object.values(hourlyChartData).map(d => d.value - d.target));
   const finalHourlyData = Array.from({ length: 24 }, (_, hour) => {
     const label = `${String(hour).padStart(2, '0')}:00`;
@@ -464,8 +500,8 @@ export const DashboardEjecutivoView: React.FC = () => {
             onClick={handleRefresh}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-805 hover:bg-slate-800 border border-slate-700 rounded text-xs text-slate-300 font-mono font-bold transition-all"
           >
-            <Repeat className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-cyan-400' : ''}`} />
-            {isRefreshing ? 'SINCRO...' : 'ACTUALIZAR'}
+            <Repeat className={`w-3.5 h-3.5 ${(isRefreshing || erpLoading) ? 'animate-spin text-cyan-400' : ''}`} />
+            {isRefreshing || erpLoading ? 'CARGANDO...' : 'ACTUALIZAR'}
           </button>
         </div>
       </div>
@@ -633,7 +669,7 @@ export const DashboardEjecutivoView: React.FC = () => {
             {kpiDailyProdCount.toLocaleString()}
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
-            Meta {totalMetaPrs.toLocaleString()} / σ {Math.round(productionStdDev)}
+            Meta {todayMetaPrs.toLocaleString()} / σ {Math.round(productionStdDev)}
           </span>
         </div>
 
