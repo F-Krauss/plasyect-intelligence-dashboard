@@ -1,23 +1,28 @@
 import React, { useState } from 'react';
-import { 
-  Bell, 
-  Wifi, 
-  WifiOff, 
-  RefreshCw, 
-  ShieldAlert, 
-  DollarSign, 
+import {
+  Bell,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  ShieldAlert,
+  DollarSign,
   Lock,
   Sparkles,
   Search,
   CheckCircle2,
   Sliders,
   X,
-  AlertOctagon
+  AlertOctagon,
+  Menu
 } from 'lucide-react';
 import { useDashboard } from '../context/DashboardContext';
 import { TenantId, Role } from '../types';
 
-export const Header: React.FC = () => {
+interface HeaderProps {
+  onMenuClick: () => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
   const {
     tenants,
     currentTenant,
@@ -72,13 +77,22 @@ export const Header: React.FC = () => {
   const activeUserRequires2FA = currentUser.require2FA && !currentUser.has2FAVerified;
 
   return (
-    <header className="h-16 bg-white border-b border-slate-200 flex items-center justify-between px-6 shrink-0 relative z-30 shadow-sm">
-      
+    <header className="h-14 md:h-16 bg-white border-b border-slate-200 flex items-center justify-between px-3 md:px-6 shrink-0 relative z-30 shadow-sm">
+
+      {/* Hamburger — mobile only */}
+      <button
+        onClick={onMenuClick}
+        className="md:hidden p-2 rounded-lg text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+        aria-label="Abrir menú"
+      >
+        <Menu className="w-5 h-5" />
+      </button>
+
       {/* Search and Scope Branding */}
-      <div className="flex items-center gap-6">
-        <div className="flex items-center gap-2 text-slate-500">
-          <Sliders className="w-4 h-4 text-blue-600" />
-          <span className="text-xs font-bold tracking-wider font-mono uppercase text-slate-500">
+      <div className="flex items-center gap-2 md:gap-6 min-w-0">
+        <div className="flex items-center gap-1.5 md:gap-2 text-slate-500 min-w-0">
+          <Sliders className="w-4 h-4 text-blue-600 shrink-0" />
+          <span className="hidden sm:inline text-xs font-bold tracking-wider font-mono uppercase text-slate-500">
             Filtro Tenant:
           </span>
           
@@ -141,7 +155,7 @@ export const Header: React.FC = () => {
       )}
 
       {/* User settings, clock & actions */}
-      <div className="flex items-center gap-4">
+      <div className="flex items-center gap-2 md:gap-4 shrink-0">
         {/* Connection Status Button */}
         <button 
           onClick={toggleOffline}
@@ -155,12 +169,12 @@ export const Header: React.FC = () => {
           {isOffline ? (
             <>
               <WifiOff className="w-4 h-4 animate-bounce" />
-              <span>OFFLINE</span>
+              <span className="hidden sm:inline">OFFLINE</span>
             </>
           ) : (
             <>
               <Wifi className="w-4 h-4" />
-              <span>ONLINE</span>
+              <span className="hidden sm:inline">ONLINE</span>
             </>
           )}
           {offlineQueue.length > 0 && (
@@ -181,8 +195,8 @@ export const Header: React.FC = () => {
         </div>
 
         {/* Role Select and Information */}
-        <div className="flex items-center gap-3 border-l border-slate-200 pl-4">
-          <div className="text-right">
+        <div className="flex items-center gap-2 md:gap-3 border-l border-slate-200 pl-2 md:pl-4">
+          <div className="hidden sm:block text-right">
             <div className="text-xs font-bold text-slate-800 tracking-wide font-sans">{currentUser.username}</div>
             <div className="relative">
               <button 
@@ -276,7 +290,7 @@ export const Header: React.FC = () => {
 
       {/* Floating 2FA Unlock Portal if role requires it & is not verified */}
       {activeUserRequires2FA && (
-        <div className="fixed bottom-4 right-4 bg-white border border-rose-200 rounded-lg p-5 z-50 w-80 shadow-2xl text-slate-805">
+        <div className="fixed bottom-4 right-2 left-2 sm:left-auto sm:right-4 sm:w-80 bg-white border border-rose-200 rounded-lg p-4 sm:p-5 z-50 shadow-2xl text-slate-805">
           <div className="flex items-start gap-3">
             <AlertOctagon className="w-5 h-5 text-rose-500 shrink-0 mt-0.5 animate-pulse" />
             <div className="space-y-1 w-full">

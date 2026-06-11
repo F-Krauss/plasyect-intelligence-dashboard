@@ -63,6 +63,7 @@ const TAB_LABELS: Record<string, string> = {
 
 function DashboardLayout() {
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
+  const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
   const { can } = useDashboard();
 
   useEffect(() => {
@@ -118,18 +119,31 @@ function DashboardLayout() {
 
   return (
     <div className="flex h-screen w-screen bg-slate-955 text-slate-200 overflow-hidden font-sans selection:bg-blue-500 selection:text-white">
-      
+
+      {/* Mobile sidebar backdrop */}
+      {mobileSidebarOpen && (
+        <div
+          className="fixed inset-0 z-40 bg-black/60 md:hidden"
+          onClick={() => setMobileSidebarOpen(false)}
+        />
+      )}
+
       {/* Sidebar Navigation Left */}
-      <Sidebar currentTab={currentTab} setCurrentTab={setCurrentTab} />
+      <Sidebar
+        currentTab={currentTab}
+        setCurrentTab={setCurrentTab}
+        isMobileOpen={mobileSidebarOpen}
+        onClose={() => setMobileSidebarOpen(false)}
+      />
 
       {/* Main Core View Area */}
-      <div className="flex-1 flex flex-col h-screen overflow-hidden">
-        
+      <div className="flex-1 flex flex-col h-screen overflow-hidden min-w-0">
+
         {/* Superior Header panel */}
-        <Header />
+        <Header onMenuClick={() => setMobileSidebarOpen(true)} />
 
         {/* Scrollable contents container */}
-        <main className="flex-1 overflow-y-auto p-6 bg-slate-955">
+        <main className="flex-1 overflow-y-auto p-3 sm:p-4 md:p-6 bg-slate-955">
           <AnimatePresence mode="wait">
             <motion.div
               key={currentTab}

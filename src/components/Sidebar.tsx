@@ -1,18 +1,19 @@
 import React, { useState } from 'react';
-import { 
-  LayoutDashboard, 
-  GitBranch, 
-  FileText, 
-  Factory, 
-  ShoppingBag, 
-  ScanLine, 
-  History, 
-  FolderTree, 
+import {
+  LayoutDashboard,
+  GitBranch,
+  FileText,
+  Factory,
+  ShoppingBag,
+  ScanLine,
+  History,
+  FolderTree,
   Settings,
   Tv,
   Users,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  X
 } from 'lucide-react';
 import { useDashboard } from '../context/DashboardContext';
 import { PermissionKey } from '../types';
@@ -20,11 +21,18 @@ import { PermissionKey } from '../types';
 interface SidebarProps {
   currentTab: string;
   setCurrentTab: (tab: string) => void;
+  isMobileOpen: boolean;
+  onClose: () => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) => {
+export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab, isMobileOpen, onClose }) => {
   const { currentTenant, can } = useDashboard();
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
+
+  const handleNavClick = (id: string) => {
+    setCurrentTab(id);
+    onClose();
+  };
 
   const menuItems = [
     { id: 'dashboard', label: 'Dashboard Ejecutivo', icon: LayoutDashboard, category: 'OPERACIONES', permission: 'dashboard.view' },
@@ -52,20 +60,40 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) =
   };
 
   return (
-    <aside className={`${isCollapsed ? 'w-20' : 'w-64'} bg-slate-950 border-r border-slate-800 flex flex-col h-screen overflow-y-auto shrink-0 z-20 shadow-sm transition-all duration-200`}>
+    <aside className={[
+      'bg-slate-950 border-r border-slate-800 flex flex-col h-screen overflow-y-auto shrink-0 shadow-sm transition-all duration-200',
+      // Mobile: fixed overlay drawer
+      'fixed inset-y-0 left-0 z-50',
+      isMobileOpen ? 'translate-x-0' : '-translate-x-full',
+      // Desktop: inline, no translate
+      'md:relative md:inset-auto md:translate-x-0',
+      // Width: full-width-ish on mobile, collapse/expand on desktop
+      'w-72 md:w-auto',
+      isCollapsed ? 'md:w-20' : 'md:w-64',
+    ].join(' ')}>
       
       {/* Brand Box per Geometric Balance Style */}
       {!isCollapsed ? (
         <div className="p-5 bg-blue-800 shrink-0 select-none relative">
           <div className="flex items-center justify-between">
             <h1 className="text-white font-black text-xl tracking-tight uppercase leading-none">Plasyect</h1>
-            <button 
-              onClick={() => setIsCollapsed(true)}
-              className="p-1 rounded bg-blue-900 hover:bg-blue-700 text-white cursor-pointer transition-colors outline-none"
-              title="Minimizar menú"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              {/* Close button — mobile only */}
+              <button
+                onClick={onClose}
+                className="md:hidden p-1 rounded bg-blue-900 hover:bg-blue-700 text-white cursor-pointer transition-colors outline-none"
+                title="Cerrar menú"
+              >
+                <X className="w-4 h-4" />
+              </button>
+              <button
+                onClick={() => setIsCollapsed(true)}
+                className="hidden md:block p-1 rounded bg-blue-900 hover:bg-blue-700 text-white cursor-pointer transition-colors outline-none"
+                title="Minimizar menú"
+              >
+                <ChevronLeft className="w-4 h-4" />
+              </button>
+            </div>
           </div>
           <p className="text-blue-100 text-[10px] tracking-widest font-bold font-mono mt-1">INTELLIGENCE DASHBOARD</p>
 
@@ -113,7 +141,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) =
                     return (
                       <button
                         key={item.id}
-                        onClick={() => setCurrentTab(item.id)}
+                        onClick={() => handleNavClick(item.id)}
                         className={`w-full flex items-center gap-3 px-3 py-2 justify-start font-sans text-xs font-semibold tracking-wide transition-all outline-none text-left select-none cursor-pointer rounded-sm ${
                           isActive
                             ? 'bg-blue-600 text-white font-bold border-l-4 border-l-white'
@@ -139,7 +167,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab }) =
             return (
               <button
                 key={item.id}
-                onClick={() => setCurrentTab(item.id)}
+                onClick={() => handleNavClick(item.id)}
                 className={`w-10 h-10 flex items-center justify-center rounded-lg transition-all outline-none select-none cursor-pointer relative ${
                   isActive
                     ? 'bg-blue-600 text-white font-bold'

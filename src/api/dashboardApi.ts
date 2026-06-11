@@ -1,4 +1,5 @@
 import type { AuditLog, Band, Batch, Client, Machine, Model, Order, QualityDefect, StageId, TenantId, Tenant, UserSession } from '../types';
+import { getStoredString, removeStoredItem, setStoredString } from '../utils/storage';
 
 export interface HourlyProductionRow {
   area: string;
@@ -35,6 +36,17 @@ export interface EjecutivoData {
   calidad: CalidadRow[];
 }
 
+export interface MovimientoRow {
+  idMovimiento: string;
+  idLote: string;
+  etapa: string;
+  fechaEntrada: string;
+  fechaSalida: string | null;
+  pares: number;
+  usuarioEscaneo: string;
+  duracionMinutos: number;
+}
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const TOKEN_KEY = 'plasyect_api_token';
 
@@ -63,7 +75,7 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
 
   const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   if (response.status === 401 && retry) {
-    localStorage.removeItem(TOKEN_KEY);
+    removeStoredItem(TOKEN_KEY);
     return request<T>(path, options, false);
   }
   if (!response.ok) throw new Error(`API ${response.status}: ${path}`);
@@ -71,12 +83,12 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
 }
 
 async function getToken(): Promise<string> {
-  const saved = localStorage.getItem(TOKEN_KEY);
+  const saved = getStoredString(TOKEN_KEY);
   if (saved) return saved;
   const response = await fetch(`${API_BASE_URL}/api/auth/auto`, { method: 'POST' });
   if (!response.ok) throw new Error(`Auto auth failed: ${response.status}`);
   const data = await response.json();
-  localStorage.setItem(TOKEN_KEY, data.token);
+  setStoredString(TOKEN_KEY, data.token);
   return data.token;
 }
 
@@ -121,6 +133,10 @@ export const dashboardApi = {
   erpEjecutivo: (fechaInicio: string, fechaFin: string) => {
     const qs = new URLSearchParams({ fechaInicio, fechaFin });
     return request<EjecutivoData>(`/api/erp/ejecutivo?${qs}`);
+  },
+  erpMovimientos: (fechaInicio: string, fechaFin: string, limit = 50) => {
+    const qs = new URLSearchParams({ fechaInicio, fechaFin, limit: String(limit) });
+    return request<MovimientoRow[]>(`/api/erp/movimientos?${qs}`);
   }
 };
 

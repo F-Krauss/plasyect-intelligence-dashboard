@@ -29,6 +29,7 @@ import {
   INITIAL_AUDITS 
 } from '../data/mockData';
 import { backendEnabled, dashboardApi, sendApiMutation } from '../api/dashboardApi';
+import { clearHeavyLocalCaches, getStoredJson, getStoredString, setStoredJson, setStoredString } from '../utils/storage';
 
 export const ALL_PERMISSION_KEYS: PermissionKey[] = [
   'dashboard.view',
@@ -217,87 +218,68 @@ const DashboardContext = createContext<DashboardContextType | undefined>(undefin
 export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Config state
   const [currentTenantId, setCurrentTenantId] = useState<TenantId>(() => {
-    return (localStorage.getItem('plasyect_tenant_id') as TenantId) || 'plasyect_matriz';
+    return (getStoredString('plasyect_tenant_id') as TenantId) || 'plasyect_matriz';
   });
   
   const [currentUser, setCurrentUser] = useState<UserSession>(() => {
-    const saved = localStorage.getItem('plasyect_user');
-    if (saved) return JSON.parse(saved);
-    return {
+    return getStoredJson<UserSession>('plasyect_user', {
       username: 'Luis Felipe Bedia',
       email: 'lf.bedia@gmail.com',
       role: 'DIRECTOR_GENERAL',
       require2FA: true,
       has2FAVerified: true
-    };
+    });
   });
 
   const [users, setUsers] = useState<AppUser[]>(() => {
-    const saved = localStorage.getItem('plasyect_config_users');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    return createDefaultUsers('plasyect_matriz');
+    return getStoredJson<AppUser[]>('plasyect_config_users', createDefaultUsers('plasyect_matriz'));
   });
 
   const [turns, setTurns] = useState<ProductionTurn[]>(() => {
-    const saved = localStorage.getItem('plasyect_config_turns');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    return createDefaultTurns('plasyect_matriz');
+    return getStoredJson<ProductionTurn[]>('plasyect_config_turns', createDefaultTurns('plasyect_matriz'));
   });
 
   const [productionGoals, setProductionGoals] = useState<ProductionGoal[]>(() => {
-    const saved = localStorage.getItem('plasyect_config_goals');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    return [];
+    return getStoredJson<ProductionGoal[]>('plasyect_config_goals', []);
   });
 
   const [exchangeRate, setExchangeRateState] = useState<number>(() => {
-    return parseFloat(localStorage.getItem('plasyect_exchange_rate') || '18.45');
+    return parseFloat(getStoredString('plasyect_exchange_rate') || '18.45');
   });
 
   const [isOffline, setIsOffline] = useState(false);
   const [offlineQueue, setOfflineQueue] = useState<any[]>(() => {
-    return JSON.parse(localStorage.getItem('plasyect_offline_queue') || '[]');
+    return getStoredJson<any[]>('plasyect_offline_queue', []);
   });
 
   // Business entities state
   const [orders, setOrders] = useState<Order[]>(() => {
-    const saved = localStorage.getItem('plasyect_orders');
-    return saved ? JSON.parse(saved) : INITIAL_ORDERS;
+    return backendEnabled ? INITIAL_ORDERS : getStoredJson<Order[]>('plasyect_orders', INITIAL_ORDERS);
   });
 
   const [batches, setBatches] = useState<Batch[]>(() => {
-    const saved = localStorage.getItem('plasyect_batches');
-    return saved ? JSON.parse(saved) : INITIAL_BATCHES;
+    return backendEnabled ? INITIAL_BATCHES : getStoredJson<Batch[]>('plasyect_batches', INITIAL_BATCHES);
   });
 
   const [machines, setMachines] = useState<Machine[]>(() => {
-    const saved = localStorage.getItem('plasyect_machines');
-    return saved ? JSON.parse(saved) : INITIAL_MACHINES;
+    return backendEnabled ? INITIAL_MACHINES : getStoredJson<Machine[]>('plasyect_machines', INITIAL_MACHINES);
   });
 
   const [bands, setBands] = useState<Band[]>(() => {
-    const saved = localStorage.getItem('plasyect_bands');
-    return saved ? JSON.parse(saved) : INITIAL_BANDS;
+    return backendEnabled ? INITIAL_BANDS : getStoredJson<Band[]>('plasyect_bands', INITIAL_BANDS);
   });
 
   const [defects, setDefects] = useState<QualityDefect[]>(() => {
-    const saved = localStorage.getItem('plasyect_defects');
-    return saved ? JSON.parse(saved) : INITIAL_DEFECTS;
+    return backendEnabled ? INITIAL_DEFECTS : getStoredJson<QualityDefect[]>('plasyect_defects', INITIAL_DEFECTS);
   });
 
   const [audits, setAudits] = useState<AuditLog[]>(() => {
-    const saved = localStorage.getItem('plasyect_audits');
-    return saved ? JSON.parse(saved) : INITIAL_AUDITS;
+    return backendEnabled ? INITIAL_AUDITS : getStoredJson<AuditLog[]>('plasyect_audits', INITIAL_AUDITS);
   });
 
   useEffect(() => {
     if (!backendEnabled) return;
+    clearHeavyLocalCaches();
     let active = true;
     dashboardApi.bootstrap()
       .then(data => {
@@ -319,11 +301,11 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Save to Web LocalStorage on change
   useEffect(() => {
-    localStorage.setItem('plasyect_tenant_id', currentTenantId);
+    setStoredString('plasyect_tenant_id', currentTenantId);
   }, [currentTenantId]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_user', JSON.stringify(currentUser));
+    setStoredJson('plasyect_user', currentUser);
   }, [currentUser]);
 
   useEffect(() => {
@@ -338,43 +320,43 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   }, [currentTenantId]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_config_users', JSON.stringify(users));
+    setStoredJson('plasyect_config_users', users);
   }, [users]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_config_turns', JSON.stringify(turns));
+    setStoredJson('plasyect_config_turns', turns);
   }, [turns]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_config_goals', JSON.stringify(productionGoals));
+    setStoredJson('plasyect_config_goals', productionGoals);
   }, [productionGoals]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_orders', JSON.stringify(orders));
+    if (!backendEnabled) setStoredJson('plasyect_orders', orders);
   }, [orders]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_batches', JSON.stringify(batches));
+    if (!backendEnabled) setStoredJson('plasyect_batches', batches);
   }, [batches]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_machines', JSON.stringify(machines));
+    if (!backendEnabled) setStoredJson('plasyect_machines', machines);
   }, [machines]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_bands', JSON.stringify(bands));
+    if (!backendEnabled) setStoredJson('plasyect_bands', bands);
   }, [bands]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_defects', JSON.stringify(defects));
+    if (!backendEnabled) setStoredJson('plasyect_defects', defects);
   }, [defects]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_audits', JSON.stringify(audits));
+    if (!backendEnabled) setStoredJson('plasyect_audits', audits);
   }, [audits]);
 
   useEffect(() => {
-    localStorage.setItem('plasyect_offline_queue', JSON.stringify(offlineQueue));
+    setStoredJson('plasyect_offline_queue', offlineQueue);
   }, [offlineQueue]);
 
   const currentTenant = TENANTS.find(t => t.id === currentTenantId) || TENANTS[0];
@@ -502,7 +484,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const setExchangeRate = (rate: number) => {
     setExchangeRateState(rate);
-    localStorage.setItem('plasyect_exchange_rate', rate.toString());
+    setStoredString('plasyect_exchange_rate', rate.toString());
     addAuditLog('CONFIG', 'EXCHANGE_RATE_CHANGED', `Tasa de cambio manual establecida en $${rate} MXN/USD`);
   };
 

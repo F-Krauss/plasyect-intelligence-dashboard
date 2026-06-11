@@ -10,7 +10,8 @@ import pg from 'pg';
  */
 const MIGRATIONS = [
   '../../backend/migrations/001_initial_schema.sql',
-  '../../backend/migrations/002_bigzap_tarjetas.sql'
+  '../../backend/migrations/002_bigzap_tarjetas.sql',
+  '../../backend/migrations/003_ocr_tables.sql'
 ];
 
 async function main(): Promise<void> {

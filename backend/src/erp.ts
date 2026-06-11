@@ -58,12 +58,26 @@ export interface EjecutivoData {
   calidad: CalidadRow[];
 }
 
+/** Un movimiento = un escaneo de tarjeta viajera (AVANCE). La entrada es el
+ * escaneo de esta etapa; la salida es el siguiente escaneo del mismo lote. */
+export interface MovimientoRow {
+  idMovimiento: string;
+  idLote: string;
+  etapa: string;
+  fechaEntrada: string;
+  fechaSalida: string | null;
+  pares: number;
+  usuarioEscaneo: string;
+  duracionMinutos: number;
+}
+
 export interface ErpService {
   readonly enabled: boolean;
   listTarjetas(options: ListTarjetasOptions): Promise<ErpRecord[]>;
   getTarjeta(id: string): Promise<TarjetaDetalle | null>;
   getSyncStatus(): Promise<ErpRecord | null>;
   getEjecutivoDashboard(fechaInicio: string, fechaFin: string): Promise<EjecutivoData>;
+  getMovimientos(fechaInicio: string, fechaFin: string, limit: number): Promise<MovimientoRow[]>;
 }
 
 export function getTarjetaViajeraStub(id: string) {
@@ -81,6 +95,13 @@ export function parseTarjetaId(id: string): { programa: number; lote: number } |
   const match = /^(\d{1,9})-(\d{1,9})$/.exec(id.trim());
   if (!match) return null;
   return { programa: Number(match[1]), lote: Number(match[2]) };
+}
+
+/** pg devuelve Date para timestamptz; Supabase devuelve string ISO. Normaliza a ISO. */
+function toIsoOrNull(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const d = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
 }
 
 /** Lee tarjetas viajeras por Postgres directo (DATABASE_URL). Via preferida. */
@@ -244,6 +265,51 @@ class PgErpService implements ErpService {
 
     return { produccion, calidad };
   }
+
+  async getMovimientos(fechaInicio: string, fechaFin: string, limit: number): Promise<MovimientoRow[]> {
+    const { rows } = await this.pool.query<ErpRecord>(
+      `WITH mov AS (
+         SELECT a.programa, a.lote, a.depto,
+                a.escaneado_at AS entrada,
+                lead(a.escaneado_at) OVER (PARTITION BY a.programa, a.lote ORDER BY a.escaneado_at) AS salida,
+                a.gen_por AS usuario
+         FROM public.bigzap_avance a
+         WHERE a.escaneado_at IS NOT NULL AND a.depto <> ''
+       )
+       SELECT
+         'MOV-' || m.programa || '-' || m.lote || '-' || m.depto AS id_movimiento,
+         m.programa || '-' || m.lote AS id_lote,
+         COALESCE(d.nombre, 'DEPTO-' || m.depto) AS etapa,
+         m.entrada AS fecha_entrada,
+         -- Etapa terminal (40 EMBARQUE / 50 FACTURACION) sin siguiente escaneo = lote
+         -- cerrado: cierra en la propia entrada (no "EN PROCESO" ni falso cuello de botella).
+         CASE WHEN m.salida IS NOT NULL THEN m.salida
+              WHEN m.depto IN ('40', '50') THEN m.entrada
+              ELSE NULL END AS fecha_salida,
+         COALESCE(l.pares, 0)::int AS pares,
+         COALESCE(NULLIF(btrim(m.usuario), ''), 'N/D') AS usuario,
+         GREATEST(0, round(extract(epoch FROM (
+           COALESCE(m.salida, CASE WHEN m.depto IN ('40', '50') THEN m.entrada ELSE now() END) - m.entrada
+         )) / 60.0))::int AS duracion_min
+       FROM mov m
+       LEFT JOIN public.bigzap_lotes l ON l.programa = m.programa AND l.lote = m.lote
+       LEFT JOIN public.bigzap_departamentos d ON d.codigo = m.depto
+       WHERE m.entrada::date BETWEEN $1::date AND $2::date
+       ORDER BY m.entrada DESC
+       LIMIT $3`,
+      [fechaInicio, fechaFin, limit]
+    );
+    return rows.map(r => ({
+      idMovimiento: String(r.id_movimiento ?? ''),
+      idLote: String(r.id_lote ?? ''),
+      etapa: String(r.etapa ?? ''),
+      fechaEntrada: toIsoOrNull(r.fecha_entrada) ?? '',
+      fechaSalida: toIsoOrNull(r.fecha_salida),
+      pares: Number(r.pares ?? 0),
+      usuarioEscaneo: String(r.usuario ?? 'N/D'),
+      duracionMinutos: Number(r.duracion_min ?? 0)
+    }));
+  }
 }
 
 class SupabaseErpService implements ErpService {
@@ -396,6 +462,62 @@ class SupabaseErpService implements ErpService {
 
     return { produccion, calidad };
   }
+
+  async getMovimientos(fechaInicio: string, fechaFin: string, limit: number): Promise<MovimientoRow[]> {
+    const [avanceRes, lotesRes, deptosRes] = await Promise.all([
+      this.supabase
+        .from('bigzap_avance')
+        .select('programa, lote, depto, escaneado_at, gen_por')
+        .gte('fecha', fechaInicio)
+        .not('escaneado_at', 'is', null)
+        .order('escaneado_at', { ascending: true }),
+      this.supabase.from('bigzap_lotes').select('programa, lote, pares'),
+      this.supabase.from('bigzap_departamentos').select('codigo, nombre')
+    ]);
+
+    const paresMap = new Map<string, number>();
+    for (const l of lotesRes.data ?? []) paresMap.set(`${l.programa}-${l.lote}`, Number(l.pares ?? 0));
+    const deptoMap = new Map<string, string>();
+    for (const d of deptosRes.data ?? []) deptoMap.set(String(d.codigo), String(d.nombre ?? ''));
+
+    // Agrupa escaneos por lote para calcular la salida = siguiente escaneo.
+    const byLot = new Map<string, ErpRecord[]>();
+    for (const a of avanceRes.data ?? []) {
+      if (!a.depto || String(a.depto).trim() === '') continue;
+      const key = `${a.programa}-${a.lote}`;
+      let arr = byLot.get(key);
+      if (!arr) { arr = []; byLot.set(key, arr); }
+      arr.push(a);
+    }
+
+    const out: MovimientoRow[] = [];
+    for (const [lotKey, scans] of byLot) {
+      scans.sort((x, y) => String(x.escaneado_at).localeCompare(String(y.escaneado_at)));
+      for (let i = 0; i < scans.length; i++) {
+        const s = scans[i];
+        const entrada = String(s.escaneado_at);
+        const day = entrada.slice(0, 10);
+        if (day < fechaInicio || day > fechaFin) continue;
+        const nextScan = i + 1 < scans.length ? String(scans[i + 1].escaneado_at) : null;
+        // Etapa terminal (40/50) sin siguiente escaneo = lote cerrado: cierra en su entrada.
+        const terminal = s.depto === '40' || s.depto === '50';
+        const salida = nextScan ?? (terminal ? entrada : null);
+        const end = nextScan ? new Date(nextScan).getTime() : terminal ? new Date(entrada).getTime() : Date.now();
+        out.push({
+          idMovimiento: `MOV-${s.programa}-${s.lote}-${s.depto}`,
+          idLote: lotKey,
+          etapa: deptoMap.get(String(s.depto)) || `DEPTO-${s.depto}`,
+          fechaEntrada: toIsoOrNull(entrada) ?? '',
+          fechaSalida: salida ? toIsoOrNull(salida) : null,
+          pares: paresMap.get(lotKey) ?? 0,
+          usuarioEscaneo: (s.gen_por != null ? String(s.gen_por).trim() : '') || 'N/D',
+          duracionMinutos: Math.max(0, Math.round((end - new Date(entrada).getTime()) / 60000))
+        });
+      }
+    }
+    out.sort((a, b) => b.fechaEntrada.localeCompare(a.fechaEntrada));
+    return out.slice(0, limit);
+  }
 }
 
 class DisabledErpService implements ErpService {
@@ -415,6 +537,10 @@ class DisabledErpService implements ErpService {
 
   async getEjecutivoDashboard(): Promise<EjecutivoData> {
     return { produccion: [], calidad: [] };
+  }
+
+  async getMovimientos(): Promise<MovimientoRow[]> {
+    return [];
   }
 }
 

@@ -21,7 +21,7 @@ import { DataTable } from '../components/DataTable';
 import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
 import { CLIENTS, MODELS, STAGES, COLORS, MOVIMIENTOS, CALIDAD_RECORDS, PRODUCCION_POR_HORA, DEFECTOS_CATALOGO } from '../data/mockData';
-import { backendEnabled, dashboardApi, type EjecutivoData } from '../api/dashboardApi';
+import { backendEnabled, dashboardApi, type EjecutivoData, type MovimientoRow } from '../api/dashboardApi';
 import { AppUser, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
   DollarSign, 
@@ -194,9 +194,12 @@ export const DashboardEjecutivoView: React.FC = () => {
     return true;
   });
 
-  // Source: real ERP data when backend enabled, mock data as fallback
-  const calidadSource = backendEnabled && erpData.calidad.length > 0 ? erpData.calidad : CALIDAD_RECORDS;
-  const prodSource = backendEnabled && erpData.produccion.length > 0 ? erpData.produccion : PRODUCCION_POR_HORA;
+  // Source: real ERP data when backend is enabled (even if the selected range
+  // returns nothing — we must NOT mask an empty range with mock data, or the
+  // charts look frozen when the user changes dates). Mock is only for the
+  // offline/demo mode where no backend is configured.
+  const calidadSource = backendEnabled ? erpData.calidad : CALIDAD_RECORDS;
+  const prodSource = backendEnabled ? erpData.produccion : PRODUCCION_POR_HORA;
 
   // Filter application - Quality records (date already filtered by API; apply remaining filters)
   const filteredQuality = calidadSource.filter(q => {
@@ -364,13 +367,20 @@ export const DashboardEjecutivoView: React.FC = () => {
   }
 
   // 5. Gráficas inferiores computations
-  // - Producción por hora del día más reciente en el rango (no acumulado)
+  // - Producción real vs meta por hora del día, agregada sobre TODO el rango
+  //   seleccionado. Antes se usaba solo el día más reciente, por lo que al
+  //   cambiar las fechas la gráfica no se movía (los escaneos reales de
+  //   inyección/banda terminan el 2026-04-20). Agregando el rango completo la
+  //   gráfica responde a cualquier cambio de fecha inicio/fin.
   const hourlyChartData: Record<string, { value: number; target: number }> = {};
-  for (const p of todayProdHora) {
+  for (const p of filteredProdHora) {
     if (!hourlyChartData[p.hora]) hourlyChartData[p.hora] = { value: 0, target: 0 };
     hourlyChartData[p.hora].value += p.produccionReal;
     hourlyChartData[p.hora].target += p.metaHora;
   }
+  const hasHourlyData = filteredProdHora.length > 0;
+  // Días reales con escaneos de producción dentro del rango (para el subtítulo).
+  const prodDatesInRange = Array.from(new Set(filteredProdHora.map(p => p.fecha))).sort();
   const hourlyStdDev = getStdDev(Object.values(hourlyChartData).map(d => d.value - d.target));
   const finalHourlyData = Array.from({ length: 24 }, (_, hour) => {
     const label = `${String(hour).padStart(2, '0')}:00`;
@@ -853,9 +863,23 @@ export const DashboardEjecutivoView: React.FC = () => {
               <Activity className="w-3.5 h-3.5" />
               PRODUCCIÓN HORARIA
             </h4>
-            <p className="text-[9px] text-slate-500 font-sans mt-1">24 horas. Verde meta, amarillo bajo 1σ, rojo bajo 1σ+</p>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">
+              Real vs meta por hora del día, agregado en el rango {fechaInicio} → {fechaFin}
+              {prodDatesInRange.length > 0 && (
+                <span className="text-slate-600"> · {prodDatesInRange.length} día{prodDatesInRange.length > 1 ? 's' : ''} con escaneos ({prodDatesInRange[0]}{prodDatesInRange.length > 1 ? ` … ${prodDatesInRange[prodDatesInRange.length - 1]}` : ''})</span>
+              )}
+              . Verde meta, amarillo bajo 1σ, rojo bajo 1σ+
+            </p>
           </div>
-          <div className="h-52 mt-4 flex items-end justify-between gap-1 pt-5">
+          {!hasHourlyData ? (
+            <div className="h-52 mt-4 flex flex-col items-center justify-center text-center gap-1">
+              <Activity className="w-6 h-6 text-slate-700" />
+              <p className="text-[11px] font-mono text-slate-500">Sin escaneos de producción en el rango seleccionado.</p>
+              <p className="text-[9px] font-sans text-slate-600">Ajusta las fechas: los escaneos de inyección/banda llegan hasta el 2026-04-20.</p>
+            </div>
+          ) : (
+          <div className="overflow-x-auto mt-4">
+          <div className="h-52 min-w-[480px] flex items-end justify-between gap-1 pt-5">
             {finalHourlyData.map((d, i) => {
               const maxVal = Math.max(...finalHourlyData.map(item => Math.max(item.value, item.target)), 1);
               const pct = (d.value / maxVal) * 100;
@@ -882,6 +906,8 @@ export const DashboardEjecutivoView: React.FC = () => {
               );
             })}
           </div>
+          </div>
+          )}
         </div>
 
         {/* Chart 2: Pares por etapa */}
@@ -3428,12 +3454,13 @@ export const PipelinePedidoView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-tight">
             Desglosado de calzado cargado actualmente por cada subestación de control industrial.
           </p>
-          <div className="h-60">
+          <div className="h-60 overflow-x-auto">
             {stackedChartData.length === 0 ? (
               <div className="h-full flex flex-col justify-center items-center text-slate-550">
                 <span>Sin datos de pedidos</span>
               </div>
             ) : (
+              <div className="min-w-[340px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart
                   data={stackedChartData}
@@ -3457,6 +3484,7 @@ export const PipelinePedidoView: React.FC = () => {
                   <RechartsBar dataKey="Entrega" stackId="a" fill="#10b981" />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             )}
           </div>
         </div>
@@ -3469,7 +3497,8 @@ export const PipelinePedidoView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-tight">
             Pares acumulados por día en pedidos filtrados.
           </p>
-          <div className="h-60">
+          <div className="h-60 overflow-x-auto">
+            <div className="min-w-[300px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsLineChart
                 data={lineChartData}
@@ -3486,6 +3515,7 @@ export const PipelinePedidoView: React.FC = () => {
                 <RechartsLine type="monotone" dataKey="Progreso Promedio %" stroke="#06b6d4" strokeWidth={3} dot={{ r: 4 }} />
               </RechartsLineChart>
             </RechartsResponsiveContainer>
+            </div>
           </div>
         </div>
 
@@ -5223,6 +5253,9 @@ export const ModelosProductosView: React.FC = () => {
   // Track selected model for detail view (Master-Detail)
   const [selectedProductModel, setSelectedProductModel] = useState<string>('Spider');
   const [aiInsightsGenerated, setAiInsightsGenerated] = useState(false);
+  const [aiGenerating, setAiGenerating] = useState(false);
+  const [aiInsights, setAiInsights] = useState<{ tag: string; tone: 'rose' | 'amber' | 'indigo'; text: string }[] | null>(null);
+  const [aiSummary, setAiSummary] = useState<string>('');
 
   // Interactive filters
   const [filtroModelo, setFiltroModelo] = useState<string>('');
@@ -5370,6 +5403,85 @@ export const ModelosProductosView: React.FC = () => {
   // 6. Porcentaje participación del modelo principal
   const maxVolume = sortedByVol[0]?.producido || 0;
   const pctParticipationPrincipal = totalPares > 0 ? Math.round((maxVolume / totalPares) * 100) : 0;
+
+  // --- Insights AI: diagnóstico operativo derivado de los datos filtrados ---
+  // Genera 3 hallazgos (calidad, lead times, volumen/cumplimiento) calculados
+  // sobre los registros actualmente filtrados, en lugar de texto estático.
+  const buildAiInsights = (): { insights: { tag: string; tone: 'rose' | 'amber' | 'indigo'; text: string }[]; summary: string } => {
+    if (summariesList.length === 0) {
+      return {
+        insights: [
+          { tag: 'Calidad & Terminado', tone: 'rose', text: 'No hay registros en el rango/filtros seleccionados para analizar.' },
+          { tag: 'Lead Timings Planta', tone: 'amber', text: 'Ajusta los filtros para generar un diagnóstico de tiempos de planta.' },
+          { tag: 'Volumen & Cumplimiento', tone: 'indigo', text: 'Sin datos de volumen para el corte actual.' }
+        ],
+        summary: 'Sin registros para diagnosticar con los filtros actuales.'
+      };
+    }
+    const withVol = summariesList.filter(m => m.producido > 0);
+    const avg = (sum: number, count: number) => (count > 0 ? sum / count : 0);
+
+    // 1. Calidad: modelo con mayor tasa de defecto
+    const defectLeader = (withVol.length ? withVol : summariesList)
+      .slice()
+      .sort((a, b) => avg(b.defectuosos, b.producido) - avg(a.defectuosos, a.producido))[0];
+    const dlRate = defectLeader.producido > 0 ? (defectLeader.defectuosos / defectLeader.producido) * 100 : 0;
+    const dlShare = totalDefectos > 0 ? Math.round((defectLeader.defectuosos / totalDefectos) * 100) : 0;
+    const calidadText = dlRate > 0
+      ? `${defectLeader.name} presenta la mayor tasa de defecto (${dlRate.toFixed(1)}%) con ${defectLeader.defectuosos.toLocaleString()} pares afectados — ${dlShare}% de la merma total (${totalDefectos.toLocaleString()} pares). Priorizar inspección en banda/terminado.`
+      : `Sin defectos registrados en el corte filtrado: ${totalPares.toLocaleString()} pares producidos limpios en ${summariesList.length} modelo(s).`;
+
+    // 2. Lead times: modelo con mayor tiempo de estabilización promedio
+    const stbLeader = summariesList.slice().sort((a, b) => avg(b.timeEstSum, b.count) - avg(a.timeEstSum, a.count))[0];
+    const stbAvg = Math.round(avg(stbLeader.timeEstSum, stbLeader.count));
+    const ltAvg = avg(stbLeader.leadTimeSum, stbLeader.count).toFixed(1);
+    const compStb = stbLeader.count > 0 ? Math.round((stbLeader.compliedOnes / stbLeader.count) * 100) : 0;
+    const leadText = `${stbLeader.name} acumula el mayor tiempo de estabilización promedio (${stbAvg} min) y un lead time de ${ltAvg} h por corrida` +
+      (compStb >= 80 ? `, aunque mantiene buen cumplimiento (${compStb}%). Revisar capacidad del túnel de estabilización.` : ` con cumplimiento de ${compStb}%. Cuello de botella probable en estabilización.`);
+
+    // 3. Volumen y cumplimiento: líder de volumen + rezagado en entregas
+    const top = sortedByVol[0];
+    const topShare = totalPares > 0 ? Math.round((top.producido / totalPares) * 100) : 0;
+    const worstComp = summariesList.slice().sort((a, b) => avg(a.compliedOnes, a.count) - avg(b.compliedOnes, b.count))[0];
+    const worstCompPct = worstComp.count > 0 ? Math.round((worstComp.compliedOnes / worstComp.count) * 100) : 0;
+    const volText = `${top.name} lidera el volumen con ${topShare}% del total (${top.producido.toLocaleString()} pares). Cumplimiento promedio ${cumplimientoPromedioPedido}%` +
+      (worstComp.name !== top.name ? `; ${worstComp.name} es el más rezagado en entregas (${worstCompPct}%).` : '.');
+
+    return {
+      insights: [
+        { tag: 'Calidad & Terminado', tone: 'rose', text: calidadText },
+        { tag: 'Lead Timings Planta', tone: 'amber', text: leadText },
+        { tag: 'Volumen & Cumplimiento', tone: 'indigo', text: volText }
+      ],
+      summary: `Diagnóstico sobre ${filteredRecords.length} registros / ${summariesList.length} modelos: ${modeloMasProducido} lidera volumen, ${modeloMayorDefectivo} concentra defecto y el cumplimiento promedio por pedido es ${cumplimientoPromedioPedido}%.`
+    };
+  };
+
+  const handleGenerateInsights = () => {
+    setAiGenerating(true);
+    setAiInsightsGenerated(false);
+    // Pequeño retardo para reflejar el procesamiento del diagnóstico.
+    setTimeout(() => {
+      const { insights, summary } = buildAiInsights();
+      setAiInsights(insights);
+      setAiSummary(summary);
+      setAiInsightsGenerated(true);
+      setAiGenerating(false);
+      addAuditLog('MODELOS', 'AI_INSIGHTS_GENERATED', `Insights AI generados con ${filteredRecords.length} registros filtrados`);
+    }, 650);
+  };
+
+  const AI_TONE_CLASSES: Record<'rose' | 'amber' | 'indigo', { wrap: string; tag: string }> = {
+    rose: { wrap: 'bg-rose-950/15 border-rose-900/30', tag: 'text-rose-450' },
+    amber: { wrap: 'bg-amber-950/15 border-amber-900/30', tag: 'text-amber-500' },
+    indigo: { wrap: 'bg-indigo-950/15 border-indigo-900/30', tag: 'text-indigo-400' }
+  };
+  // Tarjetas a mostrar: las generadas dinámicamente o las plantillas por defecto.
+  const aiCards = aiInsights ?? [
+    { tag: 'Calidad & Terminado', tone: 'rose' as const, text: 'Pulsa «Generar insights AI» para analizar la calidad de los modelos filtrados.' },
+    { tag: 'Lead Timings Planta', tone: 'amber' as const, text: 'El diagnóstico de tiempos de planta se calcula con los registros del corte actual.' },
+    { tag: 'Variabilidad / Volumen', tone: 'indigo' as const, text: 'Se identificará el líder de volumen y el rezago en cumplimiento.' }
+  ];
 
   // RECHARTS CHART MAPPINGS (7 GRAPHICS CONFIGURED BEUTIFULLY)
   
@@ -5715,41 +5827,36 @@ export const ModelosProductosView: React.FC = () => {
             </h3>
           </div>
           <button
-            onClick={() => {
-              setAiInsightsGenerated(true);
-              addAuditLog('MODELOS', 'AI_INSIGHTS_GENERATED', `Insights AI generados con ${filteredRecords.length} registros filtrados`);
-            }}
-            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-slate-950 text-[10px] font-mono font-black uppercase transition"
+            onClick={handleGenerateInsights}
+            disabled={aiGenerating}
+            className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-60 disabled:cursor-wait text-slate-950 text-[10px] font-mono font-black uppercase transition flex items-center gap-1.5"
           >
-            Generar insights AI
+            {aiGenerating ? (
+              <>
+                <Activity className="w-3 h-3 animate-pulse" />
+                Analizando {filteredRecords.length} registros…
+              </>
+            ) : aiInsightsGenerated ? 'Regenerar insights AI' : 'Generar insights AI'}
           </button>
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="p-3.5 bg-rose-950/15 border border-rose-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-rose-450 font-bold uppercase tracking-wider block">Calidad & Terminado</span>
-            <p className="text-[11px] text-slate-300 leading-relaxed font-sans font-medium">
-              “El modelo <strong>Ruby</strong> concentra alto volumen, pero presenta defectos recurrentes en Banda.”
-            </p>
-          </div>
-
-          <div className="p-3.5 bg-amber-950/15 border border-amber-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-amber-500 font-bold uppercase tracking-wider block">Lead Timings Planta</span>
-            <p className="text-[11px] text-slate-300 leading-relaxed font-sans font-medium">
-              “El modelo <strong>Spider</strong> tiene buen cumplimiento, pero alto tiempo de estabilización.”
-            </p>
-          </div>
-
-          <div className="p-3.5 bg-indigo-950/15 border border-indigo-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-indigo-400 font-bold uppercase tracking-wider block">Variabilidad en Tallas</span>
-            <p className="text-[11px] text-slate-300 leading-relaxed font-sans font-medium">
-              “El modelo <strong>Dragon</strong> presenta mayor variabilidad de calidad en tallas 24 a 27.”
-            </p>
-          </div>
+          {aiCards.map((card, i) => {
+            const tone = AI_TONE_CLASSES[card.tone];
+            return (
+              <div key={i} className={`p-3.5 border rounded-lg space-y-1 ${tone.wrap} ${aiGenerating ? 'animate-pulse' : ''}`}>
+                <span className={`text-[9px] font-mono font-bold uppercase tracking-wider block ${tone.tag}`}>{card.tag}</span>
+                <p className={`text-[11px] leading-relaxed font-sans font-medium ${aiInsights ? 'text-slate-200' : 'text-slate-400 italic'}`}>
+                  {card.text}
+                </p>
+              </div>
+            );
+          })}
         </div>
-        {aiInsightsGenerated && (
-          <div className="p-3 bg-indigo-950/25 border border-indigo-900/40 rounded-lg text-[11px] text-indigo-200 font-mono">
-            AI listo: {modeloMasProducido} lidera volumen, {modeloMayorDefectivo} concentra defecto y cumplimiento promedio por pedido está en {cumplimientoPromedioPedido}%.
+        {aiInsightsGenerated && aiSummary && (
+          <div className="p-3 bg-indigo-950/25 border border-indigo-900/40 rounded-lg text-[11px] text-indigo-200 font-mono flex items-start gap-2">
+            <span className="text-indigo-400">▮</span>
+            <span>{aiSummary}</span>
           </div>
         )}
       </div>
@@ -7055,7 +7162,8 @@ export const CalidadView: React.FC = () => {
                 <span className="text-[9px] bg-slate-950 text-pink-400 px-1 py-0.5 rounded leading-none">Voz General</span>
               </h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Representación ordenada de incidencias y % acumulado.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={paretoChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7065,6 +7173,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Fallas" fill="#ec4899" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7072,7 +7181,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">📐 Defectos por Área</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Distribución de mermas e incidencias por zona operativa.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={areaChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7082,6 +7192,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Defectivos" fill="#ef4444" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7089,7 +7200,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">👟 Defectos por Modelo</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Volumen absoluto de calzado defectuoso por molde.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={modelChartData.slice(0, 6)} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7099,6 +7211,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Defectivos" fill="#06b6d4" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7106,7 +7219,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">🎨 Defectos por Color</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Anomalías presentadas por pigmentación pigmentación.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={colorChartData.slice(0, 6)} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7116,6 +7230,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Defectivos" fill="#a855f7" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7130,7 +7245,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">⚙️ Defectos por Máquina Inyectora</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Registro de desviaciones mecánicas en platos enfriadores.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={machineChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7140,6 +7256,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Defectivos" fill="#f59e0b" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7147,7 +7264,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">〰️ Defectos por Banda de Detalle</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Mermas de rebabas y deslices de lijas por estación.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={bandChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7157,6 +7275,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Defectivos" fill="#ec4899" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7164,7 +7283,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">📏 Defectos por Talla Comercial</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Comportamiento contractivo de EVA según el tamaño de horma.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={tallaChartData.slice(0, 10)} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7174,6 +7294,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Defectivos" fill="#14b8a6" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7188,7 +7309,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">⚖️ Primeras vs Segundas por Modelo</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Contraste directo de volumen comercial de Primer Grado vs Cosméticas.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={primeVsSecChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7199,6 +7321,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Segundas" fill="#f59e0b" />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7206,7 +7329,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md font-sans">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">📈 Tendencia de % Defectivo Diario</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight font-sans">Comportamiento diario de tasa de rechazo general.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsLineChart data={dailyTrendChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7216,6 +7340,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsLine type="monotone" dataKey="% Defectivo" stroke="#ef4444" strokeWidth={2.5} dot={{ r: 2.5 }} />
                   </RechartsLineChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -7223,7 +7348,8 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">🧪 Reprocesos y Mermas</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Análisis de scrap definitivo (Merma) vs calzado recuperable.</p>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={weeklyRepMermChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
@@ -7234,6 +7360,7 @@ export const CalidadView: React.FC = () => {
                     <RechartsBar dataKey="Merma" fill="#f43f5e" stackId="stack" />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8454,7 +8581,8 @@ export const InyeccionView: React.FC = () => {
                 ⏱️ Producción por Hora en Inyección
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Distribución proporcional de vulcanizado EVA en 24 horas.</p>
-              <div className="h-56">
+              <div className="h-56 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsLineChart data={prodHourlyData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8464,6 +8592,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsLine type="monotone" dataKey="Pares" stroke="#e11d48" strokeWidth={2.5} dot={{ fill: '#f59e0b' }} />
                   </RechartsLineChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8473,7 +8602,8 @@ export const InyeccionView: React.FC = () => {
                 ⚙️ Producción por Máquina Prensa
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Volumen inspeccionado por celda termoplástica en el periodo.</p>
-              <div className="h-56">
+              <div className="h-56 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={machineProdChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8483,6 +8613,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsBar dataKey="Pares" fill="#f59e0b" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8499,7 +8630,8 @@ export const InyeccionView: React.FC = () => {
                 ⚠️ Defectos por Máquina Prensa
               </h4>
               <p className="text-[9px] text-slate-550 mb-3 block truncate">Distribución absoluta de anormalidades físicas registradas.</p>
-              <div className="h-52">
+              <div className="h-52 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={machineDefChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8509,6 +8641,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsBar dataKey="Defectos" fill="#ef4444" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8518,7 +8651,8 @@ export const InyeccionView: React.FC = () => {
                 📉 Pareto de Defectos de Inyección
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Voz del cliente: Priorización 80/20 de pérdidas de inyección.</p>
-              <div className="h-52">
+              <div className="h-52 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={paretoDefectChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8528,6 +8662,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsBar dataKey="Pares" fill="#e11d48" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8537,7 +8672,8 @@ export const InyeccionView: React.FC = () => {
                 ⚖️ Primeras vs Segundas por Modelo
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Balance de grado comercial A vs B para modelos dominantes.</p>
-              <div className="h-52">
+              <div className="h-52 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={modelComparisonsChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8549,6 +8685,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsBar dataKey="Segundas" fill="#6366f1" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8565,7 +8702,8 @@ export const InyeccionView: React.FC = () => {
                 📊 Eficiencia por Turno de Trabajo
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Porcentaje de primeras sobre volumen total procesado.</p>
-              <div className="h-56 font-mono">
+              <div className="h-56 font-mono overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={shiftEffChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8575,6 +8713,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsBar dataKey="Eficiencia" fill="#3b82f6" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -8584,7 +8723,8 @@ export const InyeccionView: React.FC = () => {
                 👟 Defectos por Talla de Calzado
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Concentración de mermas e incidencias por tamaño de molde.</p>
-              <div className="h-56 font-mono">
+              <div className="h-56 font-mono overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={tallaDefChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -8594,6 +8734,7 @@ export const InyeccionView: React.FC = () => {
                     <RechartsBar dataKey="Hundimientos" fill="#d97706" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
@@ -9785,7 +9926,8 @@ export const BandaView: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⏱️ Producción por hora en banda</h4>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsLineChart data={prodHourlyData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9795,12 +9937,14 @@ export const BandaView: React.FC = () => {
                     <RechartsLine type="monotone" dataKey="Pares" stroke="#6366f1" strokeWidth={2} dot={{ fill: '#818cf8' }} />
                   </RechartsLineChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚙️ Producción por banda</h4>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={bandaProdChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9810,6 +9954,7 @@ export const BandaView: React.FC = () => {
                     <RechartsBar dataKey="Pares" fill="#818cf8" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
           </div>
@@ -9819,7 +9964,8 @@ export const BandaView: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚠️ Defectos por banda</h4>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={bandaDefChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9829,12 +9975,14 @@ export const BandaView: React.FC = () => {
                     <RechartsBar dataKey="Defectos" fill="#f43f5e" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
 
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">📈 Pareto de defectos en banda</h4>
-              <div className="h-44">
+              <div className="h-44 overflow-x-auto">
+                <div className="min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%">
                   <RechartsBarChart data={paretoDefectChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9844,6 +9992,7 @@ export const BandaView: React.FC = () => {
                     <RechartsBar dataKey="Pares" fill="#ec4899" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
+                </div>
               </div>
             </div>
           </div>
@@ -9854,7 +10003,8 @@ export const BandaView: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚖️ Primeras vs segundas por modelo</h4>
-                <div className="h-44">
+                <div className="h-44 overflow-x-auto">
+                  <div className="min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%">
                     <RechartsBarChart data={modelComparisonsChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9866,12 +10016,14 @@ export const BandaView: React.FC = () => {
                       <RechartsBar dataKey="Segundas" fill="#6366f1" radius={[2, 2, 0, 0]} />
                     </RechartsBarChart>
                   </RechartsResponsiveContainer>
+                  </div>
                 </div>
               </div>
 
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">🧵 Defectos por modelo</h4>
-                <div className="h-44">
+                <div className="h-44 overflow-x-auto">
+                  <div className="min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%">
                     <RechartsBarChart data={modelDefectChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9881,6 +10033,7 @@ export const BandaView: React.FC = () => {
                       <RechartsBar dataKey="Defectos" fill="#f43f5e" radius={[4, 4, 0, 0]} />
                     </RechartsBarChart>
                   </RechartsResponsiveContainer>
+                  </div>
                 </div>
               </div>
             </div>
@@ -9888,7 +10041,8 @@ export const BandaView: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">🎨 Defectos por color</h4>
-                <div className="h-44">
+                <div className="h-44 overflow-x-auto">
+                  <div className="min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%">
                     <RechartsBarChart data={colorDefectChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9898,12 +10052,14 @@ export const BandaView: React.FC = () => {
                       <RechartsBar dataKey="Defectos" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
                     </RechartsBarChart>
                   </RechartsResponsiveContainer>
+                  </div>
                 </div>
               </div>
 
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">📈 Tendencia de % defectivo</h4>
-                <div className="h-44">
+                <div className="h-44 overflow-x-auto">
+                  <div className="min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%">
                     <RechartsLineChart data={trendChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
@@ -9913,6 +10069,7 @@ export const BandaView: React.FC = () => {
                       <RechartsLine type="monotone" dataKey="% Defectivo" stroke="#f43f5e" strokeWidth={2} dot={{ fill: '#3b82f6' }} />
                     </RechartsLineChart>
                   </RechartsResponsiveContainer>
+                  </div>
                 </div>
               </div>
             </div>
@@ -12275,7 +12432,8 @@ export const EmbarqueView: React.FC = () => {
           {/* Graffic 1: Embarques por día */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">1. Pares Embarcados por Día</span>
-            <div className="h-44 w-full">
+            <div className="h-44 w-full overflow-x-auto">
+              <div className="min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsLineChart data={embarquesDiaChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
@@ -12285,13 +12443,15 @@ export const EmbarqueView: React.FC = () => {
                   <RechartsLine type="monotone" dataKey="pares" stroke="#059669" strokeWidth={2.5} activeDot={{ r: 6 }} />
                 </RechartsLineChart>
               </RechartsResponsiveContainer>
+              </div>
             </div>
           </div>
 
           {/* Graffic 2: Pedidos completos vs parciales */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">2. Pedidos Completos vs Parciales</span>
-            <div className="h-44 w-full">
+            <div className="h-44 w-full overflow-x-auto">
+              <div className="min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart data={completosVsParcialesData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
@@ -12301,13 +12461,15 @@ export const EmbarqueView: React.FC = () => {
                   <RechartsBar dataKey="cantidad" fill="#4338ca" radius={[4, 4, 0, 0]} />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             </div>
           </div>
 
           {/* Graffic 3: Cumplimiento por cliente */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">3. Cumplimiento OTIF por Cliente</span>
-            <div className="h-44 w-full">
+            <div className="h-44 w-full overflow-x-auto">
+              <div className="min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart data={cumplimientoClienteData} layout="vertical" margin={{ top: 5, right: 10, left: -15, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
@@ -12317,13 +12479,15 @@ export const EmbarqueView: React.FC = () => {
                   <RechartsBar dataKey="porcentaje" fill="#047857" radius={[0, 4, 4, 0]} />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             </div>
           </div>
 
           {/* Graffic 4: Pares embarcados por modelo */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">4. Pares Embarcados por Modelo</span>
-            <div className="h-44 w-full">
+            <div className="h-44 w-full overflow-x-auto">
+              <div className="min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart data={paresEmbarcadosModeloData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
@@ -12333,13 +12497,15 @@ export const EmbarqueView: React.FC = () => {
                   <RechartsBar dataKey="pares" fill="#b45309" radius={[4, 4, 0, 0]} />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             </div>
           </div>
 
           {/* Graffic 5: Backlog pendiente de embarque */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">5. Backlog Pendiente por Cliente</span>
-            <div className="h-44 w-full">
+            <div className="h-44 w-full overflow-x-auto">
+              <div className="min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%">
                 <RechartsBarChart data={backlogPendienteClienteData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
@@ -12349,6 +12515,7 @@ export const EmbarqueView: React.FC = () => {
                   <RechartsBar dataKey="pares" fill="#be123c" radius={[4, 4, 0, 0]} />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
+              </div>
             </div>
           </div>
 
@@ -12380,6 +12547,27 @@ export const OCRValidacionView: React.FC = () => {
 /* 12. Reportes Históricos View */
 export const ReportesHistoricosView: React.FC = () => {
   const { audits, batches, restoreBatch, currentTenant } = useDashboard();
+
+  // Producción por hora y movimientos reales (BixApp FDB → backend), con mock
+  // como fallback. Ventana histórica amplia (último año) por ser vista de reportes.
+  const [erpProduccion, setErpProduccion] = useState<EjecutivoData['produccion']>([]);
+  const [erpMovimientos, setErpMovimientos] = useState<MovimientoRow[]>([]);
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    const hoy = new Date();
+    const fechaFin = hoy.toISOString().slice(0, 10);
+    const fechaInicio = new Date(hoy.getTime() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    dashboardApi.erpEjecutivo(fechaInicio, fechaFin)
+      .then(data => { if (!cancelled) setErpProduccion(data.produccion); })
+      .catch(err => console.warn('Reportes: ERP ejecutivo fetch failed', err));
+    dashboardApi.erpMovimientos(fechaInicio, fechaFin, 50)
+      .then(data => { if (!cancelled) setErpMovimientos(data); })
+      .catch(err => console.warn('Reportes: ERP movimientos fetch failed', err));
+    return () => { cancelled = true; };
+  }, []);
+  const prodHoraSource = backendEnabled && erpProduccion.length > 0 ? erpProduccion : PRODUCCION_POR_HORA;
+  const movimientosSource = backendEnabled && erpMovimientos.length > 0 ? erpMovimientos : MOVIMIENTOS;
 
   // Find archived (soft-deleted) items
   const archivedBatches = batches.filter(
@@ -12495,7 +12683,7 @@ export const ReportesHistoricosView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-950">
-                {PRODUCCION_POR_HORA.map((p, idx) => {
+                {prodHoraSource.map((p, idx) => {
                   const isLowEff = p.eficiencia < 90;
                   return (
                     <tr key={idx} className="hover:bg-slate-850/45 transition-colors text-[11px]">
@@ -12551,7 +12739,7 @@ export const ReportesHistoricosView: React.FC = () => {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-950">
-                {MOVIMIENTOS.slice(0, 35).map((m, idx) => {
+                {movimientosSource.slice(0, 35).map((m, idx) => {
                   const isBottleneck = m.duracionMinutos > 3000;
                   return (
                     <tr key={idx} className="hover:bg-slate-850/45 transition-colors text-[11px]">

@@ -32,3 +32,7 @@ export const dateRangeQuerySchema = z.object({
   fechaInicio: z.string().regex(ISO_DATE, 'Fecha ISO requerida (YYYY-MM-DD)'),
   fechaFin: z.string().regex(ISO_DATE, 'Fecha ISO requerida (YYYY-MM-DD)')
 });
+
+export const movimientosQuerySchema = dateRangeQuerySchema.extend({
+  limit: z.coerce.number().int().min(1).max(500).default(50)
+});
