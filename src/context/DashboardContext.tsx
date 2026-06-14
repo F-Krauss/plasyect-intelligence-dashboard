@@ -17,17 +17,7 @@ import {
   ProductionGoal,
   ProductionAreaId
 } from '../types';
-import { 
-  TENANTS, 
-  CLIENTS, 
-  MODELS, 
-  INITIAL_ORDERS, 
-  INITIAL_BATCHES, 
-  INITIAL_MACHINES, 
-  INITIAL_BANDS, 
-  INITIAL_DEFECTS, 
-  INITIAL_AUDITS 
-} from '../data/mockData';
+import { TENANTS } from '../data/appConfig';
 import { backendEnabled, dashboardApi, sendApiMutation } from '../api/dashboardApi';
 import { clearHeavyLocalCaches, getStoredJson, getStoredString, setStoredJson, setStoredString } from '../utils/storage';
 
@@ -253,29 +243,12 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   });
 
   // Business entities state
-  const [orders, setOrders] = useState<Order[]>(() => {
-    return backendEnabled ? INITIAL_ORDERS : getStoredJson<Order[]>('plasyect_orders', INITIAL_ORDERS);
-  });
-
-  const [batches, setBatches] = useState<Batch[]>(() => {
-    return backendEnabled ? INITIAL_BATCHES : getStoredJson<Batch[]>('plasyect_batches', INITIAL_BATCHES);
-  });
-
-  const [machines, setMachines] = useState<Machine[]>(() => {
-    return backendEnabled ? INITIAL_MACHINES : getStoredJson<Machine[]>('plasyect_machines', INITIAL_MACHINES);
-  });
-
-  const [bands, setBands] = useState<Band[]>(() => {
-    return backendEnabled ? INITIAL_BANDS : getStoredJson<Band[]>('plasyect_bands', INITIAL_BANDS);
-  });
-
-  const [defects, setDefects] = useState<QualityDefect[]>(() => {
-    return backendEnabled ? INITIAL_DEFECTS : getStoredJson<QualityDefect[]>('plasyect_defects', INITIAL_DEFECTS);
-  });
-
-  const [audits, setAudits] = useState<AuditLog[]>(() => {
-    return backendEnabled ? INITIAL_AUDITS : getStoredJson<AuditLog[]>('plasyect_audits', INITIAL_AUDITS);
-  });
+  const [orders, setOrders] = useState<Order[]>([]);
+  const [batches, setBatches] = useState<Batch[]>([]);
+  const [machines, setMachines] = useState<Machine[]>([]);
+  const [bands, setBands] = useState<Band[]>([]);
+  const [defects, setDefects] = useState<QualityDefect[]>([]);
+  const [audits, setAudits] = useState<AuditLog[]>([]);
 
   useEffect(() => {
     if (!backendEnabled) return;
@@ -292,7 +265,13 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
         setAudits(data.audits);
       })
       .catch(error => {
-        console.warn('Backend bootstrap failed. Using local dashboard data.', error);
+        console.warn('Backend bootstrap failed. No local mock data will be used.', error);
+        setOrders([]);
+        setBatches([]);
+        setMachines([]);
+        setBands([]);
+        setDefects([]);
+        setAudits([]);
       });
     return () => {
       active = false;
@@ -330,30 +309,6 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   useEffect(() => {
     setStoredJson('plasyect_config_goals', productionGoals);
   }, [productionGoals]);
-
-  useEffect(() => {
-    if (!backendEnabled) setStoredJson('plasyect_orders', orders);
-  }, [orders]);
-
-  useEffect(() => {
-    if (!backendEnabled) setStoredJson('plasyect_batches', batches);
-  }, [batches]);
-
-  useEffect(() => {
-    if (!backendEnabled) setStoredJson('plasyect_machines', machines);
-  }, [machines]);
-
-  useEffect(() => {
-    if (!backendEnabled) setStoredJson('plasyect_bands', bands);
-  }, [bands]);
-
-  useEffect(() => {
-    if (!backendEnabled) setStoredJson('plasyect_defects', defects);
-  }, [defects]);
-
-  useEffect(() => {
-    if (!backendEnabled) setStoredJson('plasyect_audits', audits);
-  }, [audits]);
 
   useEffect(() => {
     setStoredJson('plasyect_offline_queue', offlineQueue);
@@ -574,21 +529,22 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   // Business Actions
   const addOrder = (order: Partial<Order>) => {
+    const ocrOrder = order as Partial<Order> & { modelo?: string };
     const newOrder: Order = {
-      id: order.id || `PED-2026-${Math.floor(Math.random() * 899) + 100}`,
+      id: order.id || `PED-ERP-${Date.now()}`,
       tenantId: currentTenantId,
-      clientId: order.clientId || 'cli_flexi',
-      clientName: CLIENTS.find(c => c.id === order.clientId)?.name || 'Cliente Genérico',
-      modelId: order.modelId || 'mod_spider',
-      modelName: MODELS.find(m => m.id === order.modelId)?.name || 'Modelo Genérico',
-      color: order.color || 'Negro',
-      quantity: order.quantity || 1000,
+      clientId: order.clientId || order.cliente || 'pendiente_ocr',
+      clientName: order.clientName || order.cliente || 'Pendiente OCR',
+      modelId: order.modelId || ocrOrder.modelo || 'pendiente_ocr',
+      modelName: order.modelName || ocrOrder.modelo || 'Pendiente OCR',
+      color: order.color || 'Pendiente OCR',
+      quantity: order.quantity || order.totalPares || 0,
       exchangeRate: exchangeRate,
-      totalUSD: order.totalUSD || 3000,
-      totalMXN: (order.totalUSD || 3000) * exchangeRate,
-      createdAt: new Date().toISOString(),
+      totalUSD: order.totalUSD || 0,
+      totalMXN: (order.totalUSD || 0) * exchangeRate,
+      createdAt: order.createdAt || order.fechaAlta || new Date().toISOString(),
       deliveryDate: order.deliveryDate || new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
-      status: 'PENDIENTE',
+      status: order.status || 'PENDIENTE',
       discountAuthorized: order.discountAuthorized || false,
       discountPercentage: order.discountPercentage || 0
     };
@@ -668,21 +624,21 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
 
   const addBatch = (batch: Partial<Batch>) => {
     const newBatch: Batch = {
-      id: batch.id || `LOTE-26-${Math.floor(Math.random() * 899) + 100}`,
+      id: batch.id || `LOTE-ERP-${Date.now()}`,
       tenantId: currentTenantId,
-      orderId: batch.orderId || 'PED-2026-001',
-      modelId: batch.modelId || 'mod_spider',
-      modelName: MODELS.find(m => m.id === batch.modelId)?.name || 'Modelo Genérico',
-      color: batch.color || 'Negro',
-      size: batch.size || 26,
-      quantityShoes: batch.quantityShoes || 1000,
+      orderId: batch.orderId || '',
+      modelId: batch.modelId || batch.modelo || 'pendiente_ocr',
+      modelName: batch.modelName || batch.modelo || 'Pendiente OCR',
+      color: batch.color || 'Pendiente OCR',
+      size: batch.size || 0,
+      quantityShoes: batch.quantityShoes || batch.totalPares || 0,
       stage: batch.stage || 'alta_pedido',
       machineId: batch.machineId,
-      operatorId: batch.operatorId || 'Operador Central',
-      densityMeasured: batch.densityMeasured || 0.24,
-      shrinkageRatio: batch.shrinkageRatio || 1.55,
-      temperatureTarget: batch.temperatureTarget || 175,
-      cycleTimeSeconds: batch.cycleTimeSeconds || 240,
+      operatorId: batch.operatorId || 'Pendiente OCR',
+      densityMeasured: batch.densityMeasured || 0,
+      shrinkageRatio: batch.shrinkageRatio || 0,
+      temperatureTarget: batch.temperatureTarget || 0,
+      cycleTimeSeconds: batch.cycleTimeSeconds || 0,
       status: batch.status || 'OPTIMO',
       defectRate: batch.defectRate || 0.0,
       lastUpdate: new Date().toISOString()

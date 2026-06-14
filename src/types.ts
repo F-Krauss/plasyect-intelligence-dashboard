@@ -83,7 +83,8 @@ export interface ProductionGoal {
   active: boolean;
 }
 
-export type TenantId = 'plasyect_matriz' | 'plasyect_suelas' | 'plasyect_sandalias';
+// Single-tenant: la empresa real (BixApp/BigZap no tiene dimensión de tenant).
+export type TenantId = 'plasyect_matriz';
 
 export interface Tenant {
   id: TenantId;
@@ -147,7 +148,7 @@ export interface Order {
   discountAuthorized: boolean;
   discountPercentage: number;
 
-  // Spanish / Realistic Mock properties
+  // Campos opcionales en español poblados desde FDB / OCR
   idPedido?: string;
   cliente?: string;
   oc?: string;
@@ -183,7 +184,7 @@ export interface Batch {
   defectRate: number;
   lastUpdate: string;
 
-  // Spanish / Realistic Mock properties
+  // Campos opcionales en español poblados desde FDB / OCR
   idLote?: string;
   tarjetaViajera?: string;
   codigoBarras?: string;
@@ -207,7 +208,7 @@ export interface Batch {
   zonaPrevia?: string;
   zonaActual?: string;
   // Marca el origen del lote: 'erp' = tarjeta viajera real sincronizada desde Firebird.
-  source?: 'mock' | 'erp';
+  source?: 'erp' | 'ocr';
 }
 
 export interface Machine {

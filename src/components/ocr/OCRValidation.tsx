@@ -66,48 +66,7 @@ const CONFIDENCE_COLORS: Record<Confidence, string> = {
   Baja: 'text-rose-850 bg-rose-50 border border-rose-250',
 };
 
-const DEMO_LETTER_TYPES: LetterType[] = [
-  { id: 'inspeccion_calidad_inyeccion', nombre: 'Reporte de inspección de calidad en inyección', descripcion: null, schema: { fields: [], tables: [] }, activo: true, creado_en: '', actualizado_en: '' },
-  { id: 'inspeccion_calidad_banda', nombre: 'Reporte de inspección de calidad en banda', descripcion: null, schema: { fields: [], tables: [] }, activo: true, creado_en: '', actualizado_en: '' },
-  { id: 'liberacion_flujo_produccion', nombre: 'Liberación y flujo de producción', descripcion: null, schema: { fields: [], tables: [] }, activo: true, creado_en: '', actualizado_en: '' },
-  { id: 'producto_primeras', nombre: 'Producto primeras', descripcion: null, schema: { fields: [], tables: [] }, activo: true, creado_en: '', actualizado_en: '' },
-  { id: 'producto_segundas', nombre: 'Producto segundas', descripcion: null, schema: { fields: [], tables: [] }, activo: true, creado_en: '', actualizado_en: '' },
-  { id: 'bitacora_produccion', nombre: 'Bitácora manual de producción', descripcion: null, schema: { fields: [], tables: [] }, activo: true, creado_en: '', actualizado_en: '' },
-];
-
-const DEMO_FIELDS: FieldSchema[] = [
-  { id: 'fecha', label: 'Fecha', type: 'date', pageNumber: 1 },
-  { id: 'turno', label: 'Turno', type: 'string', pageNumber: 1 },
-  { id: 'area', label: 'Área', type: 'string', pageNumber: 1 },
-  { id: 'inspector', label: 'Inspector', type: 'string', pageNumber: 1 },
-  { id: 'lider', label: 'Líder', type: 'string', pageNumber: 1 },
-  { id: 'maquina_banda', label: 'Máquina / Banda', type: 'string', pageNumber: 1 },
-  { id: 'cliente', label: 'Cliente', type: 'string', pageNumber: 1 },
-  { id: 'oc', label: 'OC (Orden de Compra)', type: 'string', pageNumber: 1 },
-  { id: 'lote', label: 'Lote', type: 'string', pageNumber: 1 },
-  { id: 'modelo', label: 'Modelo', type: 'string', pageNumber: 1 },
-  { id: 'color', label: 'Color', type: 'string', pageNumber: 1 },
-  { id: 'total_pares', label: 'Total Pares', type: 'number', pageNumber: 1 },
-  { id: 'primeras', label: 'Primeras', type: 'number', pageNumber: 1 },
-  { id: 'segundas', label: 'Segundas', type: 'number', pageNumber: 1 },
-  { id: 'defectos', label: 'Defectos', type: 'string', pageNumber: 1 },
-  { id: 'observaciones', label: 'Observaciones', type: 'string', pageNumber: 1 },
-];
-
-const DEMO_DATA: Record<string, Record<string, string>> = {
-  inspeccion_calidad_inyeccion: { fecha: '2026-05-25', turno: 'Matutino', area: 'Inyección EVA', inspector: 'Ing. Hugo Martínez', lider: 'Raúl Sánchez', maquina_banda: 'Inyectora EVA #3', cliente: 'Calzado Andrea', oc: 'OC-2026-4418', lote: 'LOTE-771-EVA', modelo: 'Zapatilla EVA Spring', color: 'Rosa Humo', total_pares: '1250', primeras: '1220', segundas: '30', defectos: 'Marcas de desmolde en 12 pares', observaciones: 'Parámetros de presión normales' },
-  inspeccion_calidad_banda: { fecha: '2026-05-25', turno: 'Vespertino', area: 'Banda de Acabado', inspector: 'Lic. Sandra Peralta', lider: 'Diana Cruz', maquina_banda: 'Banda de Concurrencia #2', cliente: 'Corporativo Flexi', oc: 'OC-9902-FLE', lote: 'LOTE-882-BND', modelo: 'Classic Walker EVA', color: 'Gris Oxford', total_pares: '2400', primeras: '2350', segundas: '50', defectos: 'Rebaba en junta talón en 32 pares', observaciones: 'Velocidad de banda ajustada' },
-};
-
-function buildDemoFields(tipoId: string, user: string): Record<string, DynamicField> {
-  const data = DEMO_DATA[tipoId] || {};
-  const result: Record<string, DynamicField> = {};
-  for (const f of DEMO_FIELDS) {
-    const val = f.id === 'inspector' ? user : (data[f.id] || '');
-    result[f.id] = { value: val, confidence: val ? 'Alta' : 'Baja', originalValue: val };
-  }
-  return result;
-}
+const EMPTY_SCHEMA: LetterSchema = { fields: [], tables: [] };
 
 function buildEmptyFields(schema: LetterSchema): Record<string, DynamicField> {
   const result: Record<string, DynamicField> = {};
@@ -316,9 +275,9 @@ const ResponsablesPanel: React.FC<ResponsablesPanelProps> = ({ letraTipoId, resp
 export const OCRValidation: React.FC = () => {
   const { addAuditLog, currentUser } = useDashboard();
 
-  const [letterTypes, setLetterTypes] = useState<LetterType[]>(DEMO_LETTER_TYPES);
-  const [selectedTypeId, setSelectedTypeId] = useState<string>(DEMO_LETTER_TYPES[0].id);
-  const [selectedType, setSelectedType] = useState<LetterType>(DEMO_LETTER_TYPES[0]);
+  const [letterTypes, setLetterTypes] = useState<LetterType[]>([]);
+  const [selectedTypeId, setSelectedTypeId] = useState<string>('');
+  const [selectedType, setSelectedType] = useState<LetterType | null>(null);
   const [responsables, setResponsables] = useState<Responsable[]>([]);
   const [documents, setDocuments] = useState<LocalDocument[]>([]);
   const [activeDocId, setActiveDocId] = useState<string>('');
@@ -334,7 +293,7 @@ export const OCRValidation: React.FC = () => {
   const streamAbortRef = useRef<AbortController | null>(null);
 
   const activeDoc = documents.find(d => d.id === activeDocId) || documents[0];
-  const activeSchema = selectedType?.schema?.fields?.length ? selectedType.schema : { fields: DEMO_FIELDS, tables: [] };
+  const activeSchema = selectedType?.schema?.fields?.length ? selectedType.schema : EMPTY_SCHEMA;
 
   // Load letter types on mount
   useEffect(() => {
@@ -350,11 +309,7 @@ export const OCRValidation: React.FC = () => {
 
   // Reload letter type schema when selection changes
   useEffect(() => {
-    if (!ocrEnabled) {
-      const t = DEMO_LETTER_TYPES.find(t => t.id === selectedTypeId);
-      if (t) setSelectedType(t);
-      return;
-    }
+    if (!ocrEnabled || !selectedTypeId) return;
     fetchLetterType(selectedTypeId).then(t => setSelectedType(t)).catch(() => {
       const t = letterTypes.find(x => x.id === selectedTypeId);
       if (t) setSelectedType(t);
@@ -363,7 +318,7 @@ export const OCRValidation: React.FC = () => {
 
   // Load responsables when type changes
   const loadResponsables = useCallback(() => {
-    if (!ocrEnabled) return;
+    if (!ocrEnabled || !selectedTypeId) return;
     fetchResponsables({ letra_tipo_id: selectedTypeId })
       .then(setResponsables)
       .catch(() => setResponsables([]));
@@ -379,7 +334,7 @@ export const OCRValidation: React.FC = () => {
     }
     fetchReports({ limit: 30 }).then(reports => {
       const docs: LocalDocument[] = reports.map(r => {
-        const schema = (selectedType?.schema?.fields?.length ? selectedType.schema : { fields: DEMO_FIELDS, tables: [] }) as LetterSchema;
+        const schema = (selectedType?.schema?.fields?.length ? selectedType.schema : EMPTY_SCHEMA) as LetterSchema;
         const data = (r.datos_corregidos?.data && Object.keys(r.datos_corregidos.data).length
           ? r.datos_corregidos.data
           : r.datos_extraidos?.data) || {};
@@ -410,28 +365,14 @@ export const OCRValidation: React.FC = () => {
     setApiError('');
 
     if (!ocrEnabled) {
-      // Demo mode
-      setTimeout(() => {
-        setIsUploading(false);
-        const docId = `DOC-${Date.now()}`;
-        const tipo = letterTypes.find(t => t.id === selectedTypeId) || letterTypes[0];
-        const newDoc: LocalDocument = {
-          id: docId,
-          fileName: file.name,
-          letraTipoId: selectedTypeId,
-          letraTipoNombre: tipo.nombre,
-          uploadDate: new Date().toLocaleString('es-MX'),
-          user: currentUser.email.split('@')[0],
-          estado: 'pendiente_ocr',
-          fields: buildEmptyFields(activeSchema),
-          schema: activeSchema,
-          detectedCount: 0,
-          averageConfidence: 0,
-        };
-        setDocuments(prev => [newDoc, ...prev]);
-        setActiveDocId(docId);
-        addAuditLog('OCR', 'FILE_UPLOADED', `Carga simulada: ${file.name}`);
-      }, 800);
+      setIsUploading(false);
+      setApiError('OCR service URL no configurado. No se generaran datos simulados.');
+      return;
+    }
+
+    if (!selectedTypeId) {
+      setIsUploading(false);
+      setApiError('Configura un tipo de carta OCR antes de cargar documentos.');
       return;
     }
 
@@ -455,6 +396,11 @@ export const OCRValidation: React.FC = () => {
   const startExtraction = (file: File, schema: LetterSchema) => {
     const docId = `DOC-${Date.now()}`;
     const tipo = letterTypes.find(t => t.id === selectedTypeId) || letterTypes[0];
+    if (!tipo) {
+      setIsUploading(false);
+      setApiError('No hay tipos de carta OCR configurados.');
+      return;
+    }
 
     const pendingDoc: LocalDocument = {
       id: docId,
@@ -510,22 +456,6 @@ export const OCRValidation: React.FC = () => {
     );
   };
 
-  const handleDemoOcr = () => {
-    if (!activeDoc || activeDoc.estado !== 'pendiente_ocr') return;
-    setIsProcessing(true);
-    setProcessingMsg('Procesando OCR simulado...');
-    setTimeout(() => {
-      setIsProcessing(false);
-      setProcessingMsg('');
-      const demoFields = buildDemoFields(activeDoc.letraTipoId, currentUser.email.split('@')[0]);
-      setDocuments(prev => prev.map(d => {
-        if (d.id !== activeDoc.id) return d;
-        return { ...d, estado: 'ocr_completado', fields: demoFields, detectedCount: Object.keys(demoFields).length, averageConfidence: 87 };
-      }));
-      addAuditLog('OCR', 'OCR_ANALYSIS_COMPLETED', `OCR simulado para ${activeDoc.fileName}`);
-    }, 1500);
-  };
-
   const handleFieldChange = (fieldId: string, value: string) => {
     setDocuments(prev => prev.map(d => {
       if (d.id !== activeDocId) return d;
@@ -577,7 +507,7 @@ export const OCRValidation: React.FC = () => {
     }
   };
 
-  const allFields = activeSchema.fields || DEMO_FIELDS;
+  const allFields = activeSchema.fields || [];
   const canTransitionTo = (estado: OcrStatus): boolean => {
     if (!activeDoc) return false;
     const transitions: Record<OcrStatus, OcrStatus[]> = {
@@ -619,7 +549,7 @@ export const OCRValidation: React.FC = () => {
             <span>
               {ocrEnabled
                 ? <><strong>Servicio OCR activo.</strong> Extracción real con Gemini + Document AI.</>
-                : <><strong>Modo demo.</strong> OCR simulado. Configura VITE_OCR_SERVICE_URL para activar.</>
+                : <><strong>OCR inactivo.</strong> Configura VITE_OCR_SERVICE_URL; no hay datos simulados.</>
               }
             </span>
           </div>
@@ -635,6 +565,7 @@ export const OCRValidation: React.FC = () => {
               onChange={e => setSelectedTypeId(e.target.value)}
               className="w-full bg-white border border-slate-700 rounded p-2 text-xs font-sans font-bold focus:outline-none focus:border-blue-600" style={{ color: '#1e293b' }}
             >
+              <option value="">Sin tipos OCR configurados</option>
               {letterTypes.map(t => (
                 <option key={t.id} value={t.id}>{t.nombre}</option>
               ))}
@@ -659,7 +590,7 @@ export const OCRValidation: React.FC = () => {
             {/* Upload drop zone */}
             <button
               onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading || isProcessing}
+              disabled={isUploading || isProcessing || !ocrEnabled || !selectedTypeId}
               className="flex-1 min-h-[110px] border-2 border-dashed border-slate-700 hover:border-blue-600 bg-slate-955 hover:bg-slate-850 rounded-lg p-5 flex flex-col items-center justify-center text-center transition-all cursor-pointer disabled:opacity-40 disabled:pointer-events-none group outline-none"
             >
               {isUploading ? (
@@ -686,7 +617,7 @@ export const OCRValidation: React.FC = () => {
             {/* Camera button */}
             <button
               onClick={() => cameraInputRef.current?.click()}
-              disabled={isUploading || isProcessing}
+              disabled={isUploading || isProcessing || !ocrEnabled || !selectedTypeId}
               title="Tomar foto con cámara"
               className="min-h-[110px] w-[90px] shrink-0 border-2 border-dashed border-slate-700 hover:border-cyan-600 bg-slate-955 hover:bg-slate-850 rounded-lg p-3 flex flex-col items-center justify-center text-center transition-all cursor-pointer disabled:opacity-40 disabled:pointer-events-none group outline-none"
             >
@@ -785,8 +716,8 @@ export const OCRValidation: React.FC = () => {
 
             {activeDoc?.estado === 'pendiente_ocr' && (
               <button
-                onClick={() => { if (ocrEnabled && fileInputRef.current) fileInputRef.current.click(); else handleDemoOcr(); }}
-                disabled={isProcessing}
+                onClick={() => setApiError('Vuelve a cargar el archivo para procesarlo con el servicio OCR real.')}
+                disabled={isProcessing || !ocrEnabled}
                 className="w-full py-2 bg-indigo-650 hover:bg-indigo-750 text-white font-sans font-black tracking-wide text-xs uppercase rounded flex items-center justify-center gap-1.5 transition-all shadow"
               >
                 {isProcessing ? <><RefreshCw className="w-4 h-4 animate-spin" /> Procesando...</> : <><Play className="w-4 h-4" /> Procesar OCR</>}

@@ -1,17 +1,23 @@
 import { describe, expect, it } from 'vitest';
-import { createErpService, getTarjetaViajeraStub, parseTarjetaId } from './erp.js';
+import { DisabledErpService, type ErpService, getTarjetaViajeraStub, parseTarjetaId } from './erp.js';
 import { MemoryRepository } from './repository.js';
 
 describe('MemoryRepository', () => {
   it('returns seeded bootstrap data', async () => {
     const repo = new MemoryRepository();
     const bootstrap = await repo.bootstrap();
-    expect(bootstrap.tenants.length).toBeGreaterThan(0);
-    expect(bootstrap.orders.length).toBeGreaterThan(0);
+    // Single-tenant: plasyect_matriz only
+    expect(bootstrap.tenants.length).toBe(1);
+    expect(bootstrap.tenants[0].id).toBe('plasyect_matriz');
+    // No transactional data in seed — FDB/OCR provides it at runtime
+    expect(bootstrap.orders).toEqual([]);
+    expect(bootstrap.batches).toEqual([]);
   });
 
-  it('patches a batch stage', async () => {
+  it('creates and patches a batch', async () => {
     const repo = new MemoryRepository();
+    const batch = { id: 'LOTE-26-401', tenantId: 'plasyect_matriz' as const, stage: 'almacen' };
+    await repo.create('batches', batch);
     const updated = await repo.patch('batches', 'LOTE-26-401', { stage: 'embarque' });
     expect(updated?.stage).toBe('embarque');
   });
@@ -36,8 +42,8 @@ describe('ERP tarjetas viajeras', () => {
     expect(parseTarjetaId('5498-40638-1')).toBeNull();
   });
 
-  it('falls back to a disabled service without Supabase config', async () => {
-    const service = createErpService();
+  it('DisabledErpService returns empty/null for all calls', async () => {
+    const service: ErpService = new DisabledErpService();
     expect(service.enabled).toBe(false);
     expect(await service.listTarjetas({ limit: 10 })).toEqual([]);
     expect(await service.getTarjeta('5498-40638')).toBeNull();

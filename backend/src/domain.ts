@@ -4,7 +4,8 @@ export type Role =
   | 'LIDER_INYECCION'
   | 'SUPERVISOR_CALIDAD';
 
-export type TenantId = 'plasyect_matriz' | 'plasyect_suelas' | 'plasyect_sandalias';
+// Single-tenant: la empresa real (BixApp/BigZap no tiene dimensión de tenant).
+export type TenantId = 'plasyect_matriz';
 export type StageId = 'alta_pedido' | 'almacen' | 'inyeccion' | 'estabilizacion' | 'aduana' | 'banda' | 'embarque';
 
 export interface UserSession {

@@ -45,6 +45,52 @@ function isMissingRelation(error: unknown): boolean {
   return code === 'PGRST205' || code === '42P01';
 }
 
+function stringValue(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function deriveClientsFromOrders(orders: Order[]): Client[] {
+  const clients = new Map<string, Client>();
+  orders.forEach((order) => {
+    const row = order as Record<string, unknown>;
+    const name = stringValue(row.clientName) || stringValue(row.cliente) || stringValue(row.clientId);
+    if (!name) return;
+    const id = stringValue(row.clientId) || name;
+    const rawPriority = stringValue(row.prioridad);
+    const priority = rawPriority === 'ALTA' || rawPriority === 'BAJA' ? rawPriority : 'MEDIA';
+    clients.set(id, {
+      id,
+      name,
+      rfc: stringValue(row.rfc) || '',
+      contactEmail: stringValue(row.contactEmail) || '',
+      contactPhone: stringValue(row.contactPhone) || '',
+      priority
+    });
+  });
+  return [...clients.values()];
+}
+
+function deriveModelsFromData(orders: Order[], batches: Batch[]): Model[] {
+  const models = new Map<string, Model>();
+  [...orders, ...batches].forEach((item) => {
+    const row = item as Record<string, unknown>;
+    const name = stringValue(row.modelName) || stringValue(row.modelo) || stringValue(row.modelId);
+    if (!name) return;
+    const id = stringValue(row.modelId) || name;
+    models.set(id, {
+      id,
+      name,
+      isSandalia: false,
+      basePriceUSD: 0,
+      densityTarget: 0,
+      expansionFactor: 0,
+      recommendedPrep: stringValue(row.recommendedPrep) || '',
+      paintType: stringValue(row.paintType) || ''
+    });
+  });
+  return [...models.values()];
+}
+
 export class MemoryRepository implements DashboardRepository {
   private data: BootstrapData;
 
@@ -98,30 +144,29 @@ export class SupabaseRepository implements DashboardRepository {
       this.loadBigzap()
     ]);
 
-    // Las tarjetas viajeras reales (BixApp) tienen prioridad sobre el seed y la
-    // tabla batches; si el sync aun no corre, se conserva el fallback existente.
     const realBatches = bigzap?.batches ?? [];
     const realOrders = bigzap?.orders ?? [];
+    const resolvedOrders = realOrders.length ? realOrders : orders;
+    const resolvedBatches = realBatches.length ? realBatches : batches;
 
     return {
       tenants: tenants.length ? tenants : seedData.tenants,
       users: users.length ? users : seedData.users,
-      clients: clients.length ? clients : seedData.clients,
-      models: models.length ? models : seedData.models,
-      orders: realOrders.length ? realOrders : orders.length ? orders : seedData.orders,
-      batches: realBatches.length ? realBatches : batches.length ? batches : seedData.batches,
-      machines: machines.length ? machines : seedData.machines,
-      bands: bands.length ? bands : seedData.bands,
-      defects: defects.length ? defects : seedData.defects,
-      audits: audits.length ? audits : seedData.audits,
+      clients: clients.length ? clients : deriveClientsFromOrders(resolvedOrders),
+      models: models.length ? models : deriveModelsFromData(resolvedOrders, resolvedBatches),
+      orders: resolvedOrders,
+      batches: resolvedBatches,
+      machines,
+      bands,
+      defects,
+      audits,
       ocrDocuments
     };
   }
 
   /**
    * Lee las tarjetas viajeras activas y pedidos reales de las tablas bigzap_*.
-   * Devuelve null si el esquema aun no existe (migracion sin aplicar) o no hay
-   * datos, para que el bootstrap caiga al fallback sin romperse.
+   * Devuelve null si el esquema aun no existe o no hay datos.
    */
   private async loadBigzap(): Promise<{ batches: Batch[]; orders: Order[] } | null> {
     const tenantId = config.DEFAULT_TENANT_ID as TenantId;
@@ -149,15 +194,17 @@ export class SupabaseRepository implements DashboardRepository {
       if (pErr && !isMissingRelation(pErr)) throw pErr;
 
       const { data: clientes } = await this.supabase.from('bigzap_clientes').select('codigo, nombre');
-      const clienteName = new Map((clientes ?? []).map((c: { codigo: string; nombre: string | null }) => [c.codigo, c.nombre]));
+      const clienteRows = (clientes ?? []) as Array<{ codigo: string; nombre: string | null }>;
+      const pedidoRows = (pedidos ?? []) as PedidoRow[];
+      const clienteName = new Map<string, string | null>(clienteRows.map((c) => [c.codigo, c.nombre]));
 
       const batches = (tarjetas as TarjetaViajeraRow[]).map((row) => mapTarjetaToBatch(row, tenantId));
-      const orders = (pedidos ?? []).map((row: PedidoRow) =>
+      const orders = pedidoRows.map((row) =>
         mapPedidoToOrder({ ...row, cliente_nombre: clienteName.get(row.cliente ?? '') ?? null }, tenantId)
       );
       return { batches, orders };
     } catch (error) {
-      console.warn('No se pudieron cargar tarjetas viajeras de bigzap_*; usando fallback.', error);
+      console.warn('No se pudieron cargar tarjetas viajeras de bigzap_*; no se usaran datos mock.', error);
       return null;
     }
   }
@@ -215,7 +262,7 @@ export class SupabaseRepository implements DashboardRepository {
 /**
  * Repositorio que lee/escribe Supabase por conexion Postgres directa
  * (DATABASE_URL), el mismo credential que usa el sync-service. Es la via
- * preferida del backend; degrada a seed por seccion si una tabla no existe.
+ * preferida del backend; si una tabla falta, esa seccion queda vacia.
  */
 export class PgRepository implements DashboardRepository {
   private get pool() {
@@ -240,18 +287,20 @@ export class PgRepository implements DashboardRepository {
 
     const realBatches = bigzap?.batches ?? [];
     const realOrders = bigzap?.orders ?? [];
+    const resolvedOrders = realOrders.length ? realOrders : orders;
+    const resolvedBatches = realBatches.length ? realBatches : batches;
 
     return {
       tenants: tenants.length ? tenants : seedData.tenants,
       users: users.length ? users : seedData.users,
-      clients: clients.length ? clients : seedData.clients,
-      models: models.length ? models : seedData.models,
-      orders: realOrders.length ? realOrders : orders.length ? orders : seedData.orders,
-      batches: realBatches.length ? realBatches : batches.length ? batches : seedData.batches,
-      machines: machines.length ? machines : seedData.machines,
-      bands: bands.length ? bands : seedData.bands,
-      defects: defects.length ? defects : seedData.defects,
-      audits: audits.length ? audits : seedData.audits,
+      clients: clients.length ? clients : deriveClientsFromOrders(resolvedOrders),
+      models: models.length ? models : deriveModelsFromData(resolvedOrders, resolvedBatches),
+      orders: resolvedOrders,
+      batches: resolvedBatches,
+      machines,
+      bands,
+      defects,
+      audits,
       ocrDocuments
     };
   }
@@ -299,7 +348,7 @@ export class PgRepository implements DashboardRepository {
     try {
       return await this.readStatic<T>(table);
     } catch (error) {
-      console.warn(`bootstrap: lectura de ${table} fallo, usando seed.`, (error as Error).message);
+      console.warn(`bootstrap: lectura de ${table} fallo, seccion vacia.`, (error as Error).message);
       return [];
     }
   }
@@ -308,7 +357,7 @@ export class PgRepository implements DashboardRepository {
     try {
       return await this.list(entity);
     } catch (error) {
-      console.warn(`bootstrap: lectura de ${entity} fallo, usando seed.`, (error as Error).message);
+      console.warn(`bootstrap: lectura de ${entity} fallo, seccion vacia.`, (error as Error).message);
       return [];
     }
   }
@@ -344,11 +393,15 @@ export class PgRepository implements DashboardRepository {
          where l.cancelado = false
          group by lp.pedido`
       );
-      const clienteName = new Map(clientes.rows.map((c) => [c.codigo, c.nombre]));
-      const paresByPedido = new Map(paresAgg.rows.map((r) => [r.pedido, r]));
+      const clienteRows = clientes.rows as Array<{ codigo: string; nombre: string | null }>;
+      const paresRows = paresAgg.rows as Array<{ pedido: number; total: number; entregados: number }>;
+      const pedidoRows = pedidos.rows as PedidoRow[];
+      const tarjetaRows = tarjetas.rows as TarjetaViajeraRow[];
+      const clienteName = new Map<string, string | null>(clienteRows.map((c) => [c.codigo, c.nombre]));
+      const paresByPedido = new Map<number, { pedido: number; total: number; entregados: number }>(paresRows.map((r) => [r.pedido, r]));
 
-      const batches = tarjetas.rows.map((row) => mapTarjetaToBatch(row, tenantId));
-      const orders = pedidos.rows.map((row) => {
+      const batches = tarjetaRows.map((row) => mapTarjetaToBatch(row, tenantId));
+      const orders = pedidoRows.map((row) => {
         const agg = paresByPedido.get(row.folio);
         return mapPedidoToOrder(
           {
@@ -363,7 +416,7 @@ export class PgRepository implements DashboardRepository {
       return { batches, orders };
     } catch (error) {
       if (isMissingRelation(error)) return null;
-      console.warn('No se pudieron cargar tarjetas viajeras (pg); usando fallback.', (error as Error).message);
+      console.warn('No se pudieron cargar tarjetas viajeras (pg); no se usaran datos mock.', (error as Error).message);
       return null;
     }
   }

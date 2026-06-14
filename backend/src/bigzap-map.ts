@@ -58,6 +58,7 @@ export interface TarjetaViajeraRow {
   pedido_folio: number | null;
   cliente_codigo: string | null;
   cliente_nombre: string | null;
+  pedido_oc: string | null;
   pedido_fecha_salida: string | null;
 }
 
@@ -128,6 +129,7 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
     id: row.tarjeta,
     tenantId,
     orderId,
+    oc: row.pedido_oc ?? undefined,
     modelId: row.estilo || 'estilo_desconocido',
     modelName,
     color: row.piecol || row.combina || 'N/D',

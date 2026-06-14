@@ -520,7 +520,7 @@ class SupabaseErpService implements ErpService {
   }
 }
 
-class DisabledErpService implements ErpService {
+export class DisabledErpService implements ErpService {
   readonly enabled = false;
 
   async listTarjetas(): Promise<ErpRecord[]> {

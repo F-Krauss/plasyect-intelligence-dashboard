@@ -20,7 +20,7 @@ import { StatusBadge } from '../components/StatusBadge';
 import { DataTable } from '../components/DataTable';
 import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
-import { CLIENTS, MODELS, STAGES, COLORS, MOVIMIENTOS, CALIDAD_RECORDS, PRODUCCION_POR_HORA, DEFECTOS_CATALOGO } from '../data/mockData';
+import { STAGES } from '../data/appConfig';
 import { backendEnabled, dashboardApi, type EjecutivoData, type MovimientoRow } from '../api/dashboardApi';
 import { AppUser, Batch, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
@@ -134,7 +134,7 @@ export const DashboardEjecutivoView: React.FC = () => {
     return 'danger';
   };
 
-  // 1. Interactive Filter States (defaulting to encompass our mock dates)
+  // 1. Interactive filter states
   const [fechaInicio, setFechaInicio] = useState<string>(DEFAULT_FECHA_INICIO);
   const [fechaFin, setFechaFin] = useState<string>(DEFAULT_FECHA_FIN);
   const [selectedClient, setSelectedClient] = useState<string>('TODOS');
@@ -161,7 +161,6 @@ export const DashboardEjecutivoView: React.FC = () => {
     return () => { cancelled = true; };
   }, [fechaInicio, fechaFin]);
 
-  // Manual simulation refresh effect
   const handleRefresh = () => {
     setIsRefreshing(true);
     if (backendEnabled) {
@@ -215,12 +214,11 @@ export const DashboardEjecutivoView: React.FC = () => {
     return true;
   });
 
-  // Source: real ERP data when backend is enabled (even if the selected range
-  // returns nothing — we must NOT mask an empty range with mock data, or the
-  // charts look frozen when the user changes dates). Mock is only for the
-  // offline/demo mode where no backend is configured.
-  const calidadSource = backendEnabled ? erpData.calidad : CALIDAD_RECORDS;
-  const prodSource = backendEnabled ? erpData.produccion : PRODUCCION_POR_HORA;
+  const dashboardClientOptions = Array.from(new Set(tenantOrders.map(o => o.clientName || o.cliente || '').filter(Boolean)));
+  const dashboardModelOptions = Array.from(new Set(tenantBatches.map(b => b.modelo || b.modelName || '').filter(Boolean)));
+
+  const calidadSource = erpData.calidad;
+  const prodSource = erpData.produccion;
 
   // Filter application - Quality records (date already filtered by API; apply remaining filters)
   const filteredQuality = calidadSource.filter(q => {
@@ -620,8 +618,8 @@ export const DashboardEjecutivoView: React.FC = () => {
               className="w-full text-xs font-sans bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:border-cyan-500 focus:outline-none"
             >
               <option value="TODOS">-- TODOS --</option>
-              {CLIENTS.map(cl => (
-                <option key={cl.id} value={cl.name}>{cl.name}</option>
+              {dashboardClientOptions.map(client => (
+                <option key={client} value={client}>{client}</option>
               ))}
             </select>
           </div>
@@ -636,8 +634,8 @@ export const DashboardEjecutivoView: React.FC = () => {
               className="w-full text-xs font-sans bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:border-cyan-500 focus:outline-none"
             >
               <option value="TODOS">-- TODOS --</option>
-              {MODELS.map(m => (
-                <option key={m.id} value={m.name}>{m.name}</option>
+              {dashboardModelOptions.map(model => (
+                <option key={model} value={model}>{model}</option>
               ))}
             </select>
           </div>
@@ -1318,7 +1316,7 @@ export const PipelineLoteView: React.FC = () => {
   // Selected batch for details panel
   const [selectedBatchId, setSelectedBatchId] = useState<string | null>(null);
 
-  // Modal / simulation states
+  // Modal states
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [isTvModalOpen, setIsTvModalOpen] = useState(false);
   const [isEditFechaOpen, setIsEditFechaOpen] = useState(false);
@@ -1337,7 +1335,7 @@ export const PipelineLoteView: React.FC = () => {
   const [filtroCodigoBarras, setFiltroCodigoBarras] = useState('');
   const [scannedLots, setScannedLots] = useState<Record<string, boolean>>({});
 
-  // Local overrides states for interactive simulation
+  // Local override states
   const [rescheduledDates, setRescheduledDates] = useState<Record<string, string>>({});
   const [batchObservations, setBatchObservations] = useState<Record<string, string>>({});
   const [editFechaTemp, setEditFechaTemp] = useState('');
@@ -1351,10 +1349,10 @@ export const PipelineLoteView: React.FC = () => {
 
   // Form states to create new Batch
   const [newBatchId, setNewBatchId] = useState('');
-  const [newModelId, setNewModelId] = useState('mod_spider');
-  const [newColor, setNewColor] = useState('Rosa Humo');
-  const [newSize, setNewSize] = useState(25);
-  const [newQuantity, setNewQuantity] = useState(1500);
+  const [newModelId, setNewModelId] = useState('');
+  const [newColor, setNewColor] = useState('');
+  const [newSize, setNewSize] = useState(0);
+  const [newQuantity, setNewQuantity] = useState(0);
   const [newOperator, setNewOperator] = useState('');
   const [newOrderId, setNewOrderId] = useState('');
 
@@ -1407,35 +1405,35 @@ export const PipelineLoteView: React.FC = () => {
     return `${hours}h ${String(minutes).padStart(2, '0')}m`;
   };
 
-  // Handle register a simulation batch
+  // Handle register a batch from ERP/OCR data
   const handleCreateBatch = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newBatchId) return;
 
-    const matchedModel = MODELS.find(m => m.id === newModelId);
-    const mockOrder = orders.find(o => o.id === newOrderId) || orders[0];
+    const linkedOrder = orders.find(o => o.id === newOrderId);
+    const modelName = newModelId || 'Pendiente OCR';
 
     addBatch({
       id: newBatchId,
       idLote: newBatchId,
       tarjetaViajera: `TV-${newBatchId}`,
-      codigoBarras: `75001230${Math.floor(Math.random() * 89999 + 10000)}`,
+      codigoBarras: newBatchId,
       modelId: newModelId,
-      modelName: matchedModel?.name || 'Modelo Genérico',
-      modelo: matchedModel?.name || 'Modelo Genérico',
-      color: newColor,
+      modelName,
+      modelo: modelName,
+      color: newColor || 'Pendiente OCR',
       size: newSize,
       quantityShoes: newQuantity,
       totalPares: newQuantity,
       paresEnEtapa: newQuantity,
       stage: 'alta_pedido',
       etapaActual: 'alta_pedido',
-      operatorId: newOperator || 'Téc. Operador Planta',
-      responsableActual: newOperator || 'Téc. Operador Planta',
+      operatorId: newOperator || 'S/Responsable',
+      responsableActual: newOperator || 'S/Responsable',
       status: 'OPTIMO',
       fechaAlta: new Date().toISOString(),
-      fechaCompromiso: mockOrder?.deliveryDate || new Date(Date.now() + 12 * 24 * 3600 * 1000).toISOString(),
-      orderId: mockOrder?.id || 'PED-2026-001'
+      fechaCompromiso: linkedOrder?.deliveryDate || linkedOrder?.fechaCompromiso,
+      orderId: linkedOrder?.id || ''
     });
 
     setIsModalOpen(false);
@@ -1540,12 +1538,12 @@ export const PipelineLoteView: React.FC = () => {
   // Set initial dates/observations when selected batch shifts
   useEffect(() => {
     if (selectedBatch) {
-      setEditFechaTemp(rescheduledDates[selectedBatch.id] || selectedBatch.fechaCompromiso?.split('T')[0] || '2026-05-30');
+      setEditFechaTemp(rescheduledDates[selectedBatch.id] || selectedBatch.fechaCompromiso?.split('T')[0] || '');
       setObsTemp(batchObservations[selectedBatch.id] || selectedBatch.observaciones || 'No hay notas del operador.');
     }
   }, [selectedBatch]);
 
-  // Handle commitments date edit simulation
+  // Handle commitment date edit
   const handleUpdateFechaCompromiso = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedBatch) return;
@@ -1564,7 +1562,7 @@ export const PipelineLoteView: React.FC = () => {
     setIsEditFechaOpen(false);
   };
 
-  // Handle observations saving simulation
+  // Handle observations saving
   const handleSaveObservations = () => {
     if (!selectedBatch) return;
 
@@ -1618,12 +1616,13 @@ export const PipelineLoteView: React.FC = () => {
     setDefectNotes('');
   };
 
-  // Batch detailed related specs from models catalogue
-  const selectedBatchModelDetails = MODELS.find(
-    m => m.id === (selectedBatch?.modelId || '') || m.name === (selectedBatch?.modelName || '')
-  );
+  const selectedBatchModelDetails = selectedBatch as (Batch & {
+    expansionFactor?: number;
+    recommendedPrep?: string;
+    paintType?: string;
+  }) | null;
 
-  // Simulated TV Label print trigger
+  // TV label print trigger
   const handlePrintLabelTV = () => {
     addAuditLog(
       'PRODUCCION',
@@ -1986,7 +1985,7 @@ export const PipelineLoteView: React.FC = () => {
                         const timeInEstacion = formatEtapaTime(b.tiempoEnEtapaMinutos);
 
                         // Overrides lookup
-                        const computedFechaCompromiso = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '2026-06-03';
+                        const computedFechaCompromiso = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '—';
 
                         // Estatus colors mapping
                         let statusColorClasses = "border-emerald-700/60 bg-emerald-950/20 text-emerald-400";
@@ -2030,8 +2029,8 @@ export const PipelineLoteView: React.FC = () => {
                             {/* Card Specifications Block */}
                             <div className="space-y-1">
                               <div className="flex justify-between text-[10px] text-slate-400 font-mono">
-                                <span className="truncate max-w-[120px]">{b.cliente || 'Comercializadora Andrea'}</span>
-                                <span className="text-slate-500 font-bold">{b.oc || 'OC-3103'}</span>
+                                <span className="truncate max-w-[120px]">{b.cliente || 'S/Cliente'}</span>
+                                <span className="text-slate-500 font-bold">{b.oc || 'S/OC'}</span>
                               </div>
                               <div className="grid grid-cols-2 gap-1 bg-slate-950/50 p-1.5 rounded-lg text-[10px] font-mono leading-none text-slate-300">
                                 <div>
@@ -2112,7 +2111,7 @@ export const PipelineLoteView: React.FC = () => {
                     </div>
                     <div className="flex justify-between">
                       <span className="text-slate-500">Orden de Compra:</span>
-                      <span className="font-bold text-slate-300 font-mono">{selectedBatch.oc || 'OC-3103'}</span>
+                      <span className="font-bold text-slate-300 font-mono">{selectedBatch.oc || 'S/OC'}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-slate-500">Pares Totales Programados:</span>
@@ -2142,7 +2141,7 @@ export const PipelineLoteView: React.FC = () => {
                       </div>
                       <div>
                         <span className="text-slate-500 block leading-none">Rel. Expansión Soplado:</span>
-                        <span className="font-mono text-slate-300 font-bold">x{selectedBatchModelDetails?.expansionFactor || '1.58'}</span>
+                        <span className="font-mono text-slate-300 font-bold">{selectedBatchModelDetails?.expansionFactor ? `x${selectedBatchModelDetails.expansionFactor}` : 'Pendiente OCR'}</span>
                       </div>
                     </div>
 
@@ -2150,11 +2149,11 @@ export const PipelineLoteView: React.FC = () => {
                     <div className="border-t border-slate-905 pt-2 text-[10px] text-slate-400 leading-normal space-y-1">
                       <span className="text-slate-500 uppercase font-bold text-[8px] tracking-wider block">Sugeria Preparación de Superficie:</span>
                       <p className="bg-slate-950/40 p-1.5 border border-slate-900 rounded text-slate-300 italic">
-                        "{selectedBatchModelDetails?.recommendedPrep || 'Flameado estándar, soplado de aire ionizado estático.'}"
+                        "{selectedBatchModelDetails?.recommendedPrep || 'Pendiente OCR'}"
                       </p>
                       <span className="text-slate-500 uppercase font-bold text-[8px] tracking-wider block mt-1.5">Acabados y Pinturas:</span>
                       <p className="bg-slate-950/40 p-1.5 border border-slate-900 rounded text-slate-300 italic">
-                        "{selectedBatchModelDetails?.paintType || 'Pintura vinílica elástica catalizada base agua.'}"
+                        "{selectedBatchModelDetails?.paintType || 'Pendiente OCR'}"
                       </p>
                     </div>
                   </div>
@@ -2283,7 +2282,7 @@ export const PipelineLoteView: React.FC = () => {
                   </div>
                 </div>
 
-                {/* Simulated Buttons */}
+                {/* Actions */}
                 <div className="grid grid-cols-2 gap-3 pt-2">
                   <button
                     onClick={() => setIsTvModalOpen(true)}
@@ -2325,7 +2324,7 @@ export const PipelineLoteView: React.FC = () => {
             </h3>
           </div>
           <span className="text-[9px] font-mono text-slate-500 bg-slate-900/60 border border-slate-800 px-2 py-1 rounded">
-            Multitenant ID: {currentTenant.id}
+            Planta: {currentTenant.name}
           </span>
         </div>
 
@@ -2361,8 +2360,8 @@ export const PipelineLoteView: React.FC = () => {
                   const relOrder = orders.find(o => o.id === b.orderId);
                   const displayOC = b.oc || relOrder?.oc || 'S/O';
                   const displayClient = b.cliente || relOrder?.clientName || 'S/C';
-                  const displayModel = b.modelo || b.modelName || 'EVA Comfort';
-                  const displayFecha = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '2026-06-03';
+                  const displayModel = b.modelo || b.modelName || 'S/Modelo';
+                  const displayFecha = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '—';
                   const currentStatus = b.status || 'OPTIMO';
 
                   let statusText = "En tiempo";
@@ -2449,8 +2448,9 @@ export const PipelineLoteView: React.FC = () => {
                     onChange={(e) => setNewModelId(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-cyan-500"
                   >
-                    {MODELS.map(m => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
+                    <option value="">Pendiente OCR</option>
+                    {uniqueModels.map(m => (
+                      <option key={m} value={m}>{m}</option>
                     ))}
                   </select>
                 </div>
@@ -2461,7 +2461,8 @@ export const PipelineLoteView: React.FC = () => {
                     onChange={(e) => setNewColor(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 rounded-lg p-2.5 text-slate-200 focus:outline-none focus:border-cyan-500"
                   >
-                    {COLORS.map(c => (
+                    <option value="">Pendiente OCR</option>
+                    {uniqueColors.map(c => (
                       <option key={c} value={c}>{c}</option>
                     ))}
                   </select>
@@ -2587,11 +2588,11 @@ export const PipelineLoteView: React.FC = () => {
                 </div>
                 <div>
                   <span className="text-slate-500 block">CLIENTE:</span>
-                  <span className="font-bold text-slate-200 truncate block max-w-[170px]">{selectedBatch.cliente || 'Andrea S.A.'}</span>
+                  <span className="font-bold text-slate-200 truncate block max-w-[170px]">{selectedBatch.cliente || 'Pendiente OCR'}</span>
                 </div>
                 <div>
                   <span className="text-slate-500 block">OC RELACIONADO:</span>
-                  <span className="font-bold text-slate-200">{selectedBatch.oc || 'OC-9842'}</span>
+                  <span className="font-bold text-slate-200">{selectedBatch.oc || 'Pendiente OCR'}</span>
                 </div>
                 <div>
                   <span className="text-slate-500 block">MODELO INYECCION:</span>
@@ -2619,10 +2620,10 @@ export const PipelineLoteView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Bottom deep link QR code simulation */}
+              {/* Bottom deep link QR code */}
               <div className="flex items-center gap-3 bg-slate-900/60 p-2.5 rounded-lg">
                 <div className="w-12 h-12 bg-slate-100 p-1 rounded shrink-0 flex flex-wrap content-start">
-                  {/* Mock QR pattern */}
+                  {/* QR decorativo (placeholder visual, no codifica datos reales) */}
                   {[1,0,1,1,0,0,1,1,1,0,1,0,0,1,1,0,1,0,1,0,0,1,1,1,0,0,1,1,0,1,1,0,0,1,0,1].map((p, pIdx) => (
                     <div 
                       key={pIdx} 
@@ -2638,7 +2639,7 @@ export const PipelineLoteView: React.FC = () => {
 
               {/* Disclaimer */}
               <p className="text-[8px] text-slate-600 text-center leading-tight">
-                PRODUCIDO CON RESPETO MULTIINQUILINO BAUnder CODIGO SEGURO PLASYECT DASHBOARD OS 2026. PROHIBIDO SU REPRODUCCION SIN AUTORIZACION.
+                PRODUCIDO BAJO CÓDIGO SEGURO PLASYECT DASHBOARD OS 2026. PROHIBIDA SU REPRODUCCIÓN SIN AUTORIZACIÓN.
               </p>
 
             </div>
@@ -2679,7 +2680,7 @@ export const PipelineLoteView: React.FC = () => {
             <form onSubmit={handleUpdateFechaCompromiso} className="space-y-3.5 text-xs">
               <div className="space-y-1">
                 <span className="text-slate-500 block font-mono">Lote: {selectedBatch.id}</span>
-                <span className="text-slate-500 block font-mono">Cliente: {selectedBatch.cliente || 'Zalisca Calzado'}</span>
+                <span className="text-slate-500 block font-mono">Cliente: {selectedBatch.cliente || 'S/Cliente'}</span>
               </div>
 
               <div className="space-y-1.5">
@@ -2694,7 +2695,7 @@ export const PipelineLoteView: React.FC = () => {
               </div>
 
               <div className="bg-slate-900/40 p-2.5 border border-slate-900 rounded-lg text-[10px] text-slate-405">
-                ⚠️ <span className="text-slate-300 font-bold">Registro de Auditoría:</span> Esta acción dejará grabado una bitácora irrevocable con el rol de {currentUser?.role || 'DIRECTOR_GENERAL'} para efectos contractuales.
+                ⚠️ <span className="text-slate-300 font-bold">Registro de Auditoría:</span> Esta acción dejará grabado una bitácora irrevocable con el rol de {currentUser?.role || '—'} para efectos contractuales.
               </div>
 
               <div className="pt-2 flex justify-end gap-2.5 border-t border-slate-900">
@@ -3192,7 +3193,7 @@ export const PipelinePedidoView: React.FC = () => {
     'Entrega': o.pairsByStage['embarque'] || 0,
   }));
 
-  // Line Chart Data: Historical progress simulation
+  // Line Chart Data: Historical progress trend
   const lineChartData = [
     { day: 'Día -15', 'Progreso Promedio %': Math.max(0, avgProgress - 42) },
     { day: 'Día -10', 'Progreso Promedio %': Math.max(0, avgProgress - 25) },
@@ -3874,115 +3875,17 @@ interface HourlyProductionLog {
 }
 
 // Helper to seed realistic records for any given tenant
-const generateInitialProductionLogs = (tenantId: string): HourlyProductionLog[] => {
-  const list: HourlyProductionLog[] = [];
-  const models = ['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Suela Comfort'];
-  const colors = ['Negro', 'Blanco', 'Arena', 'Azul Marino', 'Rojo', 'Gris'];
-  const shifts: ('MAÑANA' | 'TARDE' | 'NOCHE')[] = ['MAÑANA', 'TARDE', 'NOCHE'];
-  const areas: HourlyProductionLog['area'][] = [
-    'almacen', 'inyeccion', 'aduana', 'banda', 'embarque', 'entregas', 'salidas_tercera'
-  ];
-  const repsByArea: Record<string, string[]> = {
-    almacen: ['Manuel Torres (Jefe Almacén)', 'Marcos V. (Materiales)'],
-    inyeccion: ['Carlos Mendoza (Líder Inyección)', 'Fabián H. (Inyección)'],
-    aduana: ['Elena G. (Garantía de Calidad)', 'Arturo J. (Inspector)'],
-    banda: ['Diana Pérez (Recortadora Línea)', 'Rogelio Cruz (Banda A)'],
-    embarque: ['Jorge Ruiz (Logística)', 'Clara S. (Embarques)'],
-    entregas: ['Clara S. (Entregas)', 'Jorge Ruiz (Entrega cliente)'],
-    salidas_tercera: ['Rogelio Cruz (Tercera)', 'Diana Pérez (Calidad tercera)']
-  };
-
-  // Generate logs spanning 14 days up to 2026-05-25
-  for (let d = 0; d < 14; d++) {
-    const dateObj = new Date('2026-05-25');
-    dateObj.setDate(dateObj.getDate() - d);
-    const dateString = dateObj.toISOString().split('T')[0];
-
-    areas.forEach((area, aIdx) => {
-      // 5 hour checkpoints per stage per day to display timelines
-      const hourSamples = [8, 11, 14, 17, 20];
-      hourSamples.forEach((h, hIdx) => {
-        const id = `log_${tenantId}_${dateString}_${area}_${h}`;
-        const model = models[(aIdx + hIdx + d) % models.length];
-        const color = colors[(hIdx + d) % colors.length];
-        const shift: 'MAÑANA' | 'TARDE' | 'NOCHE' = h < 14 ? 'MAÑANA' : h < 22 ? 'TARDE' : 'NOCHE';
-        const reps = repsByArea[area] || ['Operador Gral'];
-        const resp = reps[(hIdx + d) % reps.length];
-        
-        // Base targets and actual outputs
-        const metaHora = 120 + ((aIdx * 20) % 50);
-        // Vary efficiencies across days and hours for high realism
-        let effMultiplier = 0.96; // nice green status
-        if (hIdx === 2) effMultiplier = 0.88; // amber status
-        if (hIdx === 4 && d % 3 === 0) effMultiplier = 0.73; // red status
-        if (d % 4 === 1 && aIdx === 1) effMultiplier = 1.04; // excellent output
-        
-        const produccionReal = Math.round(metaHora * effMultiplier);
-        const reprocesos = d % 3 === 0 ? Math.round(produccionReal * 0.02) : 0;
-        const segundas = d % 5 === 0 ? Math.round(produccionReal * 0.015) : 0;
-        
-        list.push({
-          id,
-          tenantId,
-          fecha: dateString,
-          hora: `${String(h).padStart(2, '0')}:00`,
-          turno: shift,
-          area,
-          tarjetaViajera: `TV-${dateString.replace(/-/g, '').slice(2)}-${String(aIdx + 1).padStart(2, '0')}${hIdx}`,
-          responsable: resp,
-          modeloName: model,
-          color,
-          metaHora,
-          produccionReal,
-          reprocesos,
-          segundas,
-          maquinaId: area === 'inyeccion' ? `iny_${(hIdx % 3) + 1}` : undefined,
-          bandaId: area === 'banda' ? `bnd_${(hIdx % 2) + 1}` : undefined
-        });
-      });
-    });
-  }
-  return list;
-};
-
 export const ProduccionAreaView: React.FC = () => {
   const { currentTenant, addAuditLog, machines, bands, users, can, getGoalForAreaTurn } = useDashboard();
 
-  // Load production logs isolated by tenant
-  const [logs, setLogs] = useState<HourlyProductionLog[]>(() => {
-    const key = `plasyect_hourly_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        return JSON.parse(saved);
-      } catch (e) {
-        console.error("Failed to parse stored production logs", e);
-      }
-    }
-    const seeded = generateInitialProductionLogs(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [logs, setLogs] = useState<HourlyProductionLog[]>([]);
 
-  // Hot Reload logs whenever tenant swaps
   useEffect(() => {
-    const key = `plasyect_hourly_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        setLogs(JSON.parse(saved));
-        return;
-      } catch (_) {}
-    }
-    const seeded = generateInitialProductionLogs(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setLogs(seeded);
+    setLogs([]);
   }, [currentTenant.id]);
 
-  // Sync back to local storage on changes
   const updateLogsState = (newLlogs: HourlyProductionLog[]) => {
     setLogs(newLlogs);
-    localStorage.setItem(`plasyect_hourly_logs_${currentTenant.id}`, JSON.stringify(newLlogs));
   };
 
   // 1. Selector de Área (Horizontal tabs)
@@ -4007,19 +3910,19 @@ export const ProduccionAreaView: React.FC = () => {
   // 4. Modal de nuevo registro state
   const [showAddLogModal, setShowAddLogModal] = useState(false);
   const [formArea, setFormArea] = useState<HourlyProductionLog['area']>('inyeccion');
-  const [formTarjetaViajera, setFormTarjetaViajera] = useState('TV-260525-010');
-  const [formFecha, setFormFecha] = useState('2026-05-25');
-  const [formHora, setFormHora] = useState('08:00');
+  const [formTarjetaViajera, setFormTarjetaViajera] = useState('');
+  const [formFecha, setFormFecha] = useState('');
+  const [formHora, setFormHora] = useState('');
   const [formTurno, setFormTurno] = useState<HourlyProductionLog['turno']>('MAÑANA');
-  const [formResponsable, setFormResponsable] = useState('Carlos Mendoza (Líder Inyección)');
-  const [formModelo, setFormModelo] = useState('Spider');
-  const [formColor, setFormColor] = useState('Negro');
-  const [formMeta, setFormMeta] = useState(150);
-  const [formReal, setFormReal] = useState(145);
-  const [formReprocesos, setFormReprocesos] = useState(2);
-  const [formSegundas, setFormSegundas] = useState(1);
-  const [formMaquina, setFormMaquina] = useState('iny_1');
-  const [formBanda, setFormBanda] = useState('bnd_1');
+  const [formResponsable, setFormResponsable] = useState('');
+  const [formModelo, setFormModelo] = useState('');
+  const [formColor, setFormColor] = useState('');
+  const [formMeta, setFormMeta] = useState(0);
+  const [formReal, setFormReal] = useState(0);
+  const [formReprocesos, setFormReprocesos] = useState(0);
+  const [formSegundas, setFormSegundas] = useState(0);
+  const [formMaquina, setFormMaquina] = useState('');
+  const [formBanda, setFormBanda] = useState('');
 
   // Area mapped label names
   const AREA_NAMES: Record<string, string> = {
@@ -4733,7 +4636,7 @@ export const ProduccionAreaView: React.FC = () => {
             🏷️ Volumen por Modelo de Calzado EVA
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
-            Distribución por molde (Spider, Ruby, Snap, Atenea, etc).
+            Distribución por molde registrada en FDB/OCR.
           </p>
           <div className="h-56 overflow-x-auto">
             {prodByModelChartData.length === 0 ? (
@@ -4920,17 +4823,9 @@ export const ProduccionAreaView: React.FC = () => {
                     onChange={(e) => {
                       const val = e.target.value as any;
                       setFormArea(val);
-                      // Set default supervisor
-                      const defaults: Record<string, string> = {
-                        almacen: 'Manuel Torres (Jefe Almacén)',
-                        inyeccion: 'Carlos Mendoza (Líder Inyección)',
-                        aduana: 'Elena G. (Garantía de Calidad)',
-                        banda: 'Diana Pérez (Recortadora Línea)',
-                        embarque: 'Jorge Ruiz (Logística)',
-                        entregas: 'Clara S. (Entregas)',
-                        salidas_tercera: 'Rogelio Cruz (Tercera)'
-                      };
-                      setFormResponsable(defaults[val] || 'Operador Especialista');
+                      // El responsable es captura operativa real: no se autocompleta
+                      // con nombres inventados; lo escribe el usuario.
+                      setFormResponsable('');
                     }}
                     className="w-full bg-slate-950 border border-slate-800 rounded-lg p-2 text-slate-100 font-mono focus:outline-none focus:ring-1 focus:ring-cyan-500"
                   >
@@ -5127,7 +5022,7 @@ export const ProduccionAreaView: React.FC = () => {
               {/* Strict isolation and audit information note */}
               <div className="p-3 bg-indigo-950/20 text-slate-400 text-[10px] font-medium leading-relaxed rounded-lg border border-indigo-950 flex gap-2">
                 <span>🔒</span>
-                <span><strong>Aislamiento de Seguridad:</strong> Este log horario quedará irrevocablemente anclado a la clave única del tenant <strong>{currentTenant.id}</strong> en cumplimiento riguroso con los lineamientos multi-SaaS corporativos.</span>
+                <span><strong>Registro de Seguridad:</strong> Este log horario quedará irrevocablemente anclado a la bitácora de la planta <strong>{currentTenant.name}</strong> para fines de trazabilidad y auditoría.</span>
               </div>
 
               <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
@@ -5178,113 +5073,13 @@ interface ModelPerformanceLog {
   estatus: 'Active' | 'Warning' | 'Critical';
 }
 
-const seedModelPerformanceLogs = (tenantId: string): ModelPerformanceLog[] => {
-  const list: ModelPerformanceLog[] = [];
-  const modelNames = ['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck', 'Sandalia Eva 100', 'Suela Comfort', 'Plataforma Light'];
-  const colors = ['Negro', 'Blanco', 'Arena', 'Azul Marino', 'Rojo', 'Gris', 'Rosa Humo', 'Rosa Bebé'];
-  const clientes = ['Nike de México', 'Adidas LATAM', 'Anfora Corp', 'CasiCalzado Co', 'Puma del Bajío', 'Distribuidora del Centro'];
-  const etapas: ('Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Almacén')[] = [
-    'Almacén', 'Inyección', 'Estabilización', 'Aduana', 'Banda', 'Embarque'
-  ];
-  const statuses: ('Active' | 'Warning' | 'Critical')[] = ['Active', 'Warning', 'Critical'];
-
-  // Seed for 25 days up to 2026-05-25 for high detail
-  for (let d = 0; d < 25; d++) {
-    const dateObj = new Date('2026-05-25');
-    dateObj.setDate(dateObj.getDate() - d);
-    const dateString = dateObj.toISOString().split('T')[0];
-
-    modelNames.forEach((model, mIdx) => {
-      // 1 to 2 batches of production per day
-      const runsCount = (mIdx % 2) + 1;
-      for (let run = 0; run < runsCount; run++) {
-        const color = colors[(mIdx + d + run) % colors.length];
-        const cliente = clientes[(mIdx * 3 + d + run) % clientes.length];
-        
-        // Setup raw production volumes
-        let baseVol = 340 + (mIdx * 110);
-        if (model === 'Ruby') baseVol = 1250;
-        if (model === 'Spider') baseVol = 980;
-        if (model === 'Dragon') baseVol = 450;
-        const noise = Math.sin(d + run) * 110;
-        const totalPares = Math.round(Math.max(120, baseVol + noise));
-
-        // Yield rates matching exact criteria
-        let defectPercentage = 0.012 + ((mIdx * 0.005) % 0.03);
-        if (model === 'Ruby') defectPercentage = 0.058; // Ruby high defects in Banda
-        if (model === 'Spider') defectPercentage = 0.015;
-        if (model === 'Dragon') defectPercentage = 0.042; // Dragon has higher defect variance 
-
-        const defectCount = Math.round(totalPares * defectPercentage);
-        const segundasCount = Math.round(totalPares * (0.01 + ((mIdx * 0.003) % 0.018)));
-        const reprocesosCount = Math.round(totalPares * (0.011 + ((mIdx * 0.004) % 0.022)));
-
-        // Operational lead timings
-        let baseLeadTime = 8 + (mIdx * 2.8);
-        if (model === 'Ruby') baseLeadTime = 13;
-        if (model === 'Atenea') baseLeadTime = 29;
-        const valLeadTime = Math.round(Math.max(4, baseLeadTime + (Math.sin(d * 1.5) * 3)));
-
-        // Stage timings in minutes
-        let timeIny = 45 + (mIdx % 3) * 12;
-        let timeEst = 55 + (mIdx % 5) * 18;
-        if (model === 'Spider') timeEst = 145; // Spider high stabilization time
-        let timeBnd = 28 + (mIdx % 2) * 22;
-
-        const entregaCumplida = (d % 8 !== 0) && (mIdx !== 4 || d % 3 !== 0);
-        const activeEtapa = etapas[(mIdx + d + run) % etapas.length];
-        
-        // Match status
-        let currentStatus: 'Active' | 'Warning' | 'Critical' = 'Active';
-        if (defectPercentage > 0.045) {
-          currentStatus = 'Critical';
-        } else if (defectPercentage > 0.025 || !entregaCumplida) {
-          currentStatus = 'Warning';
-        }
-
-        list.push({
-          id: `mperf_${tenantId}_${dateString}_${model.replace(/\s+/g, '_')}_${run}`,
-          tenantId,
-          modeloId: `mod_${mIdx + 1}`,
-          modeloName: model,
-          color,
-          cliente,
-          fecha: dateString,
-          paresProducidos: totalPares,
-          paresDefectuosos: defectCount,
-          paresSegundas: segundasCount,
-          paresReprocesos: reprocesosCount,
-          leadTimeHours: valLeadTime,
-          tiempoInyeccionMins: timeIny,
-          tiempoEstabilizacionMins: timeEst,
-          tiempoBandaMins: timeBnd,
-          entregaCumplida,
-          etapaActiva: activeEtapa,
-          estatus: currentStatus
-        });
-      }
-    });
-  }
-  return list;
-};
-
 export const ModelosProductosView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
 
-  // Lazy state loading with Tenant isolation guarantee
-  const [performanceLogs, setPerformanceLogs] = useState<ModelPerformanceLog[]>(() => {
-    const key = `plasyect_model_perf_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    const seeded = seedModelPerformanceLogs(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [performanceLogs, setPerformanceLogs] = useState<ModelPerformanceLog[]>([]);
 
   // Track selected model for detail view (Master-Detail)
-  const [selectedProductModel, setSelectedProductModel] = useState<string>('Spider');
+  const [selectedProductModel, setSelectedProductModel] = useState<string>('');
   const [aiInsightsGenerated, setAiInsightsGenerated] = useState(false);
   const [aiGenerating, setAiGenerating] = useState(false);
   const [aiInsights, setAiInsights] = useState<{ tag: string; tone: 'rose' | 'amber' | 'indigo'; text: string }[] | null>(null);
@@ -5301,24 +5096,13 @@ export const ModelosProductosView: React.FC = () => {
   const [filtroArea, setFiltroArea] = useState<string>('');
   const [filtroEstatus, setFiltroEstatus] = useState<string>('');
 
-  // Auto reload logs when switching tenant
   useEffect(() => {
-    const key = `plasyect_model_perf_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        setPerformanceLogs(JSON.parse(saved));
-        return;
-      } catch (_) {}
-    }
-    const seeded = seedModelPerformanceLogs(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setPerformanceLogs(seeded);
+    setPerformanceLogs([]);
   }, [currentTenant.id]);
 
-  const uniqueModels = Array.from(new Set(performanceLogs.map(l => l.modeloName))).filter(Boolean);
-  const uniqueColors = Array.from(new Set(performanceLogs.map(l => l.color))).filter(Boolean);
-  const uniqueClients = Array.from(new Set(performanceLogs.map(l => l.cliente))).filter(Boolean);
+  const uniqueModels = Array.from(new Set(performanceLogs.map(l => l.modeloName))).filter(Boolean) as string[];
+  const uniqueColors = Array.from(new Set(performanceLogs.map(l => l.color))).filter(Boolean) as string[];
+  const uniqueClients = Array.from(new Set(performanceLogs.map(l => l.cliente))).filter(Boolean) as string[];
 
   // Apply sequential multi-tenant filters
   const filteredRecords = performanceLogs.filter(log => {
@@ -5590,13 +5374,13 @@ export const ModelosProductosView: React.FC = () => {
   const selectedModelColors = Array.from(new Set(selectedModelLogs.map(l => l.color)));
   const selectedModelClientes = Array.from(new Set(selectedModelLogs.map(l => l.cliente)));
   
-  // Tallas simulation distribution based on selected model
-  const simulatedTallasDistribution = [
+  // Tallas distribution based on selected model
+  const tallasDistribution = selectedModelStats.producido > 0 ? [
     { tallas: '22-23 (Damas)', pares: Math.round(selectedModelStats.producido * 0.15) },
     { tallas: '24-25 (Mediano)', pares: Math.round(selectedModelStats.producido * 0.40) },
     { tallas: '26-27 (Grande)', pares: Math.round(selectedModelStats.producido * 0.35) },
     { tallas: '28-29 (Familiar)', pares: Math.round(selectedModelStats.producido * 0.10) }
-  ];
+  ] : [];
 
   const handleClearFiltersAll = () => {
     setFiltroModelo('');
@@ -5925,9 +5709,9 @@ export const ModelosProductosView: React.FC = () => {
                 <RechartsXAxis dataKey="date" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
-                <RechartsLine type="monotone" dataKey="Spider" stroke="#10b981" strokeWidth={2} dot={{ r: 1 }} />
-                <RechartsLine type="monotone" dataKey="Ruby" stroke="#3b82f6" strokeWidth={2} dot={{ r: 1 }} />
-                <RechartsLine type="monotone" dataKey="Dragon" stroke="#f59e0b" strokeWidth={2} dot={{ r: 1 }} />
+                {uniqueModels.map((model, idx) => (
+                  <RechartsLine key={model} type="monotone" dataKey={model} stroke={['#10b981', '#3b82f6', '#f59e0b', '#a855f7'][idx % 4]} strokeWidth={2} dot={{ r: 1 }} />
+                ))}
               </RechartsLineChart>
             </RechartsResponsiveContainer>
             </div>
@@ -6218,7 +6002,7 @@ export const ModelosProductosView: React.FC = () => {
                 📐 Distribución Estimada por Tallas:
               </span>
               <div className="space-y-1">
-                {simulatedTallasDistribution.map((t, idx) => (
+                {tallasDistribution.map((t, idx) => (
                   <div key={idx} className="flex justify-between items-center text-[10.5px]">
                     <span className="text-slate-450">{t.tallas}</span>
                     <span className="text-slate-200 font-mono font-bold">{t.pares.toLocaleString()} pars</span>
@@ -6227,23 +6011,14 @@ export const ModelosProductosView: React.FC = () => {
               </div>
             </div>
 
-            {/* Dynamic Simulated Operational Recommendation block with exact phrases requested */}
+            {/* Operational recommendation block */}
             <div className="p-4 bg-slate-950 rounded-lg border border-slate-850 space-y-2">
               <span className="text-[10px] font-mono text-cyan-400 font-bold block uppercase tracking-wider">
                 💡 RECOMENDACIÓN OPERATIVA SISMULADA CHAT G:
               </span>
               <p className="text-[11.5px] italic text-slate-300 leading-relaxed font-sans font-medium">
-                {selectedProductModel === 'Ruby' && (
-                  <span>“El modelo <strong>Ruby</strong> concentra alto volumen, pero presenta defectos recurrentes en Banda.”</span>
-                )}
-                {selectedProductModel === 'Spider' && (
-                  <span>“El modelo <strong>Spider</strong> tiene buen cumplimiento, pero alto tiempo de estabilización.”</span>
-                )}
-                {selectedProductModel === 'Dragon' && (
-                  <span>“El modelo <strong>Dragon</strong> presenta mayor variabilidad de calidad en tallas 24 a 27.”</span>
-                )}
-                {selectedProductModel !== 'Ruby' && selectedProductModel !== 'Spider' && selectedProductModel !== 'Dragon' && (
-                  <span>Para el modelo <strong>{selectedProductModel}</strong>, se aconseja optimizar los tiempos de purga de solvente antes del desmolde para reducir la burbuja interna un {selectedModelDefectPct > 2 ? '15%' : '8%'}. El comportamiento de entrega al <strong>{selectedModelCompliance}%</strong> es aceptable.</span>
+                {selectedProductModel && (
+                  <span>Modelo <strong>{selectedProductModel}</strong>: defectivo <strong>{selectedModelDefectPct}%</strong>, cumplimiento <strong>{selectedModelCompliance}%</strong>. Recomendación pendiente de análisis AI real.</span>
                 )}
               </p>
             </div>
@@ -6280,168 +6055,33 @@ export interface RichQualityRecord {
   cliente: string;
 }
 
-const seedQualityRecords = (tenantId: string): RichQualityRecord[] => {
-  const records: RichQualityRecord[] = [];
-  const inspectores = ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz', 'Ins. Samuel Lozano'];
-  const lideres = ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
-  const maquinas = ['Inyectora I-1', 'Inyectora I-2', 'Inyectora I-3'];
-  const bandas = ['Banda Detalle-A', 'Banda Detalle-B', 'Banda Detalle-C'];
-  const estabilizadoras = ['Estabilizadora E-1', 'Estabilizadora E-2'];
-  const modelos = ['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck', 'Sandalia Eva 100', 'Suela Comfort', 'Plataforma Light'];
-  const colores = ['Negro', 'Blanco', 'Arena', 'Azul Marino', 'Rojo', 'Gris', 'Rosa Humo', 'Rosa Bebé'];
-  const defectos = ['Burbuja Interna', 'Rechupe Talón', 'Deformación Moldura', 'Mancha de Pigmento', 'Porosidad Compuesto', 'Falta de Llenado', 'Rebaba Excesiva'];
-  const clientes = ['Nike de México', 'Adidas LATAM', 'Anfora Corp', 'CasiCalzado Co', 'Puma del Bajío', 'Distribuidora del Centro'];
-
-  // Seed for 25 days up to 2026-05-25 (with 3 entries per day, mapping to different shifts)
-  for (let d = 0; d < 25; d++) {
-    const dateObj = new Date('2026-05-25');
-    dateObj.setDate(dateObj.getDate() - d);
-    const dateString = dateObj.toISOString().split('T')[0];
-
-    for (let t = 1; t <= 3; t++) {
-      const shiftVal = String(t) as '1' | '2' | '3';
-      const seedIndex = d * 3 + t;
-
-      // Select area sequentially
-      const areaVal: 'INYECCION' | 'BANDA' | 'ESTABILIZACION' = seedIndex % 3 === 0 
-        ? 'INYECCION' 
-        : seedIndex % 3 === 1 ? 'BANDA' : 'ESTABILIZACION';
-
-      const maquinaOBandaVal = areaVal === 'INYECCION'
-        ? maquinas[seedIndex % maquinas.length]
-        : areaVal === 'BANDA'
-          ? bandas[seedIndex % bandas.length]
-          : estabilizadoras[seedIndex % estabilizadoras.length];
-
-      // Inspector and Líder pairings
-      const inspectorVal = inspectores[(seedIndex + (shiftVal === '3' ? 2 : 0)) % inspectores.length];
-      const liderVal = lideres[seedIndex % lideres.length];
-
-      // Model and Color
-      const modeloVal = modelos[seedIndex % modelos.length];
-      const colorVal = colores[(seedIndex + 2) % colores.length];
-      const tallaVal = 15 + ((seedIndex * 4) % 16); // sizes 15 to 30 e.g. 15, 19, 23, 27
-      const loteVal = `LOT-2605-${String.fromCharCode(65 + (seedIndex % 6))}${t}${10 + (seedIndex % 90)}`;
-      const clienteVal = clientes[seedIndex % clientes.length];
-
-      // Base distribution
-      const totalInspected = 350 + (seedIndex % 7) * 95;
-      
-      // Inject model/device failures intentionally
-      let defectRate = 0.012 + ((seedIndex % 10) * 0.006); // 1.2% to 7.2%
-      let customDefect = defectos[seedIndex % defectos.length];
-
-      // Ruby defect concentration
-      if (modeloVal === 'Ruby') {
-        defectRate = 0.078; // Ruby high defect rate
-        customDefect = 'Rebaba Excesiva';
-      }
-      // Spider defect concentration
-      if (modeloVal === 'Spider') {
-        defectRate = 0.034;
-        customDefect = 'Rechupe Talón';
-      }
-      // Dragon defect concentration
-      if (modeloVal === 'Dragon') {
-        defectRate = 0.054;
-        customDefect = 'Deformación Moldura';
-      }
-      // Device failures
-      if (maquinaOBandaVal === 'Inyectora I-2') {
-        defectRate += 0.032; // high risk machine
-      }
-      if (maquinaOBandaVal === 'Banda Detalle-A') {
-        defectRate += 0.022; // high deviation band
-      }
-      // Inspector findings
-      if (inspectorVal === 'Ins. Patricia Ruiz' && shiftVal === '3') {
-        defectRate += 0.012; // precise nocturne auditor
-      }
-
-      const totalDefectiveQty = Math.round(totalInspected * defectRate);
-
-      // Distribute defects among segundas, reprocesos, mermas
-      const mermaVal = Math.round(totalDefectiveQty * 0.25);
-      const reprocesoVal = Math.round(totalDefectiveQty * 0.35);
-      const segundasVal = totalDefectiveQty - (mermaVal + reprocesoVal);
-
-      const primerasVal = totalInspected - totalDefectiveQty;
-      const actualPctDefectivo = Number(((totalDefectiveQty / totalInspected) * 100).toFixed(2));
-
-      records.push({
-        fecha: dateString,
-        turno: shiftVal,
-        area: areaVal,
-        maquinaOBanda: maquinaOBandaVal,
-        inspector: inspectorVal,
-        lider: liderVal,
-        lote: loteVal,
-        modelo: modeloVal,
-        color: colorVal,
-        talla: tallaVal,
-        totalInspeccionado: totalInspected,
-        primeras: primerasVal,
-        segundas: segundasVal,
-        reproceso: reprocesoVal,
-        merma: mermaVal,
-        defecto: totalDefectiveQty > 0 ? customDefect : 'Ninguno',
-        cantidadDefecto: totalDefectiveQty,
-        porcentajeDefectivo: actualPctDefectivo,
-        cliente: clienteVal
-      });
-    }
-  }
-  return records;
-};
-
 export const CalidadView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [chartTab, setChartTab] = useState<'pareto-areas' | 'device-specs' | 'trends-rates'>('pareto-areas');
 
-  // Load tenant-isolated quality records state
-  const [inspectionRecords, setInspectionRecords] = useState<RichQualityRecord[]>(() => {
-    const key = `plasyect_quality_inspection_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    const seeded = seedQualityRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [inspectionRecords, setInspectionRecords] = useState<RichQualityRecord[]>([]);
 
-  // Hot refresh on Tenant changed
   useEffect(() => {
-    const key = `plasyect_quality_inspection_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        setInspectionRecords(JSON.parse(saved));
-        return;
-      } catch (_) {}
-    }
-    const seeded = seedQualityRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setInspectionRecords(seeded);
+    setInspectionRecords([]);
   }, [currentTenant.id]);
 
   // Form registration states
-  const [newFecha, setNewFecha] = useState('2026-05-25');
+  const [newFecha, setNewFecha] = useState('');
   const [newTurno, setNewTurno] = useState<'1' | '2' | '3'>('1');
   const [newArea, setNewArea] = useState<'INYECCION' | 'BANDA' | 'ESTABILIZACION'>('INYECCION');
-  const [newMaquinaOBanda, setNewMaquinaOBanda] = useState('Inyectora I-1');
-  const [newInspector, setNewInspector] = useState('Ins. Carlos Vaca');
-  const [newLider, setNewLider] = useState('Líd. Francisco M.');
-  const [newLote, setNewLote] = useState('LOT-2605-NQA');
-  const [newModelo, setNewModelo] = useState('Spider');
-  const [newColor, setNewColor] = useState('Negro');
-  const [newTalla, setNewTalla] = useState(25);
-  const [newTotal, setNewTotal] = useState(400);
-  const [newSegundas, setNewSegundas] = useState(12);
-  const [newReproceso, setNewReproceso] = useState(8);
-  const [newMerma, setNewMerma] = useState(5);
-  const [newDefecto, setNewDefecto] = useState('Burbuja Interna');
+  const [newMaquinaOBanda, setNewMaquinaOBanda] = useState('');
+  const [newInspector, setNewInspector] = useState('');
+  const [newLider, setNewLider] = useState('');
+  const [newLote, setNewLote] = useState('');
+  const [newModelo, setNewModelo] = useState('');
+  const [newColor, setNewColor] = useState('');
+  const [newTalla, setNewTalla] = useState(0);
+  const [newTotal, setNewTotal] = useState(0);
+  const [newSegundas, setNewSegundas] = useState(0);
+  const [newReproceso, setNewReproceso] = useState(0);
+  const [newMerma, setNewMerma] = useState(0);
+  const [newDefecto, setNewDefecto] = useState('');
 
   // Distinct filter states
   const [filtroFecha, setFiltroFecha] = useState('');
@@ -6596,7 +6236,6 @@ export const CalidadView: React.FC = () => {
 
     const nextLogs = [newLog, ...inspectionRecords];
     setInspectionRecords(nextLogs);
-    localStorage.setItem(`plasyect_quality_inspection_logs_${currentTenant.id}`, JSON.stringify(nextLogs));
 
     addAuditLog('QUALITY', 'REGISTER_FAILURE_RECORD', `Falla física registrada para Lote: ${newLote}, Modelo: ${newModelo}, Defectivo: ${computedPct}%`);
     setIsFormOpen(false);
@@ -7101,7 +6740,7 @@ export const CalidadView: React.FC = () => {
           <div className="p-3.5 bg-amber-950/15 border border-amber-900/30 rounded-lg space-y-1">
             <span className="text-[9px] font-mono text-amber-500 font-extrabold uppercase tracking-wider block">Máquina Crítica</span>
             <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
-              La inyectora <strong className="text-white">Inyectora I-2</strong> exhibe un desvío de temperatura crítico (+15°C en boquilla), requiriendo purga inmediata.
+              La máquina <strong className="text-white">{maquinaBandaCritica}</strong> concentra el mayor defecto registrado en FDB/OCR.
             </p>
           </div>
 
@@ -7530,9 +7169,7 @@ export const CalidadView: React.FC = () => {
                     value={newArea}
                     onChange={(e: any) => {
                       setNewArea(e.target.value);
-                      if (e.target.value === 'INYECCION') setNewMaquinaOBanda('Inyectora I-1');
-                      else if (e.target.value === 'BANDA') setNewMaquinaOBanda('Banda Detalle-A');
-                      else setNewMaquinaOBanda('Estabilizadora E-1');
+                      setNewMaquinaOBanda('');
                     }}
                     className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-slate-300 focus:outline-none"
                   >
@@ -7573,7 +7210,8 @@ export const CalidadView: React.FC = () => {
                     onChange={(e) => setNewModelo(e.target.value)}
                     className="w-full bg-slate-900 border border-slate-800 rounded p-2 text-slate-300 focus:outline-none"
                   >
-                    {['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck', 'Sandalia Eva 100', 'Suela Comfort', 'Plataforma Light'].map((m, idx) => (
+                    <option value="">Pendiente OCR</option>
+                    {uniqueModelsList.map((m, idx) => (
                       <option key={idx} value={m}>{m}</option>
                     ))}
                   </select>
@@ -7747,152 +7385,37 @@ export interface InjectionProductionRecord {
   observaciones: string;
 }
 
-const seedInjectionRecords = (tenantId: string): InjectionProductionRecord[] => {
-  const records: InjectionProductionRecord[] = [];
-  const inspectores = ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz', 'Ins. Samuel Lozano'];
-  const lideres = ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
-  const maquinas = Array.from({ length: 10 }, (_, i) => `Máquina ${i + 1}`);
-  const moldes = ['MLD-SNAP-01', 'MLD-RUBY-02', 'MLD-SPID-03', 'MLD-DRAG-04', 'MLD-ATEN-05', 'MLD-CONF-06', 'MLD-NUBU-07', 'MLD-PLAT-08'];
-  const modelos = ['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck', 'Sandalia Eva 100', 'Suela Comfort', 'Plataforma Light'];
-  const colores = ['Negro', 'Blanco', 'Arena', 'Azul Marino', 'Rojo', 'Gris', 'Rosa Humo', 'Rosa Bebé'];
-  const defectos = [
-    'Quemado de Material',
-    'Variación de Volumen',
-    'Rebaba de Cierre',
-    'Burbuja de Aire',
-    'Agujeros en Vía',
-    'Mal Llenado',
-    'Contracción Térmica',
-    'Diferencia de Color',
-    'Punto de Inyección sin Cortar'
-  ];
-
-  // Seed for 20 days up to 2026-05-25 (with 3 entries per day, mapping to different shifts/machines)
-  for (let d = 0; d < 20; d++) {
-    const dateObj = new Date('2026-05-25');
-    dateObj.setDate(dateObj.getDate() - d);
-    const dateStr = dateObj.toISOString().split('T')[0];
-
-    for (let t = 1; t <= 3; t++) {
-      const shift = String(t) as '1' | '2' | '3';
-      const offset = d * 3 + t;
-
-      // Seed 2 machines per shift
-      for (let mIdx = 0; mIdx < 2; mIdx++) {
-        const mOffset = (offset + mIdx) % maquinas.length;
-        const mac = maquinas[mOffset];
-        const mol = moldes[(offset + mIdx + 2) % moldes.length];
-        const ins = inspectores[(offset + mIdx) % inspectores.length];
-        const lid = lideres[(offset + t) % lideres.length];
-        const mod = modelos[(offset + mIdx + 1) % modelos.length];
-        const col = colores[(offset + mIdx) % colores.length];
-        const sz = 22 + ((offset * 2) % 8); // sizes 22 to 29
-        const lot = `LOT-INJ-${dateStr.replace(/-/g, '').slice(2)}-${offset + mIdx}`;
-
-        const totalInspected = 420 + (offset % 5) * 60;
-        
-        let defectRate = 0.015 + ((offset % 6) * 0.008); // 1.5% to 5.5%
-        let defName = defectos[offset % defectos.length];
-
-        // Specific high failure molds or machines
-        if (mac === 'Máquina 2') {
-          defectRate += 0.035;
-          defName = 'Quemado de Material';
-        }
-        if (mac === 'Máquina 7') {
-          defectRate += 0.025;
-          defName = 'Variación de Volumen';
-        }
-        if (mol === 'MLD-RUBY-02') {
-          defectRate += 0.018;
-          defName = 'Rebaba de Cierre';
-        }
-
-        const totalDefective = Math.round(totalInspected * defectRate);
-        const merQty = Math.round(totalDefective * 0.20);
-        const repQty = Math.round(totalDefective * 0.35);
-        const segQty = totalDefective - (merQty + repQty);
-        const priQty = totalInspected - totalDefective;
-
-        records.push({
-          fecha: dateStr,
-          turno: shift,
-          maquina: mac,
-          molde: mol,
-          inspector: ins,
-          lider: lid,
-          lote: lot,
-          modelo: mod,
-          color: col,
-          talla: sz,
-          totalInspeccionado: totalInspected,
-          primeras: priQty,
-          segundas: segQty,
-          reproceso: repQty,
-          merma: merQty,
-          defecto: totalDefective > 0 ? defName : 'Ninguno',
-          cantidad: totalDefective,
-          observaciones: totalDefective > 0 ? `Se detecta ${defName} menor debido a temperatura de boquilla.` : 'Producción estable'
-        });
-      }
-    }
-  }
-
-  return records;
-};
-
 export const InyeccionView: React.FC = () => {
   const { currentTenant, addAuditLog, users, can, getGoalForAreaTurn } = useDashboard();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [chartTab, setChartTab] = useState<'prod' | 'def' | 'eff'>('prod');
 
-  // Load tenant-isolated quality records state for Injection
-  const [injectionRecords, setInjectionRecords] = useState<InjectionProductionRecord[]>(() => {
-    const key = `plasyect_injection_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    const seeded = seedInjectionRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [injectionRecords, setInjectionRecords] = useState<InjectionProductionRecord[]>([]);
 
-  // Hot refresh on Tenant changed
   useEffect(() => {
-    const key = `plasyect_injection_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        setInjectionRecords(JSON.parse(saved));
-        return;
-      } catch (_) {}
-    }
-    const seeded = seedInjectionRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setInjectionRecords(seeded);
+    setInjectionRecords([]);
   }, [currentTenant.id]);
 
   // Form registration states
-  const [newFecha, setNewFecha] = useState('2026-05-25');
+  const [newFecha, setNewFecha] = useState('');
   const [newTurno, setNewTurno] = useState<'1' | '2' | '3'>('1');
-  const [newMaquina, setNewMaquina] = useState('Máquina 1');
-  const [newMolde, setNewMolde] = useState('MLD-SNAP-01');
-  const [newInspector, setNewInspector] = useState('Ins. Carlos Vaca');
-  const [newLider, setNewLider] = useState('Líd. Francisco M.');
-  const [newLote, setNewLote] = useState('LOT-INJ-QA01');
-  const [newModelo, setNewModelo] = useState('Spider');
-  const [newColor, setNewColor] = useState('Negro');
-  const [newTalla, setNewTalla] = useState(25);
-  const [newTotal, setNewTotal] = useState(500);
-  const [newSegundas, setNewSegundas] = useState(12);
-  const [newReproceso, setNewReproceso] = useState(8);
-  const [newMerma, setNewMerma] = useState(5);
-  const [newDefecto, setNewDefecto] = useState('Burbuja de Aire');
-  const [newObservaciones, setNewObservaciones] = useState('Temperatura controlada');
+  const [newMaquina, setNewMaquina] = useState('');
+  const [newMolde, setNewMolde] = useState('');
+  const [newInspector, setNewInspector] = useState('');
+  const [newLider, setNewLider] = useState('');
+  const [newLote, setNewLote] = useState('');
+  const [newModelo, setNewModelo] = useState('');
+  const [newColor, setNewColor] = useState('');
+  const [newTalla, setNewTalla] = useState(0);
+  const [newTotal, setNewTotal] = useState(0);
+  const [newSegundas, setNewSegundas] = useState(0);
+  const [newReproceso, setNewReproceso] = useState(0);
+  const [newMerma, setNewMerma] = useState(0);
+  const [newDefecto, setNewDefecto] = useState('');
+  const [newObservaciones, setNewObservaciones] = useState('');
   const activeResponsables = users.filter(user => user.active).map(user => user.username);
-  const responsibleOptions = activeResponsables.length > 0 ? activeResponsables : ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz'];
-  const leaderOptions = activeResponsables.length > 0 ? activeResponsables : ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
+  const responsibleOptions = activeResponsables;
+  const leaderOptions = activeResponsables;
 
   // Distinct filter states
   const [filtroFecha, setFiltroFecha] = useState('');
@@ -7977,7 +7500,6 @@ export const InyeccionView: React.FC = () => {
 
     const nextLogs = [newLog, ...injectionRecords];
     setInjectionRecords(nextLogs);
-    localStorage.setItem(`plasyect_injection_logs_${currentTenant.id}`, JSON.stringify(nextLogs));
 
     addAuditLog('PRODUCTION', 'REGISTER_INJECTION_LOG', `Registro manual inyectora para Máquina: ${newMaquina}, Lote: ${newLote}, Producción: ${newTotal}`);
     setIsFormOpen(false);
@@ -8035,24 +7557,8 @@ export const InyeccionView: React.FC = () => {
     ? Math.round(180 + (totalDefectosScope / Math.max(1, filteredRecords.length)) * 1.5)
     : 180;
 
-  // Machines basic state maps (Preconfigured for visual luxury representing standard plants)
-  const defaultMachineStatuses: Record<string, { state: 'activa' | 'detenida' | 'mantenimiento' | 'sin datos'; model: string; col: string; lot: string; baseEff: number }> = {
-    'Máquina 1': { state: 'activa', model: 'Spider', col: 'Negro', lot: 'LOT-INJ-2503', baseEff: 94 },
-    'Máquina 2': { state: 'activa', model: 'Ruby', col: 'Rojo', lot: 'LOT-INJ-2504', baseEff: 88 },
-    'Máquina 3': { state: 'mantenimiento', model: '--', col: '--', lot: '--', baseEff: 0 },
-    'Máquina 4': { state: 'activa', model: 'Snap', col: 'Blanco', lot: 'LOT-INJ-2507', baseEff: 92 },
-    'Máquina 5': { state: 'detenida', model: '--', col: '--', lot: '--', baseEff: 0 },
-    'Máquina 6': { state: 'activa', model: 'Dragon', col: 'Azul Marino', lot: 'LOT-INJ-2508', baseEff: 95 },
-    'Máquina 7': { state: 'activa', model: 'Atenea', col: 'Arena', lot: 'LOT-INJ-2509', baseEff: 89 },
-    'Máquina 8': { state: 'activa', model: 'Suela Comfort', col: 'Gris', lot: 'LOT-INJ-2510', baseEff: 96 },
-    'Máquina 9': { state: 'sin datos', model: '--', col: '--', lot: '--', baseEff: 0 },
-    'Máquina 10': { state: 'activa', model: 'Plataforma Light', col: 'Rosa Bebé', lot: 'LOT-INJ-2512', baseEff: 93 },
-  };
-
-  // Generate the 10 machine structures dynamically
-  const machineCards = Array.from({ length: 10 }, (_, i) => {
-    const mName = `Máquina ${i + 1}`;
-    const defConfig = defaultMachineStatuses[mName];
+  const machineNames = Array.from(new Set(filteredRecords.map(r => r.maquina))).filter(Boolean) as string[];
+  const machineCards = machineNames.map(mName => {
 
     // Read metrics from filtered list
     const macRecords = filteredRecords.filter(r => r.maquina === mName);
@@ -8060,23 +7566,23 @@ export const InyeccionView: React.FC = () => {
     const totalDef = macRecords.reduce((sum, r) => sum + r.cantidad, 0);
     const latestRec = macRecords[0];
 
-    const actualState = totalProd > 0 ? 'activa' : defConfig.state;
+    const actualState = totalProd > 0 ? 'activa' : 'sin datos';
     const computedDefectPct = totalProd > 0 ? Number(((totalDef / totalProd) * 100).toFixed(1)) : 0;
     const computedEff = actualState === 'activa' 
-      ? Math.max(68, Math.round((totalProd > 0 ? 98 - (computedDefectPct * 1.6) : defConfig.baseEff)))
+      ? Math.max(68, Math.round(98 - (computedDefectPct * 1.6)))
       : 0;
 
     return {
       name: mName,
       estado: actualState,
-      modelo: latestRec ? latestRec.modelo : defConfig.model,
-      color: latestRec ? latestRec.color : defConfig.col,
-      lote: latestRec ? latestRec.lote : defConfig.lot,
-      produccion: totalProd > 0 ? totalProd : (actualState === 'activa' ? 410 : 0),
-      defectos: totalProd > 0 ? totalDef : (actualState === 'activa' ? 12 : 0),
-      pctDefectivo: totalProd > 0 ? computedDefectPct : (actualState === 'activa' ? 2.9 : 0),
+      modelo: latestRec?.modelo || '',
+      color: latestRec?.color || '',
+      lote: latestRec?.lote || '',
+      produccion: totalProd,
+      defectos: totalDef,
+      pctDefectivo: computedDefectPct,
       eficiencia: computedEff,
-      ultimoRegistro: latestRec ? latestRec.fecha.split('-').slice(1).join('/') : (actualState === 'activa' ? '05/25' : '--')
+      ultimoRegistro: latestRec ? latestRec.fecha.split('-').slice(1).join('/') : '--'
     };
   });
 
@@ -9091,7 +8597,8 @@ export const InyeccionView: React.FC = () => {
                     onChange={(e) => setNewModelo(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-850 rounded p-1.5 text-slate-300 focus:outline-none focus:border-amber-500"
                   >
-                    {['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck', 'Sandalia Eva 100', 'Suela Comfort', 'Plataforma Light'].map((m, idx) => (
+                    <option value="">Pendiente OCR</option>
+                    {uniqueModelsList.map((m, idx) => (
                       <option key={idx} value={m}>{m}</option>
                     ))}
                   </select>
@@ -9260,126 +8767,37 @@ export interface BandaProductionRecord {
   estatus: 'activa' | 'detenida' | 'saturada' | 'sin datos';
 }
 
-const seedBandaRecords = (tenantId: string): BandaProductionRecord[] => {
-  const records: BandaProductionRecord[] = [];
-  const inspectores = ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz'];
-  const lideres = ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
-  const mBandas = ['Banda 1', 'Banda 2', 'Banda 3', 'Banda 4'];
-  const modelos = ['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck'];
-  const colores = ['Negro', 'Blanco', 'Arena', 'Azul Marino', 'Rojo', 'Gris'];
-  const defectos = ['Plastisol Despegado', 'Plastisol Mal Colocado', 'Manchado de Pigmento', 'Rayado de Material', 'Burbuja Estructura', 'Contaminación de Resina', 'Defecto de Acabado'];
-  const acciones = ['Estabilizar temperatura soplador', 'Limpieza profunda de rieles', 'Dosificar plastisol en catálogo', 'Verificar presión conveyor', 'Calibrar cabezal plastisol'];
-
-  for (let d = 0; d < 12; d++) {
-    const dateObj = new Date('2026-05-25');
-    dateObj.setDate(dateObj.getDate() - d);
-    const dateStr = dateObj.toISOString().split('T')[0];
-
-    for (let t = 1; t <= 3; t++) {
-      const shift = String(t) as '1' | '2' | '3';
-      const offset = d * 3 + t;
-
-      for (let bIdx = 0; bIdx < 2; bIdx++) {
-        const bandOffset = (offset + bIdx) % mBandas.length;
-        const bName = mBandas[bandOffset];
-        const ins = inspectores[(offset + bIdx) % inspectores.length];
-        const lid = lideres[(offset + t) % lideres.length];
-        const mod = modelos[(offset + bIdx + 3) % modelos.length];
-        const col = colores[(offset + bIdx + 1) % colores.length];
-        const sz = 22 + ((offset * 2) % 8);
-        const lot = `LOT-BND-${dateStr.replace(/-/g, '').slice(2)}-${offset + bIdx}`;
-
-        const totalProc = 300 + (offset % 5) * 40;
-        let defectRate = 0.015 + ((offset % 6) * 0.007);
-
-        if (bName === 'Banda 2') defectRate += 0.035;
-        if (bName === 'Banda 4') defectRate += 0.025;
-
-        const totalDef = Math.round(totalProc * defectRate);
-        const merQty = Math.round(totalDef * 0.15);
-        const repQty = Math.round(totalDef * 0.35);
-        const segQty = totalDef - (merQty + repQty);
-        const priQty = totalProc - totalDef;
-
-        records.push({
-          fecha: dateStr,
-          turno: shift,
-          banda: bName,
-          inspector: ins,
-          lider: lid,
-          lote: lot,
-          modelo: mod,
-          color: col,
-          talla: sz,
-          totalProcesado: totalProc,
-          primeras: priQty,
-          segundas: segQty,
-          reproceso: repQty,
-          merma: merQty,
-          defecto: totalDef > 0 ? defectos[offset % defectos.length] : 'Ninguno',
-          cantidadDefecto: totalDef,
-          accionCorrectiva: totalDef > 0 ? acciones[offset % acciones.length] : 'No requiere',
-          observaciones: totalDef > 0 ? 'Falla cosmética reportada.' : 'Banda estable con flujo constante.',
-          estatus: totalDef > totalProc * 0.05 ? 'saturada' : (totalProc > 0 ? 'activa' : 'detenida')
-        });
-      }
-    }
-  }
-  return records;
-};
-
 export const BandaView: React.FC = () => {
   const { currentTenant, addAuditLog, users, can, getGoalForAreaTurn } = useDashboard();
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [chartTab, setChartTab] = useState<'prod' | 'def' | 'eff'>('prod');
 
-  // Load tenant-isolated quality records state for Banda
-  const [bandaRecords, setBandaRecords] = useState<BandaProductionRecord[]>(() => {
-    const key = `plasyect_banda_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    const seeded = seedBandaRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [bandaRecords, setBandaRecords] = useState<BandaProductionRecord[]>([]);
 
-  // Hot refresh on Tenant changed
   useEffect(() => {
-    const key = `plasyect_banda_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        setBandaRecords(JSON.parse(saved));
-        return;
-      } catch (_) {}
-    }
-    const seeded = seedBandaRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setBandaRecords(seeded);
+    setBandaRecords([]);
   }, [currentTenant.id]);
 
   // Form registration states
-  const [newFecha, setNewFecha] = useState('2026-05-25');
+  const [newFecha, setNewFecha] = useState('');
   const [newTurno, setNewTurno] = useState<'1' | '2' | '3'>('1');
-  const [newBanda, setNewBanda] = useState('Banda 1');
-  const [newInspector, setNewInspector] = useState('Ins. Carlos Vaca');
-  const [newLider, setNewLider] = useState('Líd. Francisco M.');
-  const [newLote, setNewLote] = useState('LOT-BND-QA01');
-  const [newModelo, setNewModelo] = useState('Spider');
-  const [newColor, setNewColor] = useState('Negro');
-  const [newTalla, setNewTalla] = useState(25);
-  const [newTotal, setNewTotal] = useState(400);
-  const [newSegundas, setNewSegundas] = useState(8);
-  const [newReproceso, setNewReproceso] = useState(5);
-  const [newMerma, setNewMerma] = useState(3);
-  const [newDefecto, setNewDefecto] = useState('Plastisol Despegado');
-  const [newAccion, setNewAccion] = useState('Ajustar temperatura de horno de curado');
-  const [newObservaciones, setNewObservaciones] = useState('Optimización de secado rápido');
+  const [newBanda, setNewBanda] = useState('');
+  const [newInspector, setNewInspector] = useState('');
+  const [newLider, setNewLider] = useState('');
+  const [newLote, setNewLote] = useState('');
+  const [newModelo, setNewModelo] = useState('');
+  const [newColor, setNewColor] = useState('');
+  const [newTalla, setNewTalla] = useState(0);
+  const [newTotal, setNewTotal] = useState(0);
+  const [newSegundas, setNewSegundas] = useState(0);
+  const [newReproceso, setNewReproceso] = useState(0);
+  const [newMerma, setNewMerma] = useState(0);
+  const [newDefecto, setNewDefecto] = useState('');
+  const [newAccion, setNewAccion] = useState('');
+  const [newObservaciones, setNewObservaciones] = useState('');
   const activeResponsables = users.filter(user => user.active).map(user => user.username);
-  const responsibleOptions = activeResponsables.length > 0 ? activeResponsables : ['Ins. Carlos Vaca', 'Ins. Elena Torres', 'Ins. Raúl Díaz', 'Ins. Roberto Solano', 'Ins. Patricia Ruiz'];
-  const leaderOptions = activeResponsables.length > 0 ? activeResponsables : ['Líd. Francisco M.', 'Líd. Amancio G.', 'Líd. Sonia Juárez', 'Líd. Héctor Ortiz'];
+  const responsibleOptions = activeResponsables;
+  const leaderOptions = activeResponsables;
 
   // Distinct filter states
   const [filtroFecha, setFiltroFecha] = useState('');
@@ -9462,7 +8880,6 @@ export const BandaView: React.FC = () => {
 
     const nextLogs = [newLog, ...bandaRecords];
     setBandaRecords(nextLogs);
-    localStorage.setItem(`plasyect_banda_logs_${currentTenant.id}`, JSON.stringify(nextLogs));
 
     addAuditLog('PRODUCTION', 'REGISTER_BANDA_LOG', `Registro manual en Banda: ${newBanda}, Lote: ${newLote}, Procesado: ${newTotal}`);
     setIsFormOpen(false);
@@ -9500,42 +8917,36 @@ export const BandaView: React.FC = () => {
   const tiempoPromedioBanda = totalProcesadoScope > 0
     ? Math.round(95 + (totalDefectosScope / Math.max(1, filteredRecords.length)) * 2) : 95;
 
-  const defaultBandsConfig: Record<string, { state: 'activa' | 'detenida' | 'saturada' | 'sin datos'; model: string; col: string; lot: string; baseEff: number; resp: string }> = {
-    'Banda 1': { state: 'activa', model: 'Spider', col: 'Negro', lot: 'LOT-BND-010', baseEff: 92, resp: 'Diana Pérez' },
-    'Banda 2': { state: 'saturada', model: 'Ruby', col: 'Rojo', lot: 'LOT-BND-020', baseEff: 83, resp: 'Rogelio Cruz' },
-    'Banda 3': { state: 'detenida', model: '--', col: '--', lot: '--', baseEff: 0, resp: 'Elena Torres' },
-    'Banda 4': { state: 'activa', model: 'Dragon', col: 'Azul Marino', lot: 'LOT-BND-040', baseEff: 94, resp: 'Héctor Ortiz' }
-  };
-
-  const bandaCards = ['Banda 1', 'Banda 2', 'Banda 3', 'Banda 4'].map(bName => {
-    const dConfig = defaultBandsConfig[bName];
+  const bandaNames = Array.from(new Set(filteredRecords.map(r => r.banda))).filter(Boolean);
+  const bandaCards = bandaNames.map(bName => {
     const bRecords = filteredRecords.filter(r => r.banda === bName);
     const totalProd = bRecords.reduce((sum, r) => sum + r.totalProcesado, 0);
     const totalDef = bRecords.reduce((sum, r) => sum + r.cantidadDefecto, 0);
     const latestRec = bRecords[0];
 
-    let computedStatus = dConfig.state;
+    let computedStatus: 'activa' | 'detenida' | 'saturada' | 'sin datos' =
+      totalProd === 0 && bRecords.length > 0 ? 'detenida' : 'sin datos';
     if (totalProd > 0) {
       computedStatus = (totalDef / totalProd) > 0.05 ? 'saturada' : 'activa';
     }
 
     const computedDefectPct = totalProd > 0 ? Number(((totalDef / totalProd) * 100).toFixed(1)) : 0;
     const computedEff = computedStatus === 'activa' 
-      ? Math.max(75, Math.round((totalProd > 0 ? 97 - (computedDefectPct * 1.5) : dConfig.baseEff)))
+      ? Math.max(75, Math.round(97 - (computedDefectPct * 1.5)))
       : (computedStatus === 'saturada' ? 76 : 0);
 
     return {
       name: bName,
       estado: computedStatus,
-      modelo: latestRec ? latestRec.modelo : dConfig.model,
-      color: latestRec ? latestRec.color : dConfig.col,
-      lote: latestRec ? latestRec.lote : dConfig.lot,
-      produccion: totalProd > 0 ? totalProd : (computedStatus !== 'detenida' ? 380 : 0),
-      defectos: totalProd > 0 ? totalDef : (computedStatus !== 'detenida' ? 14 : 0),
-      pctDefectivo: totalProd > 0 ? computedDefectPct : (computedStatus !== 'detenida' ? 3.7 : 0),
+      modelo: latestRec?.modelo || '',
+      color: latestRec?.color || '',
+      lote: latestRec?.lote || '',
+      produccion: totalProd,
+      defectos: totalDef,
+      pctDefectivo: computedDefectPct,
       eficiencia: computedEff,
-      ultimoRegistro: latestRec ? latestRec.fecha.split('-').slice(1).join('/') : '05/25',
-      responsable: dConfig.resp
+      ultimoRegistro: latestRec ? latestRec.fecha.split('-').slice(1).join('/') : '--',
+      responsable: latestRec?.lider || ''
     };
   });
 
@@ -10206,7 +9617,8 @@ export const BandaView: React.FC = () => {
                 <div className="space-y-1">
                   <label className="text-slate-400 block font-bold">Modelo:</label>
                   <select value={newModelo} onChange={(e) => setNewModelo(e.target.value)} className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:outline-none">
-                    {['Spider', 'Ruby', 'Snap', 'Dragon', 'Atenea', 'Nubuck'].map((m, idx) => (
+                    <option value="">Pendiente OCR</option>
+                    {uniqueModelsList.map((m, idx) => (
                       <option key={idx} value={m}>{m}</option>
                     ))}
                   </select>
@@ -10326,186 +9738,31 @@ export interface AduanaLiberationRecord {
   historial: { fecha: string; accion: string; usuario: string }[];
 }
 
-const seedAduanaRecords = (tenantId: string): AduanaLiberationRecord[] => {
-  return [
-    {
-      id: 'ADU-LOT-260525-01',
-      fecha: '2026-05-25',
-      cliente: 'Andrea S.A.',
-      oc: 'OC-25221-AND',
-      lote: 'LOT-BND-QA01',
-      tarjetaViajera: 'TV-BND-0892',
-      modelo: 'Spider',
-      color: 'Negro',
-      totalPares: 450,
-      desgloseTallas: { 22: 40, 23: 60, 24: 100, 25: 120, 26: 80, 27: 50 },
-      pedidoCompleto: true,
-      colorValidado: true,
-      muestraValidada: true,
-      responsable: 'Carlos Vaca',
-      jefeAduana: 'Felipe Mendoza',
-      jefePreacabado: 'Laura Medina',
-      estatus: 'liberado',
-      observaciones: 'Todo correcto. Inspección visual y física aprobada con sello verde.',
-      historial: [
-        { fecha: '2026-05-25 08:30', accion: 'Creado en aduana de preacabado', usuario: 'Carlos Vaca' },
-        { fecha: '2026-05-25 10:15', accion: 'Muestra física prevenida y validada', usuario: 'Laura Medina' },
-        { fecha: '2026-05-25 11:00', accion: 'Aprobación final de lote y liberación', usuario: 'Felipe Mendoza' }
-      ]
-    },
-    {
-      id: 'ADU-LOT-260525-02',
-      fecha: '2026-05-25',
-      cliente: 'Flexi Industrial',
-      oc: 'OC-25442-FLX',
-      lote: 'LOT-BND-QB12',
-      tarjetaViajera: 'TV-BND-0893',
-      modelo: 'Ruby',
-      color: 'Rojo',
-      totalPares: 330,
-      desgloseTallas: { 23: 40, 24: 80, 25: 150, 26: 60 },
-      pedidoCompleto: false,
-      colorValidado: true,
-      muestraValidada: true,
-      responsable: 'Elena Torres',
-      jefeAduana: 'Felipe Mendoza',
-      jefePreacabado: 'Laura Medina',
-      estatus: 'incompleto',
-      observaciones: 'Faltan 30 pares por entregar de la banda 2 correspondientes a la talla 26.',
-      historial: [
-        { fecha: '2026-05-25 09:00', accion: 'Entrada física parcial registrada', usuario: 'Elena Torres' },
-        { fecha: '2026-05-25 09:15', accion: 'Señalización automática: lote incompleto', usuario: 'Felipe Mendoza' }
-      ]
-    },
-    {
-      id: 'ADU-LOT-260524-01',
-      fecha: '2026-05-24',
-      cliente: 'Zalisca Calzado',
-      oc: 'OC-25310-ZAL',
-      lote: 'LOT-BND-QC89',
-      tarjetaViajera: 'TV-BND-0889',
-      modelo: 'Snap',
-      color: 'Arena',
-      totalPares: 500,
-      desgloseTallas: { 24: 150, 25: 150, 26: 100, 27: 100 },
-      pedidoCompleto: true,
-      colorValidado: false,
-      muestraValidada: true,
-      responsable: 'Roberto Solano',
-      jefeAduana: 'Felipe Mendoza',
-      jefePreacabado: 'Laura Medina',
-      estatus: 'pendiente',
-      observaciones: 'En espera de reflectómetro de color para validación de pigmento Arena.',
-      historial: [
-        { fecha: '2026-05-24 14:00', accion: 'Creado en aduana de tránsito', usuario: 'Roberto Solano' },
-        { fecha: '2026-05-24 15:30', accion: 'Muestra física recolectada para laboratorio', usuario: 'Roberto Solano' }
-      ]
-    },
-    {
-      id: 'ADU-LOT-260523-01',
-      fecha: '2026-05-23',
-      cliente: 'Price Shoes',
-      oc: 'OC-25120-PRI',
-      lote: 'LOT-BND-QZ77',
-      tarjetaViajera: 'TV-BND-0875',
-      modelo: 'Dragon',
-      color: 'Gris',
-      totalPares: 600,
-      desgloseTallas: { 25: 200, 26: 200, 27: 200 },
-      pedidoCompleto: true,
-      colorValidado: true,
-      muestraValidada: false,
-      responsable: 'Patricia Ruiz',
-      jefeAduana: 'Felipe Mendoza',
-      jefePreacabado: 'Laura Medina',
-      estatus: 'bloqueado',
-      observaciones: 'Muestreos con microburbujas severas en el talonera. Bloqueado preventivo.',
-      historial: [
-        { fecha: '2026-05-23 11:00', accion: 'Creado y registrado', usuario: 'Patricia Ruiz' },
-        { fecha: '2026-05-23 14:20', accion: 'Validación rechazada: microburbujas', usuario: 'Laura Medina' },
-        { fecha: '2026-05-23 15:00', accion: 'Bloqueo físico de lote en andén 3', usuario: 'Felipe Mendoza' }
-      ]
-    },
-    {
-      id: 'ADU-LOT-260522-01',
-      fecha: '2026-05-22',
-      cliente: 'Andrea S.A.',
-      oc: 'OC-24889-AND',
-      lote: 'LOT-BND-QM55',
-      tarjetaViajera: 'TV-BND-0850',
-      modelo: 'Nubuck',
-      color: 'Azul Marino',
-      totalPares: 400,
-      desgloseTallas: { 23: 100, 24: 100, 25: 100, 26: 100 },
-      pedidoCompleto: true,
-      colorValidado: true,
-      muestraValidada: true,
-      responsable: 'Carlos Vaca',
-      jefeAduana: 'Felipe Mendoza',
-      jefePreacabado: 'Laura Medina',
-      estatus: 'liberado',
-      observaciones: 'Dureza Shore A certificada en 42. Flujo liberado a embarques.',
-      historial: [
-        { fecha: '2026-05-22 09:30', accion: 'Creado en aduana', usuario: 'Carlos Vaca' },
-        { fecha: '2026-05-22 11:00', accion: 'Liberación de embarques', usuario: 'Felipe Mendoza' }
-      ]
-    }
-  ];
-};
-
 export const AduanaLiberacionView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
   const [isFormOpen, setIsFormOpen] = useState(false);
-  const [selectedRecordId, setSelectedRecordId] = useState<string>('ADU-LOT-260525-01');
+  const [selectedRecordId, setSelectedRecordId] = useState<string>('');
   const [feedbackMessage, setFeedbackMessage] = useState<{ text: string; type: 'success' | 'refused' } | null>(null);
 
-  // Persistence local isolation
-  const [records, setRecords] = useState<AduanaLiberationRecord[]>(() => {
-    const key = `plasyect_aduana_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    const seeded = seedAduanaRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [records, setRecords] = useState<AduanaLiberationRecord[]>([]);
 
-  // Track tenants shift
   useEffect(() => {
-    const key = `plasyect_aduana_logs_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setRecords(parsed);
-        if (parsed.length > 0) {
-          setSelectedRecordId(parsed[0].id);
-        }
-        return;
-      } catch (_) {}
-    }
-    const seeded = seedAduanaRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setRecords(seeded);
-    if (seeded.length > 0) {
-      setSelectedRecordId(seeded[0].id);
-    }
+    setRecords([]);
+    setSelectedRecordId('');
   }, [currentTenant.id]);
 
-  // Form states for simulated registration
-  const [formCliente, setFormCliente] = useState('Andrea S.A.');
-  const [formOC, setFormOC] = useState('OC-25990-AND');
-  const [formLote, setFormLote] = useState('LOT-BND-QA22');
-  const [formTarjetaViajera, setFormTarjetaViajera] = useState('TV-BND-0912');
-  const [formModelo, setFormModelo] = useState('Spider');
-  const [formColor, setFormColor] = useState('Negro');
-  const [formObservaciones, setFormObservaciones] = useState('Inspección regular de adhesivo.');
-  const [formResponsable, setFormResponsable] = useState('Carlos Vaca');
+  const [formCliente, setFormCliente] = useState('');
+  const [formOC, setFormOC] = useState('');
+  const [formLote, setFormLote] = useState('');
+  const [formTarjetaViajera, setFormTarjetaViajera] = useState('');
+  const [formModelo, setFormModelo] = useState('');
+  const [formColor, setFormColor] = useState('');
+  const [formObservaciones, setFormObservaciones] = useState('');
+  const [formResponsable, setFormResponsable] = useState('');
   const [formJefeAduana, setFormJefeAduana] = useState('Felipe Mendoza');
   const [formJefePreacabado, setFormJefePreacabado] = useState('Laura Medina');
 
-  // Multi-size values inside simulated "Nueva liberación" form
+  // Multi-size values inside "Nueva liberación" form
   const [qty22, setQty22] = useState(50);
   const [qty23, setQty23] = useState(50);
   const [qty24, setQty24] = useState(100);
@@ -10515,7 +9772,7 @@ export const AduanaLiberacionView: React.FC = () => {
   const [qty28, setQty28] = useState(0);
   const [qty29, setQty29] = useState(0);
 
-  // Validations inside simulated form
+  // Validations inside form
   const [formPedidoCompleto, setFormPedidoCompleto] = useState(true);
   const [formColorValidado, setFormColorValidado] = useState(true);
   const [formMuestraValidada, setFormMuestraValidada] = useState(true);
@@ -10643,7 +9900,6 @@ export const AduanaLiberacionView: React.FC = () => {
 
     const nextRecords = [newRec, ...records];
     setRecords(nextRecords);
-    localStorage.setItem(`plasyect_aduana_logs_${currentTenant.id}`, JSON.stringify(nextRecords));
     setSelectedRecordId(newRec.id);
     setIsFormOpen(false);
     
@@ -10658,7 +9914,7 @@ export const AduanaLiberacionView: React.FC = () => {
   };
 
   // Simulating Release Button from detailed panel
-  const handleReleaseSimulated = () => {
+  const handleRelease = () => {
     if (!selectedRecord) return;
 
     // Strict validation conditions
@@ -10693,7 +9949,6 @@ export const AduanaLiberacionView: React.FC = () => {
     });
 
     setRecords(updatedRecords);
-    localStorage.setItem(`plasyect_aduana_logs_${currentTenant.id}`, JSON.stringify(updatedRecords));
     addAuditLog('QUALITY', 'RELEASE_ADUANA_BATCH', `Lote ${selectedRecord.lote} liberado exitosamente hacia Logística`);
     setFeedbackMessage({
       text: `Lote ${selectedRecord.lote} liberado al 100% y enviado a embarques.`,
@@ -10703,7 +9958,7 @@ export const AduanaLiberacionView: React.FC = () => {
   };
 
   // Simulating Block Button
-  const handleBlockSimulated = () => {
+  const handleBlock = () => {
     if (!selectedRecord) return;
 
     const nowStr = '2026-05-25 18:57';
@@ -10722,7 +9977,6 @@ export const AduanaLiberacionView: React.FC = () => {
     });
 
     setRecords(updatedRecords);
-    localStorage.setItem(`plasyect_aduana_logs_${currentTenant.id}`, JSON.stringify(updatedRecords));
     addAuditLog('QUALITY', 'BLOCK_ADUANA_BATCH', `Lote ${selectedRecord.lote} bloqueado en aduanas temporalmente`);
     setFeedbackMessage({
       text: `El lote ${selectedRecord.lote} ha sido marcado como BLOQUEADO temporalmente.`,
@@ -10732,7 +9986,7 @@ export const AduanaLiberacionView: React.FC = () => {
   };
 
   // Solicitar corrección
-  const handleCorrectionSimulated = () => {
+  const handleCorrection = () => {
     if (!selectedRecord) return;
 
     const nowStr = '2026-05-25 18:57';
@@ -10751,7 +10005,6 @@ export const AduanaLiberacionView: React.FC = () => {
     });
 
     setRecords(updatedRecords);
-    localStorage.setItem(`plasyect_aduana_logs_${currentTenant.id}`, JSON.stringify(updatedRecords));
     addAuditLog('QUALITY', 'REVISION_REQUESTED', `Corrección solicitada para Lote ${selectedRecord.lote}`);
     setFeedbackMessage({
       text: `Estado cambiado a Pendiente. Notificación de corrección enviada a preacabados.`,
@@ -11239,7 +10492,7 @@ export const AduanaLiberacionView: React.FC = () => {
               <div className="pt-3 border-t border-slate-900 grid grid-cols-3 gap-2">
                 <button
                   id="release_batch_action_btn"
-                  onClick={handleReleaseSimulated}
+                  onClick={handleRelease}
                   className="px-2 py-2 bg-emerald-600 hover:bg-emerald-555 text-emerald-950 font-mono font-extrabold text-[10px] uppercase rounded-lg transition border border-emerald-500 cursor-pointer text-center"
                   title="Sólo permitido si las 3 validaciones técnicas están completadas"
                 >
@@ -11248,7 +10501,7 @@ export const AduanaLiberacionView: React.FC = () => {
 
                 <button
                   id="block_batch_action_btn"
-                  onClick={handleBlockSimulated}
+                  onClick={handleBlock}
                   className="px-2 py-2 bg-red-650 hover:bg-red-600 text-white font-mono font-black text-[10px] uppercase rounded-lg transition border border-red-500 cursor-pointer text-center"
                 >
                   🔴 Bloquear
@@ -11256,7 +10509,7 @@ export const AduanaLiberacionView: React.FC = () => {
 
                 <button
                   id="correct_batch_action_btn"
-                  onClick={handleCorrectionSimulated}
+                  onClick={handleCorrection}
                   className="px-2 py-2 bg-amber-500 hover:bg-amber-450 text-slate-950 font-mono font-black text-[10px] uppercase rounded-lg transition border border-amber-400 cursor-pointer text-center"
                 >
                   🟡 Regresar
@@ -11308,11 +10561,8 @@ export const AduanaLiberacionView: React.FC = () => {
                     onChange={(e) => setFormCliente(e.target.value)} 
                     className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none"
                   >
-                    <option value="Andrea S.A.">Andrea S.A.</option>
-                    <option value="Flexi Industrial">Flexi Industrial</option>
-                    <option value="Zalisca Calzado">Zalisca Calzado</option>
-                    <option value="Price Shoes">Price Shoes</option>
-                    <option value="Calzado Caborca">Calzado Caborca</option>
+                    <option value="">Pendiente OCR</option>
+                    {listClientes.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
 
@@ -11356,12 +10606,8 @@ export const AduanaLiberacionView: React.FC = () => {
                     onChange={(e) => setFormModelo(e.target.value)} 
                     className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none"
                   >
-                    <option value="Spider">Spider</option>
-                    <option value="Ruby">Ruby</option>
-                    <option value="Snap">Snap</option>
-                    <option value="Dragon">Dragon</option>
-                    <option value="Atenea">Atenea</option>
-                    <option value="Nubuck">Nubuck</option>
+                    <option value="">Pendiente OCR</option>
+                    {listModelos.map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
                 </div>
 
@@ -11372,12 +10618,8 @@ export const AduanaLiberacionView: React.FC = () => {
                     onChange={(e) => setFormColor(e.target.value)} 
                     className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none"
                   >
-                    <option value="Negro">Negro</option>
-                    <option value="Rojo">Rojo</option>
-                    <option value="Arena">Arena</option>
-                    <option value="Gris">Gris</option>
-                    <option value="Azul Marino">Azul Marino</option>
-                    <option value="Blanco">Blanco</option>
+                    <option value="">Pendiente OCR</option>
+                    {listColores.map(c => <option key={c} value={c}>{c}</option>)}
                   </select>
                 </div>
               </div>
@@ -11541,185 +10783,20 @@ export interface EmbarqueRecord {
   historial: { fecha: string; accion: string; usuario: string }[];
 }
 
-const seedEmbarqueRecords = (tenantId: string): EmbarqueRecord[] => {
-  return [
-    {
-      id: 'EMB-PED-260525-01',
-      fecha: '2026-05-25',
-      cliente: 'Andrea S.A.',
-      oc: 'OC-25221-AND',
-      pedido: 'PED-2501-A',
-      lote: 'LOT-BND-QA01',
-      modelo: 'Spider',
-      color: 'Negro',
-      totalParesPedido: 450,
-      paresListos: 450,
-      paresEmbarcados: 450,
-      paresPendientes: 0,
-      fechaCompromiso: '2026-05-25',
-      fechaEmbarque: '2026-05-25',
-      estatus: 'Embarcado completo',
-      responsable: 'Jorge Ruiz (Logística)',
-      observaciones: 'Cargado en plataforma remolque 12 de Andrea S.A. Sello de seguridad verificado.',
-      historial: [
-        { fecha: '2026-05-25 09:00', accion: 'Lote completo de aduana ingresado', usuario: 'Felipe Mendoza' },
-        { fecha: '2026-05-25 11:30', accion: 'Paletizado y enfajillado finalizado', usuario: 'Jorge Ruiz (Logística)' },
-        { fecha: '2026-05-25 14:00', accion: 'Salida de andén registrada completa', usuario: 'Jorge Ruiz (Logística)' }
-      ]
-    },
-    {
-      id: 'EMB-PED-260525-02',
-      fecha: '2026-05-25',
-      cliente: 'Flexi Industrial',
-      oc: 'OC-25442-FLX',
-      pedido: 'PED-2502-F',
-      lote: 'LOT-BND-QB12',
-      modelo: 'Ruby',
-      color: 'Rojo',
-      totalParesPedido: 330,
-      paresListos: 300,
-      paresEmbarcados: 150,
-      paresPendientes: 180,
-      fechaCompromiso: '2026-05-28',
-      fechaEmbarque: '2026-05-25',
-      estatus: 'Embarque parcial',
-      responsable: 'Clara S. (Embarques)',
-      observaciones: 'Se despachó la primera mitad del embarque parcial. Pendiente liberar remanente.',
-      historial: [
-        { fecha: '2026-05-25 10:00', accion: 'Llegada de transporte parcial', usuario: 'Clara S. (Embarques)' },
-        { fecha: '2026-05-25 11:15', accion: 'Carga parcial de 150 pares consolidada', usuario: 'Clara S. (Embarques)' }
-      ]
-    },
-    {
-      id: 'EMB-PED-260524-01',
-      fecha: '2026-05-24',
-      cliente: 'Price Shoes',
-      oc: 'OC-25120-PRI',
-      pedido: 'PED-2503-P',
-      lote: 'LOT-BND-QZ77',
-      modelo: 'Dragon',
-      color: 'Gris',
-      totalParesPedido: 600,
-      paresListos: 600,
-      paresEmbarcados: 0,
-      paresPendientes: 600,
-      fechaCompromiso: '2026-05-26',
-      estatus: 'Listo para embarque',
-      responsable: 'Jorge Ruiz (Logística)',
-      observaciones: 'Lote completo aprobado en aduana. Pallet en andén 2 esperando chofer.',
-      historial: [
-        { fecha: '2026-05-24 16:00', accion: 'Liberado de aduana y clasificado para embarque', usuario: 'Laura Medina' },
-        { fecha: '2026-05-25 08:00', accion: 'Asignado andén de carga provisional 2', usuario: 'Jorge Ruiz (Logística)' }
-      ]
-    },
-    {
-      id: 'EMB-PED-260523-01',
-      fecha: '2026-05-23',
-      cliente: 'Zalisca Calzado',
-      oc: 'OC-25310-ZAL',
-      pedido: 'PED-2504-Z',
-      lote: 'LOT-BND-QC89',
-      modelo: 'Snap',
-      color: 'Arena',
-      totalParesPedido: 500,
-      paresListos: 200,
-      paresEmbarcados: 0,
-      paresPendientes: 500,
-      fechaCompromiso: '2026-05-30',
-      estatus: 'Pendiente',
-      responsable: 'Clara S. (Embarques)',
-      observaciones: 'Espera de liberación de aduanas complementario para armado de pallet.',
-      historial: [
-        { fecha: '2026-05-23 15:00', accion: 'Registro en cola de embarques programada', usuario: 'Clara S. (Embarques)' }
-      ]
-    },
-    {
-      id: 'EMB-PED-260520-01',
-      fecha: '2026-05-20',
-      cliente: 'Andrea S.A.',
-      oc: 'OC-24889-AND',
-      pedido: 'PED-2490-A',
-      lote: 'LOT-BND-QM55',
-      modelo: 'Nubuck',
-      color: 'Azul Marino',
-      totalParesPedido: 400,
-      paresListos: 0,
-      paresEmbarcados: 0,
-      paresPendientes: 400,
-      fechaCompromiso: '2026-05-20',
-      estatus: 'Vencido',
-      responsable: 'Jorge Ruiz (Logística)',
-      observaciones: 'Lote retenido en bandas por corrección de opacidad. Alerta roja por fecha expirada.',
-      historial: [
-        { fecha: '2026-05-20 09:00', accion: 'Alerta de retraso en planta inyectora', usuario: 'Sistema' }
-      ]
-    },
-    {
-      id: 'EMB-PED-260522-01',
-      fecha: '2026-05-22',
-      cliente: 'Price Shoes',
-      oc: 'OC-25001-PRI',
-      pedido: 'PED-2495-P',
-      lote: 'LOT-BND-QW02',
-      modelo: 'Spider',
-      color: 'Negro',
-      totalParesPedido: 350,
-      paresListos: 350,
-      paresEmbarcados: 350,
-      paresPendientes: 0,
-      fechaCompromiso: '2026-05-22',
-      fechaEmbarque: '2026-05-22',
-      estatus: 'Embarcado completo',
-      responsable: 'Jorge Ruiz (Logística)',
-      observaciones: 'Entrega en Cedis Price con firma de conformidad.',
-      historial: [
-        { fecha: '2026-05-22 10:00', accion: 'Embarque completo consolidado', usuario: 'Jorge Ruiz (Logística)' }
-      ]
-    }
-  ];
-};
-
 export const EmbarqueView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
-  const [selectedPedidoId, setSelectedPedidoId] = useState<string>('EMB-PED-260525-02');
+  const [selectedPedidoId, setSelectedPedidoId] = useState<string>('');
   const [feedbackMessage, setFeedbackMessage] = useState<{ text: string; type: 'success' | 'info' } | null>(null);
 
   // Partial shipping flow input state
   const [partialShipAmount, setPartialShipAmount] = useState<number>(50);
   const [partialShipError, setPartialShipError] = useState<string | null>(null);
 
-  // Tenant-isolated state management in storage
-  const [records, setRecords] = useState<EmbarqueRecord[]>(() => {
-    const key = `plasyect_embarques_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try { return JSON.parse(saved); } catch (_) {}
-    }
-    const seeded = seedEmbarqueRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    return seeded;
-  });
+  const [records, setRecords] = useState<EmbarqueRecord[]>([]);
 
-  // Track tenant modifications
   useEffect(() => {
-    const key = `plasyect_embarques_${currentTenant.id}`;
-    const saved = localStorage.getItem(key);
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        setRecords(parsed);
-        if (parsed.length > 0) {
-          setSelectedPedidoId(parsed[0].id);
-        }
-        return;
-      } catch (_) {}
-    }
-    const seeded = seedEmbarqueRecords(currentTenant.id);
-    localStorage.setItem(key, JSON.stringify(seeded));
-    setRecords(seeded);
-    if (seeded.length > 0) {
-      setSelectedPedidoId(seeded[0].id);
-    }
+    setRecords([]);
+    setSelectedPedidoId('');
   }, [currentTenant.id]);
 
   // Filters state
@@ -11814,7 +10891,6 @@ export const EmbarqueView: React.FC = () => {
     });
 
     setRecords(updated);
-    localStorage.setItem(`plasyect_embarques_${currentTenant.id}`, JSON.stringify(updated));
     addAuditLog('QUALITY', 'COMPLETE_SHIPMENT_DISPATCH', `Pedido: ${selectedRecord.pedido}, Lote: ${selectedRecord.lote} marcado como Embarcado completo`);
     
     setFeedbackMessage({
@@ -11864,7 +10940,6 @@ export const EmbarqueView: React.FC = () => {
     });
 
     setRecords(updated);
-    localStorage.setItem(`plasyect_embarques_${currentTenant.id}`, JSON.stringify(updated));
     addAuditLog('QUALITY', 'PARTIAL_SHIPMENT_DISPATCH', `Despacho parcial de ${amount} pares en pedido ${selectedRecord.pedido}`);
 
     setFeedbackMessage({
@@ -12505,8 +11580,7 @@ export const OCRValidacionView: React.FC = () => {
 export const ReportesHistoricosView: React.FC = () => {
   const { audits, batches, restoreBatch, currentTenant } = useDashboard();
 
-  // Producción por hora y movimientos reales (BixApp FDB → backend), con mock
-  // como fallback. Ventana histórica amplia (último año) por ser vista de reportes.
+  // Producción por hora y movimientos reales (BixApp FDB → backend).
   const [erpProduccion, setErpProduccion] = useState<EjecutivoData['produccion']>([]);
   const [erpMovimientos, setErpMovimientos] = useState<MovimientoRow[]>([]);
   useEffect(() => {
@@ -12523,8 +11597,8 @@ export const ReportesHistoricosView: React.FC = () => {
       .catch(err => console.warn('Reportes: ERP movimientos fetch failed', err));
     return () => { cancelled = true; };
   }, []);
-  const prodHoraSource = backendEnabled && erpProduccion.length > 0 ? erpProduccion : PRODUCCION_POR_HORA;
-  const movimientosSource = backendEnabled && erpMovimientos.length > 0 ? erpMovimientos : MOVIMIENTOS;
+  const prodHoraSource = erpProduccion;
+  const movimientosSource = erpMovimientos;
 
   // Find archived (soft-deleted) items
   const archivedBatches = batches.filter(
@@ -12733,6 +11807,25 @@ export const ReportesHistoricosView: React.FC = () => {
 
 /* 13. Catálogos View */
 export const CatalogosView: React.FC = () => {
+  const { orders, currentTenant } = useDashboard();
+  const clientsFromFdb = Array.from(
+    new Map(
+      orders
+        .filter(o => o.tenantId === currentTenant.id)
+        .map(o => {
+          const name = o.clientName || o.cliente || o.clientId || 'Pendiente OCR';
+          const id = String(o.clientId || name);
+          return [id, {
+            id,
+            name,
+            rfc: o.rfc || 'Pendiente OCR',
+            contactEmail: o.contactEmail || 'Pendiente OCR',
+            contactPhone: o.contactPhone || 'Pendiente OCR',
+            priority: o.prioridad || 'MEDIA'
+          }];
+        })
+    ).values()
+  );
   const clientColumns = [
     { header: 'RFC Fiscal', accessorKey: 'rfc', cell: (c: any) => <span className="font-mono">{c.rfc}</span> },
     { header: 'Razón Social', accessorKey: 'name', cell: (c: any) => <strong className="text-slate-250">{c.name}</strong> },
@@ -12753,7 +11846,7 @@ export const CatalogosView: React.FC = () => {
       </div>
 
       <DataTable 
-        data={CLIENTS} 
+        data={clientsFromFdb} 
         columns={clientColumns} 
         idField="id" 
       />
@@ -13002,24 +12095,16 @@ export const ConfiguracionView: React.FC = () => {
           </div>
         </div>
 
-        {/* Tenant Details */}
+        {/* Operación */}
         <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-4">
           <h4 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase border-b border-slate-850 pb-2 flex items-center gap-1.5">
             <Cpu className="w-4 h-4 text-cyan-400" />
-            Información del Inquilino (Tenant Isolation)
+            Modo de Operación
           </h4>
           <div className="space-y-3 font-sans text-xs">
-            <div className="p-3 bg-slate-950 rounded border border-slate-855">
-              <div className="text-[10px] font-mono text-slate-500 font-bold uppercase mb-1">CÓDIGO ISOLACIÓN:</div>
-              <p className="font-mono text-slate-200 font-black mb-1.5">{currentTenant.id}</p>
-              <p className="text-[11px] text-slate-400 leading-relaxed">
-                Todas las transacciones en los pipelines de lote, pedidos y las bitácoras de seguridad están confinadas estrictamente al alcance del tenant ID activo. No existe cruce de datos en reposo.
-              </p>
-            </div>
-
             <div className="flex justify-between items-center bg-slate-955 p-3 rounded">
               <div className="space-y-0.5">
-                <span className="text-[10px] font-mono font-bold text-slate-500 uppercase">MODO DESCONECTADO (MOCK)</span>
+                <span className="text-[10px] font-mono font-bold text-slate-500 uppercase">MODO DESCONECTADO</span>
                 <p className="text-[11px] text-slate-400">Permite registrar lotes localmente.</p>
               </div>
               <button

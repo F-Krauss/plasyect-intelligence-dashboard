@@ -32,7 +32,7 @@ app.listen(config.PORT, () => {
   console.log(`plasyect-api listening on ${config.PORT}`);
   if (hasDatabaseUrl) console.log('Persistencia: Postgres directo (DATABASE_URL).');
   else if (hasSupabaseConfig) console.log('Persistencia: Supabase REST (service_role).');
-  else console.warn('Sin DATABASE_URL ni Supabase: usando datos en memoria (seed).');
+  else console.warn('Sin DATABASE_URL ni Supabase: memoria vacia; sin datos mock.');
 });
 
 export { app };

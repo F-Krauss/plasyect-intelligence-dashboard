@@ -1,5 +1,4 @@
 import React from 'react';
-import { CLIENTS, MODELS, COLORS } from '../data/mockData';
 import { Search, SlidersHorizontal, RefreshCw } from 'lucide-react';
 
 interface FilterBarProps {
@@ -13,6 +12,9 @@ interface FilterBarProps {
   setSelectedColor: (val: string) => void;
   resetFilters: () => void;
   title?: string;
+  clients?: Array<{ id: string; name: string }>;
+  models?: Array<{ id: string; name: string }>;
+  colors?: string[];
 }
 
 export const FilterBar: React.FC<FilterBarProps> = ({
@@ -25,7 +27,10 @@ export const FilterBar: React.FC<FilterBarProps> = ({
   selectedColor,
   setSelectedColor,
   resetFilters,
-  title
+  title,
+  clients = [],
+  models = [],
+  colors = []
 }) => {
   return (
     <div className="bg-white border border-slate-200 p-4 rounded-lg flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-sm">
@@ -56,7 +61,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             className="bg-slate-50 border border-slate-200 hover:border-slate-300 px-2.5 py-1.5 rounded text-xs font-semibold text-slate-700 focus:outline-none focus:border-blue-500"
           >
             <option value="">[ TODOS LOS CLIENTES ]</option>
-            {CLIENTS.map(c => (
+            {clients.map(c => (
               <option key={c.id} value={c.id}>{c.name}</option>
             ))}
           </select>
@@ -71,7 +76,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             className="bg-slate-50 border border-slate-200 hover:border-slate-300 px-2.5 py-1.5 rounded text-xs font-semibold text-slate-700 focus:outline-none focus:border-blue-500"
           >
             <option value="">[ TODOS LOS MODELOS ]</option>
-            {MODELS.map(m => (
+            {models.map(m => (
               <option key={m.id} value={m.id}>{m.name}</option>
             ))}
           </select>
@@ -86,7 +91,7 @@ export const FilterBar: React.FC<FilterBarProps> = ({
             className="bg-slate-50 border border-slate-200 hover:border-slate-300 px-2.5 py-1.5 rounded text-xs font-semibold text-slate-700 focus:outline-none focus:border-blue-500"
           >
             <option value="">[ TODOS LOS COLORES ]</option>
-            {COLORS.map(col => (
+            {colors.map(col => (
               <option key={col} value={col}>{col}</option>
             ))}
           </select>

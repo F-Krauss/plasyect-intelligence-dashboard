@@ -26,6 +26,7 @@ const sampleRow: TarjetaViajeraRow = {
   pedido_folio: 547,
   cliente_codigo: '00005',
   cliente_nombre: 'ZAMISKA',
+  pedido_oc: 'OC-9912',
   pedido_fecha_salida: '2026-04-22'
 };
 
@@ -42,6 +43,7 @@ describe('mapTarjetaToBatch', () => {
     expect(batch.modelo).toBe('RUBBY DAMA 22-26 GANCHO');
     expect(batch.cliente).toBe('ZAMISKA');
     expect(batch.orderId).toBe('PED-547');
+    expect(batch.oc).toBe('OC-9912');
     expect(batch.zonaPrevia).toBe('PROGRAMACION');
     expect(batch.zonaActual).toBe('EMBARQUE');
   });
