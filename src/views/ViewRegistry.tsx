@@ -22,7 +22,7 @@ import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
 import { CLIENTS, MODELS, STAGES, COLORS, MOVIMIENTOS, CALIDAD_RECORDS, PRODUCCION_POR_HORA, DEFECTOS_CATALOGO } from '../data/mockData';
 import { backendEnabled, dashboardApi, type EjecutivoData, type MovimientoRow } from '../api/dashboardApi';
-import { AppUser, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
+import { AppUser, Batch, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
   DollarSign, 
   Layers, 
@@ -56,11 +56,25 @@ import {
   ChevronUp,
   Edit,
   Eye,
-  Download,
   Search,
   AlertCircle,
   Building
 } from 'lucide-react';
+
+const getBatchStageId = (batch: Pick<Batch, 'etapaActual' | 'stage'>): StageId =>
+  (batch.etapaActual || batch.stage || 'alta_pedido') as StageId;
+
+const getBatchPairs = (batch: Pick<Batch, 'totalPares' | 'quantityShoes'>): number =>
+  batch.totalPares ?? batch.quantityShoes ?? 0;
+
+const isArchivedBatch = (batch: Pick<Batch, 'status' | 'estatus'>): boolean => {
+  const status = String(batch.status || '');
+  const estatus = String(batch.estatus || '');
+  return status === 'ARCHIVADO' || status === 'ARCHIVED' || estatus === 'ARCHIVADO' || estatus === 'ARCHIVED';
+};
+
+const isDeliveredBatch = (batch: Pick<Batch, 'etapaActual' | 'stage' | 'status' | 'estatus'>): boolean =>
+  getBatchStageId(batch) === 'embarque' || batch.status === 'ENTREGADO' || batch.estatus === 'ENTREGADO';
 
 export const DashboardEjecutivoView: React.FC = () => {
   const { orders, batches, defects, audits, exchangeRate, currentTenant } = useDashboard();
@@ -176,7 +190,7 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // Base datasets derived from SaaS tenant configuration
   const tenantOrders = orders.filter(o => o.tenantId === currentTenant.id);
-  const tenantBatches = batches.filter(b => b.tenantId === currentTenant.id && (b.status as any) !== 'ARCHIVED');
+  const tenantBatches = batches.filter(b => b.tenantId === currentTenant.id && !isArchivedBatch(b));
 
   // Filter application - Orders
   const filteredOrders = tenantOrders.filter(o => {
@@ -196,7 +210,7 @@ export const DashboardEjecutivoView: React.FC = () => {
     if (fechaFin && bDate && new Date(bDate) > new Date(fechaFin)) return false;
     if (selectedClient !== 'TODOS' && b.cliente !== selectedClient) return false;
     if (selectedModel !== 'TODOS' && b.modelo !== selectedModel) return false;
-    if (selectedStage !== 'TODOS' && b.etapaActual !== selectedStage) return false;
+    if (selectedStage !== 'TODOS' && getBatchStageId(b) !== selectedStage) return false;
     if (selectedStatus !== 'TODOS' && b.status !== selectedStatus) return false;
     return true;
   });
@@ -241,20 +255,20 @@ export const DashboardEjecutivoView: React.FC = () => {
   const kpiActiveOrdersCount = filteredOrders.filter(o => o.status === 'PROCESANDO' || o.status === 'PENDIENTE').length;
 
   // - Lotes activos: etapa Actual !== 'embarque'
-  const kpiActiveBatchesCount = filteredBatches.filter(b => b.etapaActual !== 'embarque').length;
+  const kpiActiveBatchesCount = filteredBatches.filter(b => !isDeliveredBatch(b)).length;
 
   // - Pares activos en planta: Suma totalPares de lotes activos
   const kpiActiveParesCount = filteredBatches
-    .filter(b => b.etapaActual !== 'embarque')
-    .reduce((sum, b) => sum + (b.totalPares || b.quantityShoes || 0), 0);
+    .filter(b => !isDeliveredBatch(b))
+    .reduce((sum, b) => sum + getBatchPairs(b), 0);
 
   // - Producción del día: Suma producciónReal del día más reciente en el rango
   const kpiDailyProdCount = todayProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
 
   // - Porcentaje de avance global (weighted avg by pairs)
-  const activeBatchesForProgress = filteredBatches.filter(b => b.etapaActual !== 'embarque');
-  const totalParesForProgress = activeBatchesForProgress.reduce((sum, b) => sum + (b.totalPares || 0), 0);
-  const sumAvancePares = activeBatchesForProgress.reduce((sum, b) => sum + ((b.porcentajeAvance || 0) * (b.totalPares || 0)), 0);
+  const activeBatchesForProgress = filteredBatches.filter(b => !isDeliveredBatch(b));
+  const totalParesForProgress = activeBatchesForProgress.reduce((sum, b) => sum + getBatchPairs(b), 0);
+  const sumAvancePares = activeBatchesForProgress.reduce((sum, b) => sum + ((b.porcentajeAvance || 0) * getBatchPairs(b)), 0);
   const kpiGlobalProgress = totalParesForProgress > 0 ? Math.round(sumAvancePares / totalParesForProgress) : 68;
 
   // - Pedidos en riesgo: 'ALTO' / 'VENCIDO'
@@ -282,13 +296,13 @@ export const DashboardEjecutivoView: React.FC = () => {
   const kpiComplianceStatus = classifyAgainstTarget(kpiMetaCompliance, 100, complianceStdDev);
 
   // Active WIP denominator
-  const totalWIPPares = filteredBatches.reduce((sum, b) => sum + (b.totalPares || 0), 0);
+  const totalWIPPares = filteredBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
 
   // 3. Pipeline Stages mapping & stats
   const pipelineStages = STAGES.map(st => {
-    const stageBatches = filteredBatches.filter(b => b.etapaActual === st.id);
+    const stageBatches = filteredBatches.filter(b => getBatchStageId(b) === st.id);
     const stageLotesCount = stageBatches.length;
-    const stageParesCount = stageBatches.reduce((sum, b) => sum + (b.totalPares || 0), 0);
+    const stageParesCount = stageBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
     const avgMinutes = stageLotesCount > 0 
       ? Math.round(stageBatches.reduce((sum, b) => sum + (b.tiempoEnEtapaMinutos || 0), 0) / stageLotesCount)
       : 0;
@@ -318,14 +332,14 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // Alert: Lotes sin movimiento > 8 horas
   filteredBatches
-    .filter(b => b.etapaActual !== 'embarque' && b.tiempoEnEtapaMinutos && b.tiempoEnEtapaMinutos > 480)
+    .filter(b => !isDeliveredBatch(b) && b.tiempoEnEtapaMinutos && b.tiempoEnEtapaMinutos > 480)
     .slice(0, 3)
     .forEach(b => {
       generatedAlerts.push({
         id: `alt-mov-${b.id}`,
         level: b.tiempoEnEtapaMinutos! > 3000 ? 'crítico' : 'advertencia',
         title: 'Lote Retenido sin Movimiento',
-        desc: `Tarv. ${b.tarjetaViajera} detenido en ${STAGES.find(s => s.id === b.etapaActual)?.name || b.etapaActual} por soplado residual.`,
+        desc: `Tarv. ${b.tarjetaViajera} detenido en ${STAGES.find(s => s.id === getBatchStageId(b))?.name || getBatchStageId(b)} por soplado residual.`,
         target: b.id,
         time: `${Math.round(b.tiempoEnEtapaMinutos! / 60)} horas`
       });
@@ -1345,7 +1359,7 @@ export const PipelineLoteView: React.FC = () => {
   const [newOrderId, setNewOrderId] = useState('');
 
   const tenantBatches = batches.filter(
-    b => b.tenantId === currentTenant.id && b.status !== ('ARCHIVED' as any)
+    b => b.tenantId === currentTenant.id && !isArchivedBatch(b)
   );
   const loteStages = STAGES.filter(stage => stage.id !== 'estabilizacion');
   const normalizeLoteStage = (stage: StageId) => stage === 'estabilizacion' ? 'aduana' : stage;
@@ -1441,7 +1455,7 @@ export const PipelineLoteView: React.FC = () => {
     );
     if (!matchedBatch || scannedLots[matchedBatch.id]) return;
 
-    const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(matchedBatch.stage));
+    const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(getBatchStageId(matchedBatch)));
     const nextStage = loteStages[currentIdx + 1]?.id;
     setSelectedBatchId(matchedBatch.id);
     setScannedLots(prev => ({ ...prev, [matchedBatch.id]: true }));
@@ -1474,15 +1488,15 @@ export const PipelineLoteView: React.FC = () => {
     if (filtroLote && !b.id.toLowerCase().includes(filtroLote.toLowerCase())) return false;
     if (filtroModelo && modelVal !== filtroModelo) return false;
     if (filtroColor && b.color !== filtroColor) return false;
-    if (filtroEtapa && normalizeLoteStage(b.stage) !== filtroEtapa) return false;
+    if (filtroEtapa && normalizeLoteStage(getBatchStageId(b)) !== filtroEtapa) return false;
 
     // Estatus filter: En tiempo, Alerta, Crítico, Detenido, Embarcado
     if (filtroEstatus) {
-      if (filtroEstatus === 'En tiempo' && (currentStatus !== 'OPTIMO' || b.stage === 'embarque')) return false;
+      if (filtroEstatus === 'En tiempo' && (currentStatus !== 'OPTIMO' || isDeliveredBatch(b))) return false;
       if (filtroEstatus === 'Alerta' && currentStatus !== 'ALERTA') return false;
       if (filtroEstatus === 'Crítico' && currentStatus !== 'CRITICO') return false;
       if (filtroEstatus === 'Detenido' && currentStatus !== 'DETENIDO') return false;
-      if (filtroEstatus === 'Entregado' && b.stage !== 'embarque') return false;
+      if (filtroEstatus === 'Entregado' && !isDeliveredBatch(b)) return false;
     }
 
     if (filtroFechaCompromiso && !currentFechaCompromiso.includes(filtroFechaCompromiso)) return false;
@@ -1493,24 +1507,24 @@ export const PipelineLoteView: React.FC = () => {
   });
 
   // KPI Calculations responsive to filters
-  const lotesActivos = filteredBatches.filter(b => b.stage !== 'embarque').length;
-  const paresActivos = filteredBatches.filter(b => b.stage !== 'embarque').reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
+  const lotesActivos = filteredBatches.filter(b => !isDeliveredBatch(b)).length;
+  const paresActivos = filteredBatches.filter(b => !isDeliveredBatch(b)).reduce((acc, b) => acc + getBatchPairs(b), 0);
   const baseDateAnchor = new Date('2026-05-25');
   const lotesVencidos = filteredBatches.filter(b => {
     const commitment = b.fechaCompromiso ? new Date(b.fechaCompromiso) : null;
-    return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && b.stage !== 'embarque';
+    return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && !isDeliveredBatch(b);
   }).length;
   const paresVencidos = filteredBatches
     .filter(b => {
       const commitment = b.fechaCompromiso ? new Date(b.fechaCompromiso) : null;
-      return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && b.stage !== 'embarque';
+      return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && !isDeliveredBatch(b);
     })
     .reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
-  const lotesEmbarcadosHoy = filteredBatches.filter(b => b.stage === 'embarque' && (b.lastUpdate || b.ultimoEscaneo || '').startsWith('2026-05-25')).length;
+  const lotesEmbarcadosHoy = filteredBatches.filter(b => isDeliveredBatch(b) && (b.lastUpdate || b.ultimoEscaneo || '').startsWith('2026-05-25')).length;
 
   // Bottleneck Stage calculation
   const stageStatsMap = loteStages.filter(s => s.id !== 'embarque').map(st => {
-    const stBatches = filteredBatches.filter(b => normalizeLoteStage(b.stage) === st.id);
+    const stBatches = filteredBatches.filter(b => normalizeLoteStage(getBatchStageId(b)) === st.id);
     const avgDuration = stBatches.length > 0
       ? stBatches.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0) / stBatches.length
       : 0;
@@ -1609,16 +1623,6 @@ export const PipelineLoteView: React.FC = () => {
     m => m.id === (selectedBatch?.modelId || '') || m.name === (selectedBatch?.modelName || '')
   );
 
-  // Simulated CSV report export
-  const handleExportDataExcel = () => {
-    addAuditLog(
-      'SEGURIDAD',
-      'EXPORT_BATCH_PIPELINE',
-      `Listado de Pipeline por Lote exportado a archivo CSV por usuario en ${currentTenant.name}`
-    );
-    alert(`📊 Descarga Simulada: El reporte "Pipeline_Lotes_${currentTenant.id}.csv" ha sido empaquetado y enviado al navegador con ${filteredBatches.length} registros con estricto aislamiento de tenant.`);
-  };
-
   // Simulated TV Label print trigger
   const handlePrintLabelTV = () => {
     addAuditLog(
@@ -1655,14 +1659,6 @@ export const PipelineLoteView: React.FC = () => {
         </div>
         
         <div className="flex gap-2">
-          <button 
-            onClick={handleExportDataExcel}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white rounded-lg text-xs font-mono font-bold border border-slate-700 transition cursor-pointer"
-          >
-            <Download className="w-4 h-4 text-cyan-400" />
-            Exportar CSV
-          </button>
-          
           <button 
             onClick={() => setIsModalOpen(true)}
             className="flex items-center gap-1.5 px-4 py-2 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 rounded-lg text-xs text-slate-950 font-bold shadow-lg shadow-cyan-900/35 cursor-pointer transform active:scale-95 transition"
@@ -1927,8 +1923,8 @@ export const PipelineLoteView: React.FC = () => {
           
           <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin snap-x">
             {loteStages.map(stage => {
-              const colBatches = filteredBatches.filter(b => normalizeLoteStage(b.stage) === stage.id);
-              const colParesCount = colBatches.reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
+              const colBatches = filteredBatches.filter(b => normalizeLoteStage(getBatchStageId(b)) === stage.id);
+              const colParesCount = colBatches.reduce((acc, b) => acc + getBatchPairs(b), 0);
               const totalStageTime = colBatches.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0);
               const avgStageTime = colBatches.length > 0 ? Math.round(totalStageTime / colBatches.length) : 0;
               
@@ -1996,7 +1992,7 @@ export const PipelineLoteView: React.FC = () => {
                         let statusColorClasses = "border-emerald-700/60 bg-emerald-950/20 text-emerald-400";
                         let statusText = "En tiempo";
 
-                        if (b.stage === 'embarque') {
+                        if (isDeliveredBatch(b)) {
                           statusColorClasses = "border-emerald-700/60 bg-emerald-950/20 text-emerald-400";
                           statusText = "Entregado";
                         } else if (b.status === 'DETENIDO') {
@@ -2174,10 +2170,10 @@ export const PipelineLoteView: React.FC = () => {
                     <div className="space-y-1.5">
                       <div className="flex justify-between">
                         <span className="text-slate-500">Estación Actual:</span>
-                        <span className="text-slate-300 capitalize">{getLoteStageName(selectedBatch.stage)}</span>
+                        <span className="text-slate-300 capitalize">{getLoteStageName(getBatchStageId(selectedBatch))}</span>
                       </div>
                       <div className="w-full h-1 bg-slate-950 rounded overflow-hidden">
-                        <div className="h-full bg-cyan-500" style={{ width: `${getStageProgress(selectedBatch.stage)}%` }}></div>
+                        <div className="h-full bg-cyan-500" style={{ width: `${getStageProgress(getBatchStageId(selectedBatch))}%` }}></div>
                       </div>
                     </div>
                   </div>
@@ -2193,7 +2189,7 @@ export const PipelineLoteView: React.FC = () => {
                     <div className="absolute top-4 bottom-4 left-3 border-l border-slate-800 border-dashed"></div>
 
                     {loteStages.map((st, sIdx) => {
-                      const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(selectedBatch.stage));
+                      const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(getBatchStageId(selectedBatch)));
                       const isPast = sIdx < currentIdx;
                       const isCurrent = sIdx === currentIdx;
 
@@ -2371,7 +2367,8 @@ export const PipelineLoteView: React.FC = () => {
 
                   let statusText = "En tiempo";
                   let statClass = "bg-emerald-950/50 text-emerald-400 border border-emerald-900";
-                  if (b.stage === 'embarque') {
+                  const batchStage = getBatchStageId(b);
+                  if (isDeliveredBatch(b)) {
                     statusText = "Entregado";
                     statClass = "bg-emerald-950/50 text-emerald-400 border border-emerald-900";
                   } else if (currentStatus === 'DETENIDO') {
@@ -2399,10 +2396,10 @@ export const PipelineLoteView: React.FC = () => {
                       <td className="p-3 text-slate-500">{b.tarjetaViajera || `TV-${b.id}`}</td>
                       <td className="p-3 text-slate-200">{displayModel}</td>
                       <td className="p-3 text-slate-300">{b.color}</td>
-                      <td className="p-3 text-right font-bold">{(b.totalPares || b.quantityShoes || 0).toLocaleString('es-MX')}</td>
-                      <td className="p-3 text-slate-500 uppercase font-bold text-[9px]">{getPreviousLoteStageName(b.stage)}</td>
-                      <td className="p-3 bg-slate-900/20 text-slate-300 uppercase font-bold text-[9px]">{getLoteStageName(b.stage)}</td>
-                      <td className="p-3 text-right font-medium">{(b.paresEnEtapa || b.totalPares || b.quantityShoes || 0).toLocaleString('es-MX')}</td>
+                      <td className="p-3 text-right font-bold">{getBatchPairs(b).toLocaleString('es-MX')}</td>
+                      <td className="p-3 text-slate-500 uppercase font-bold text-[9px]">{getPreviousLoteStageName(batchStage)}</td>
+                      <td className="p-3 bg-slate-900/20 text-slate-300 uppercase font-bold text-[9px]">{getLoteStageName(batchStage)}</td>
+                      <td className="p-3 text-right font-medium">{(b.paresEnEtapa || getBatchPairs(b)).toLocaleString('es-MX')}</td>
                       <td className="p-3 text-slate-400">{formatEtapaTime(b.tiempoEnEtapaMinutos)}</td>
                       <td className="p-3 text-slate-400">{displayFecha}</td>
                       <td className="p-3 text-center">
@@ -2614,7 +2611,7 @@ export const PipelineLoteView: React.FC = () => {
                 </div>
                 <div>
                   <span className="text-slate-500 block">ESTACION ACTUAL:</span>
-                  <span className="font-bold text-yellow-500 uppercase">{selectedBatch.stage.replace('_', ' ')}</span>
+                  <span className="font-bold text-yellow-500 uppercase">{getBatchStageId(selectedBatch).replace('_', ' ')}</span>
                 </div>
                 <div>
                   <span className="text-slate-500 block">RESPONSABLE ACTUAL:</span>
@@ -3009,11 +3006,12 @@ export const PipelinePedidoView: React.FC = () => {
 
   // 1. Core calculation per order (taking isolated Tenant data)
   const tenantOrders = orders.filter(o => o.tenantId === currentTenant.id);
-  const tenantBatches = batches.filter(b => b.tenantId === currentTenant.id && b.status !== ('ARCHIVED' as any));
+  const tenantBatches = batches.filter(b => b.tenantId === currentTenant.id && !isArchivedBatch(b));
 
   const ordersWithMetrics = tenantOrders.map(o => {
     const orderBatches = tenantBatches.filter(b => b.orderId === o.id);
-    const totalPares = o.totalPares || o.quantity || 1;
+    const committedBatchPairs = orderBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
+    const totalPares = committedBatchPairs || o.totalPares || o.quantity || 0;
 
     // Pairs per stage list initialization
     const pairsByStage: Record<string, number> = {
@@ -3031,8 +3029,8 @@ export const PipelinePedidoView: React.FC = () => {
     let countWithTime = 0;
 
     orderBatches.forEach(b => {
-      const stage = b.stage || 'alta_pedido';
-      const qty = b.totalPares || b.quantityShoes || 0;
+      const stage = getBatchStageId(b);
+      const qty = getBatchPairs(b);
       if (pairsByStage[stage] !== undefined) {
         pairsByStage[stage] += qty;
       } else {
@@ -3048,7 +3046,7 @@ export const PipelinePedidoView: React.FC = () => {
       }
     });
 
-    const progress = Math.min(100, Math.round(weightedSum / totalPares));
+    const progress = totalPares > 0 ? Math.min(100, Math.round(weightedSum / totalPares)) : 0;
     const avgTimeMin = countWithTime > 0 ? Math.round(totalTimeMin / countWithTime) : 180; // default to 3 hours if none
 
     // Dominant stage calculation
@@ -3098,7 +3096,9 @@ export const PipelinePedidoView: React.FC = () => {
       pairsByStage,
       batchesCount: orderBatches.length,
       shippedPairs: pairsByStage['embarque'] || 0,
-      inProcessPairs: totalPares - (pairsByStage['embarque'] || 0)
+      inProcessPairs: orderBatches
+        .filter(b => !isDeliveredBatch(b))
+        .reduce((sum, b) => sum + getBatchPairs(b), 0)
     };
   });
 
@@ -3180,15 +3180,6 @@ export const PipelinePedidoView: React.FC = () => {
     setFiltroEtapaDominante('');
   };
 
-  const handleExportCSVReport = () => {
-    addAuditLog(
-      'REPORTES',
-      'EXPORT_ORDER_PIPELINE',
-      `Exportado reporte consolidado de Pipeline por Pedido para tenant: ${currentTenant.name}`
-    );
-    alert(`📊 Descarga Simulada: Archivo "Pipeline_Pedidos_Consolidado_${currentTenant.id}.csv" empaquetado para el cliente con ${filteredOrders.length} registros.`);
-  };
-
   // Stacked Bar Chart data: Top 5 orders by Volume
   const stackedChartData = filteredOrders.slice(0, 5).map(o => ({
     name: o.id,
@@ -3212,7 +3203,7 @@ export const PipelinePedidoView: React.FC = () => {
 
   // Ranking data: Backlog
   const backlogRanking = [...filteredOrders]
-    .map(o => ({ name: o.id, value: o.totalPares - o.shippedPairs }))
+    .map(o => ({ name: o.id, value: o.inProcessPairs }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 4);
 
@@ -3260,16 +3251,6 @@ export const PipelinePedidoView: React.FC = () => {
           <p className="text-xs text-slate-400 font-sans">
             Visibilidad de entrega comercial, lotes por etapa, riesgos e inventarios.
           </p>
-        </div>
-
-        <div className="flex gap-2">
-          <button 
-            onClick={handleExportCSVReport}
-            className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-bold border border-slate-700 transition cursor-pointer"
-          >
-            <Download className="w-4 h-4 text-cyan-400" />
-            Descargar CSV Consolidado
-          </button>
         </div>
       </div>
 
@@ -4328,19 +4309,6 @@ export const ProduccionAreaView: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-          {can('produccion_area.export') && (
-            <button 
-              onClick={() => {
-                addAuditLog('PRODUCCION', 'DATA_EXPORT', `Descarga simulada de reporte operativo de eficiencia para el tenant ${currentTenant.id}`);
-                alert(`📥 Descarga Simulada: El reporte "Produccion_OEE_Eficiencia_${currentTenant.id}.csv" ha sido compilado con ${finalFilteredLogs.length} registros horarios.`);
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg text-xs font-mono font-bold border border-slate-705 border-slate-700 transition cursor-pointer"
-            >
-              <Download className="w-4 h-4 text-indigo-400" />
-              Descargar Reporte OEE
-            </button>
-          )}
-          
           {can('produccion_area.create_log') && (
             <button
               onClick={() => setShowAddLogModal(true)}
@@ -5659,17 +5627,6 @@ export const ModelosProductosView: React.FC = () => {
             Rendimiento histórico de moldes EVA, porcentaje de rechazo / mermas y tiempos de ciclo técnico para el Tenant: <strong className="text-slate-300">{currentTenant.name}</strong>.
           </p>
         </div>
-
-        <button 
-          onClick={() => {
-            addAuditLog('MODELOS', 'EXPORT_PERFORMANCE_METRICS', `Exportación exitosa de matriz de rendimiento del modelo para el tenant: ${currentTenant.id}`);
-            alert(`📥 Exportación exitosa: "Matriz_Rendimiento_Modelos_EVA_${currentTenant.id}.csv" ha sido generada.`);
-          }}
-          className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-705 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition"
-        >
-          <Download className="w-4 h-4 text-cyan-400" />
-          Exportar Datos de Desempeño
-        </button>
       </div>
 
       {/* 1. FILTROS SUPERIORES COMPLETO */}
@@ -6772,19 +6729,6 @@ export const CalidadView: React.FC = () => {
           <p className="text-xs text-slate-400 font-sans">
             Mapeo integral de primeras, segundas, reproceso y merma por inyectoras y bandas. Tenant: <strong className="text-slate-300">{currentTenant.name}</strong>.
           </p>
-        </div>
-
-        <div className="flex gap-2">
-          <button 
-            onClick={() => {
-              addAuditLog('QUALITY', 'EXPORT_PERFORMANCE_METRICS', `Exportación exitosa de matriz de mermas e inspección`);
-              alert(`📥 Exportación exitosa: "Auditoria_Aduana_Calidad_EVA_${currentTenant.id}.csv" generada.`);
-            }}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-705 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition"
-          >
-            <Download className="w-4 h-4 text-pink-400" />
-            Exportar Registro
-          </button>
         </div>
       </div>
 
@@ -8261,20 +8205,6 @@ export const InyeccionView: React.FC = () => {
               + Nuevo reporte de inyección
             </button>
           )}
-          
-          {can('inyeccion.export') && (
-            <button 
-              id="export_inj_btn"
-              onClick={() => {
-                addAuditLog('PRODUCTION', 'EXPORT_INJECTION_SHEET', `Descarga de matriz de eficiencia de inyección`);
-                alert(`📥 Descarga iniciada: "Matriz_EVA_TermoInyeccion_${currentTenant.id}.csv" generada exitosamente.`);
-              }}
-              className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition"
-            >
-              <Download className="w-4 h-4 text-amber-400" />
-              Exportar XLS
-            </button>
-          )}
         </div>
       </div>
 
@@ -9702,20 +9632,6 @@ export const BandaView: React.FC = () => {
               + Nuevo reporte de banda
             </button>
           )}
-          
-          {can('banda.export') && (
-            <button 
-              id="export_bnd_btn"
-              onClick={() => {
-                addAuditLog('PRODUCTION', 'EXPORT_BANDA_SHEET', `Descarga de matriz de eficiencia de banda`);
-                alert(`📥 Descarga iniciada: "Matriz_Banda_${currentTenant.id}.csv"`);
-              }}
-              className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition pointer"
-            >
-              <Download className="w-4 h-4 text-indigo-400" />
-              Exportar XLS
-            </button>
-          )}
         </div>
       </div>
 
@@ -10873,18 +10789,6 @@ export const AduanaLiberacionView: React.FC = () => {
           >
             <PlusCircle className="w-4 h-4 text-slate-950" />
             + Nueva liberación
-          </button>
-          
-          <button 
-            id="export_aduana_btn"
-            onClick={() => {
-              addAuditLog('QUALITY', 'EXPORT_ADUANA_LOGS', `Descarga simulada de bitácora de aduanas`);
-              alert(`📥 Descarga iniciada: "Control_Aduanas_Liberaciones_${currentTenant.id}.csv"`);
-            }}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition cursor-pointer"
-          >
-            <Download className="w-4 h-4 text-cyan-400" />
-            Exportar Bitácora
           </button>
         </div>
       </div>
@@ -12048,18 +11952,6 @@ export const EmbarqueView: React.FC = () => {
           >
             <Printer className="w-4 h-4 text-slate-950" />
             Imprimir Manifiesto ACT
-          </button>
-          
-          <button 
-            id="export_manifest_log_btn"
-            onClick={() => {
-              addAuditLog('QUALITY', 'EXPORT_EMBARQUE_LOGS', `Descarga de reporte general de entregas`);
-              alert(`📥 Descubriendo reporte: "Reporte_Salidas_Logistica_Compromisos_${currentTenant.id}.csv"`);
-            }}
-            className="flex items-center gap-1.5 px-4.5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-mono font-bold rounded-lg transition cursor-pointer"
-          >
-            <Download className="w-4 h-4 text-emerald-400" />
-            Exportar Manifiestos
           </button>
         </div>
       </div>

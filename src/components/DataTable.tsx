@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { ChevronDown, ChevronUp, Download, Eye, RotateCcw, Archive } from 'lucide-react';
+import { ChevronDown, ChevronUp, Eye, RotateCcw, Archive } from 'lucide-react';
 
 interface Column<T> {
   header: string;
@@ -66,27 +66,6 @@ export function DataTable<T>({
     }
   };
 
-  const handleExportCSV = () => {
-    const headers = columns.map(c => c.header).join(',');
-    const rows = sortedData.map(item => {
-      return columns.map(c => {
-        const key = c.accessorKey as string;
-        // Basic resolution
-        const val = (item as any)[key];
-        return typeof val === 'object' ? JSON.stringify(val) : `"${val}"`;
-      }).join(',');
-    });
-
-    const csvContent = "data:text/csv;charset=utf-8," + [headers, ...rows].join('\n');
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `reporte_plasyect_${Date.now()}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-  };
-
   return (
     <div className="bg-white border border-slate-200 rounded-lg overflow-hidden flex flex-col justify-between shadow-sm">
       
@@ -95,14 +74,6 @@ export function DataTable<T>({
         <span className="text-xs font-mono font-bold text-slate-500">
           Mostrando {paginatedData.length} de {data.length} registros totales
         </span>
-        
-        <button 
-          onClick={handleExportCSV}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 hover:border-slate-300 text-xs font-mono font-bold text-blue-600 border border-slate-200 rounded cursor-pointer transition-colors"
-        >
-          <Download className="w-3.5 h-3.5" />
-          Exportar CSV (Informes)
-        </button>
       </div>
 
       {/* Grid Table Container */}

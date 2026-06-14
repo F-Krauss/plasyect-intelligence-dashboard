@@ -1,4 +1,5 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { FileDown, FileSpreadsheet } from 'lucide-react';
 import { useDashboard } from '../../context/DashboardContext';
 import { exportModuleAsPdf, exportModuleAsXlsx } from '../../utils/moduleExport';
@@ -16,6 +17,7 @@ export const ModuleExportActions: React.FC<ModuleExportActionsProps> = ({
 }) => {
   const { currentTenant, addAuditLog } = useDashboard();
   const [busyFormat, setBusyFormat] = useState<'xlsx' | 'pdf' | null>(null);
+  const [portalNode, setPortalNode] = useState<HTMLElement | null>(null);
 
   const fileBaseName = `${moduleName}_${currentTenant.id}_${new Date().toISOString().slice(0, 10)}`;
 
@@ -48,8 +50,26 @@ export const ModuleExportActions: React.FC<ModuleExportActionsProps> = ({
     }
   };
 
-  return (
-    <div className="mb-4 flex justify-end gap-2 print:hidden">
+  useEffect(() => {
+    const header = document.querySelector<HTMLElement>(`#${rootId} > div > :first-child`);
+    if (!header) {
+      setPortalNode(null);
+      return;
+    }
+
+    const actionContainer = header.children[1] instanceof HTMLElement ? header.children[1] : header;
+    const slot = document.createElement('div');
+    slot.className = 'module-export-actions-slot flex gap-2 print:hidden';
+    actionContainer.appendChild(slot);
+    setPortalNode(slot);
+
+    return () => {
+      slot.remove();
+    };
+  }, [rootId, moduleId]);
+
+  const actions = (
+    <>
       <button
         type="button"
         onClick={() => runExport('xlsx')}
@@ -70,6 +90,12 @@ export const ModuleExportActions: React.FC<ModuleExportActionsProps> = ({
         <FileDown className="h-4 w-4" />
         PDF
       </button>
-    </div>
+    </>
   );
+
+  if (portalNode) {
+    return createPortal(actions, portalNode);
+  }
+
+  return <div className="mb-4 flex justify-end gap-2 print:hidden">{actions}</div>;
 };

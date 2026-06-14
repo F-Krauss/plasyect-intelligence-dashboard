@@ -1,8 +1,6 @@
 import React, { useState } from 'react';
 import {
   Bell,
-  Wifi,
-  WifiOff,
   ShieldAlert,
   Lock,
   CheckCircle2,
@@ -21,11 +19,7 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
     currentUser,
     changeRole,
     verifyOTP,
-    clear2FA,
-    isOffline,
-    toggleOffline,
     offlineQueue,
-    audits
   } = useDashboard();
 
   const [isRoleDropdownOpen, setIsRoleDropdownOpen] = useState(false);
@@ -76,34 +70,6 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
 
       {/* User settings, clock & actions */}
       <div className="flex items-center gap-2 md:gap-4 shrink-0">
-        {/* Connection Status Button */}
-        <button 
-          onClick={toggleOffline}
-          title={isOffline ? "Modo Offline Activo. Acciones en cola local." : "Conexión a Servidor Estable."}
-          className={`px-3 py-1.5 rounded-lg border cursor-pointer hover:bg-opacity-80 transition-colors flex items-center gap-1.5 text-xs font-mono font-bold ${
-            isOffline 
-              ? 'bg-red-50 border-red-200 text-red-600' 
-              : 'bg-emerald-50 border-emerald-200 text-emerald-700'
-          }`}
-        >
-          {isOffline ? (
-            <>
-              <WifiOff className="w-4 h-4 animate-bounce" />
-              <span className="hidden sm:inline">OFFLINE</span>
-            </>
-          ) : (
-            <>
-              <Wifi className="w-4 h-4" />
-              <span className="hidden sm:inline">ONLINE</span>
-            </>
-          )}
-          {offlineQueue.length > 0 && (
-            <span className="bg-amber-600 text-white rounded-full px-1.5 py-0.5 text-[9px] leading-none">
-              {offlineQueue.length}
-            </span>
-          )}
-        </button>
-
         {/* Audit Log Notifier */}
         <div className="relative">
           <div className="p-2 rounded-lg bg-slate-50 border border-slate-200 text-slate-500 hover:text-blue-600 hover:bg-slate-100 transition-colors cursor-pointer flex items-center gap-1">
@@ -129,9 +95,6 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
 
               {isRoleDropdownOpen && (
                 <div className="absolute right-0 top-6 dropdown-menu bg-white border border-slate-200 rounded shadow-xl w-56 p-1 z-50 space-y-0.5 text-slate-800">
-                  <div className="px-3 py-1.5 text-[9px] font-bold tracking-wider text-slate-400 border-b border-slate-100 uppercase">
-                    Roles Perfiles Plasyect
-                  </div>
                   {(['DIRECTOR_GENERAL', 'LIDER_ADMINISTRACION', 'LIDER_INYECCION', 'SUPERVISOR_CALIDAD'] as Role[]).map(role => (
                     <button
                       key={role}

@@ -9,8 +9,6 @@ import {
   History,
   FolderTree,
   Settings,
-  Tv,
-  Users,
   ChevronLeft,
   ChevronRight,
   X
@@ -26,7 +24,7 @@ interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab, isMobileOpen, onClose }) => {
-  const { currentTenant, can } = useDashboard();
+  const { can } = useDashboard();
   const [isCollapsed, setIsCollapsed] = useState<boolean>(false);
 
   const handleNavClick = (id: string) => {
@@ -50,14 +48,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab, isM
 
   // Group items by category to make it look like a highly structured industrial enterprise application
   const categories = ['OPERACIONES', 'PRODUCTIVIDAD', 'SEGUIMIENTO', 'ADMIN', 'AUDITORIA', 'SISTEMA'];
-
-  const getTenantBadgeColor = () => {
-    switch(currentTenant.id) {
-      case 'plasyect_suelas': return 'border-emerald-300 bg-emerald-50 text-emerald-800';
-      case 'plasyect_sandalias': return 'border-sky-300 bg-sky-50 text-sky-800';
-      default: return 'border-indigo-300 bg-indigo-50 text-indigo-800';
-    }
-  };
 
   return (
     <aside className={[
@@ -96,15 +86,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab, isM
             </div>
           </div>
           <p className="text-blue-100 text-[10px] tracking-widest font-bold font-mono mt-1">INTELLIGENCE DASHBOARD</p>
-
-          {/* Tenant Active Badge integrated cleanly */}
-          <div className={`mt-3 px-2 py-1.5 rounded-sm border text-[9px] font-mono leading-tight tracking-wide ${getTenantBadgeColor()}`}>
-            <div className="font-bold flex items-center gap-1 mb-0.5 uppercase">
-              <span className="w-1.5 h-1.5 rounded-full bg-current animate-ping"></span>
-              Tenancy:
-            </div>
-            <div className="truncate text-white font-sans font-bold">{currentTenant.name}</div>
-          </div>
         </div>
       ) : (
         <div className="p-4 bg-blue-800 shrink-0 select-none flex flex-col items-center gap-2">
@@ -116,7 +97,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab, isM
           >
             <ChevronRight className="w-4 h-4" />
           </button>
-          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse mt-1" title={currentTenant.name}></span>
         </div>
       )}
 
