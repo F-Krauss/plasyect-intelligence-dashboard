@@ -21,7 +21,7 @@ import { DataTable } from '../components/DataTable';
 import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
 import { STAGES } from '../data/appConfig';
-import { backendEnabled, dashboardApi, type EjecutivoData, type MovimientoRow } from '../api/dashboardApi';
+import { backendEnabled, dashboardApi, type DailyProductionRow, type EjecutivoData, type ErpOperationalResponse, type ModelPerformanceRow, type MovimientoRow } from '../api/dashboardApi';
 import { AppUser, Batch, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
   DollarSign, 
@@ -80,9 +80,9 @@ export const DashboardEjecutivoView: React.FC = () => {
   const { orders, batches, defects, audits, exchangeRate, currentTenant } = useDashboard();
   
   // Base date anchor representing the current local time for days-left calculations
-  const BASE_DATE = new Date('2026-05-25');
-  const DEFAULT_FECHA_INICIO = '2026-04-20';
-  const DEFAULT_FECHA_FIN = '2026-06-15';
+  const BASE_DATE = new Date();
+  const DEFAULT_FECHA_FIN = new Date().toISOString().slice(0, 10);
+  const DEFAULT_FECHA_INICIO = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
   const SEMAPHORE = {
     ok: {
       fill: '#16a34a',
@@ -147,14 +147,14 @@ export const DashboardEjecutivoView: React.FC = () => {
   const [riskOrderLimit, setRiskOrderLimit] = useState<10 | 20 | 'ALL'>(10);
 
   // Real ERP data from BixApp (FDB → Supabase → backend)
-  const [erpData, setErpData] = useState<EjecutivoData>({ produccion: [], calidad: [] });
+  const [erpData, setErpData] = useState<ErpOperationalResponse | null>(null);
   const [erpLoading, setErpLoading] = useState(false);
 
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
     setErpLoading(true);
-    dashboardApi.erpEjecutivo(fechaInicio, fechaFin)
+    dashboardApi.erpOperativo(fechaInicio, fechaFin)
       .then(data => { if (!cancelled) setErpData(data); })
       .catch(err => { if (!cancelled) console.warn('ERP ejecutivo fetch failed', err); })
       .finally(() => { if (!cancelled) setErpLoading(false); });
@@ -164,7 +164,7 @@ export const DashboardEjecutivoView: React.FC = () => {
   const handleRefresh = () => {
     setIsRefreshing(true);
     if (backendEnabled) {
-      dashboardApi.erpEjecutivo(fechaInicio, fechaFin)
+      dashboardApi.erpOperativo(fechaInicio, fechaFin)
         .then(data => setErpData(data))
         .catch(err => console.warn('ERP refresh failed', err))
         .finally(() => setIsRefreshing(false));
@@ -214,11 +214,21 @@ export const DashboardEjecutivoView: React.FC = () => {
     return true;
   });
 
-  const dashboardClientOptions = Array.from(new Set(tenantOrders.map(o => o.clientName || o.cliente || '').filter(Boolean)));
-  const dashboardModelOptions = Array.from(new Set(tenantBatches.map(b => b.modelo || b.modelName || '').filter(Boolean)));
+  const dashboardClientOptions = Array.from(new Set([
+    ...tenantOrders.map(o => o.clientName || o.cliente || '').filter(Boolean),
+    ...(erpData?.catalogs.clients.map(c => String(c.name || c.nombre || '')).filter(Boolean) ?? [])
+  ]));
+  const dashboardModelOptions = Array.from(new Set([
+    ...tenantBatches.map(b => b.modelo || b.modelName || '').filter(Boolean),
+    ...(erpData?.catalogs.models.map(m => String(m.name || m.nombre || '')).filter(Boolean) ?? []),
+    ...(erpData?.models.map(m => m.modeloName).filter(Boolean) ?? [])
+  ]));
 
-  const calidadSource = erpData.calidad;
-  const prodSource = erpData.produccion;
+  const hasPeriodData = erpData?.meta.hasPeriodData ?? true;
+  const activeMetric = (value: number | null | undefined) => hasPeriodData ? (value ?? 0).toLocaleString() : '--';
+  const pctMetric = (value: number | null | undefined) => hasPeriodData ? `${value ?? 0}%` : '--';
+  const calidadSource = erpData?.quality ?? [];
+  const prodSource = erpData?.productionHourly ?? [];
 
   // Filter application - Quality records (date already filtered by API; apply remaining filters)
   const filteredQuality = calidadSource.filter(q => {
@@ -250,15 +260,21 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // 2. 第一 KPI Ratios (8 indicators)
   // - Pedidos activos: Status PENDIENTE or PROCESANDO
-  const kpiActiveOrdersCount = filteredOrders.filter(o => o.status === 'PROCESANDO' || o.status === 'PENDIENTE').length;
+  const kpiActiveOrdersCount = erpData
+    ? erpData.active.orders
+    : filteredOrders.filter(o => o.status === 'PROCESANDO' || o.status === 'PENDIENTE').length;
 
   // - Lotes activos: etapa Actual !== 'embarque'
-  const kpiActiveBatchesCount = filteredBatches.filter(b => !isDeliveredBatch(b)).length;
+  const kpiActiveBatchesCount = erpData
+    ? erpData.active.batches
+    : filteredBatches.filter(b => !isDeliveredBatch(b)).length;
 
   // - Pares activos en planta: Suma totalPares de lotes activos
-  const kpiActiveParesCount = filteredBatches
-    .filter(b => !isDeliveredBatch(b))
-    .reduce((sum, b) => sum + getBatchPairs(b), 0);
+  const kpiActiveParesCount = erpData
+    ? erpData.active.pairs
+    : filteredBatches
+      .filter(b => !isDeliveredBatch(b))
+      .reduce((sum, b) => sum + getBatchPairs(b), 0);
 
   // - Producción del día: Suma producciónReal del día más reciente en el rango
   const kpiDailyProdCount = todayProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
@@ -267,37 +283,41 @@ export const DashboardEjecutivoView: React.FC = () => {
   const activeBatchesForProgress = filteredBatches.filter(b => !isDeliveredBatch(b));
   const totalParesForProgress = activeBatchesForProgress.reduce((sum, b) => sum + getBatchPairs(b), 0);
   const sumAvancePares = activeBatchesForProgress.reduce((sum, b) => sum + ((b.porcentajeAvance || 0) * getBatchPairs(b)), 0);
-  const kpiGlobalProgress = totalParesForProgress > 0 ? Math.round(sumAvancePares / totalParesForProgress) : 68;
+  const kpiGlobalProgress = erpData
+    ? erpData.wipSummary.globalProgress
+    : totalParesForProgress > 0 ? Math.round(sumAvancePares / totalParesForProgress) : 0;
 
   // - Pedidos en riesgo: 'ALTO' / 'VENCIDO'
-  const kpiOrdersInRiskCount = filteredOrders.filter(o => o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO').length;
+  const kpiOrdersInRiskCount = erpData
+    ? erpData.orderRisk.totalRisk
+    : filteredOrders.filter(o => o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO').length;
 
   // - Porcentaje defectivo global: (merma + segundos) / totalInspeccionado
   const totalInspected = filteredQuality.reduce((sum, q) => sum + q.totalInspeccionado, 0);
   const totalDefectives = filteredQuality.reduce((sum, q) => sum + (q.merma + q.segundas), 0);
-  const kpiDefectivePct = totalInspected > 0 ? Number(((totalDefectives / totalInspected) * 100).toFixed(2)) : 1.95;
+  const kpiDefectivePct = totalInspected > 0 ? Number(((totalDefectives / totalInspected) * 100).toFixed(2)) : 0;
 
   // - Cumplimiento contra meta: real / meta
   const totalRealPrs = filteredProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
   const totalMetaPrs = filteredProdHora.reduce((sum, p) => sum + p.metaHora, 0);
-  const kpiMetaCompliance = totalMetaPrs > 0 ? Number(((totalRealPrs / totalMetaPrs) * 100).toFixed(1)) : 89.2;
+  const kpiMetaCompliance = totalMetaPrs > 0 ? Number(((totalRealPrs / totalMetaPrs) * 100).toFixed(1)) : 0;
   const productionStdDev = getStdDev(filteredProdHora.map(p => p.produccionReal - p.metaHora));
   const complianceStdDev = getStdDev(filteredProdHora.map(p => p.eficiencia));
   const defectStdDev = getStdDev(filteredQuality.map(q => q.porcentajeDefectivo));
-  const progressStdDev = getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
-  const riskStdDev = getStdDev(filteredOrders.map(o => (o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO') ? 1 : 0));
+  const progressStdDev = erpData ? 0 : getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
+  const riskStdDev = erpData ? 0 : getStdDev(filteredOrders.map(o => (o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO') ? 1 : 0));
   const todayMetaPrs = todayProdHora.reduce((sum, p) => sum + p.metaHora, 0);
   const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, todayMetaPrs, productionStdDev);
-  const kpiProgressStatus = classifyAgainstTarget(kpiGlobalProgress, 70, progressStdDev);
-  const kpiRiskStatus = classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev);
+  const kpiProgressStatus = hasPeriodData ? classifyAgainstTarget(kpiGlobalProgress, 70, progressStdDev) : 'neutral';
+  const kpiRiskStatus = hasPeriodData ? classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev) : 'neutral';
   const kpiDefectStatus = classifyLowerIsBetter(kpiDefectivePct, 3, defectStdDev);
   const kpiComplianceStatus = classifyAgainstTarget(kpiMetaCompliance, 100, complianceStdDev);
 
   // Active WIP denominator
-  const totalWIPPares = filteredBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
+  const totalWIPPares = erpData ? erpData.wipSummary.activePairs : filteredBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
 
   // 3. Pipeline Stages mapping & stats
-  const pipelineStages = STAGES.map(st => {
+  const fallbackPipelineStages = STAGES.map(st => {
     const stageBatches = filteredBatches.filter(b => getBatchStageId(b) === st.id);
     const stageLotesCount = stageBatches.length;
     const stageParesCount = stageBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
@@ -324,6 +344,24 @@ export const DashboardEjecutivoView: React.FC = () => {
       wipPct
     };
   });
+  const pipelineStages = erpData?.stagePipeline.length
+    ? erpData.stagePipeline
+      .filter(row => selectedStage === 'TODOS' || row.stageId === selectedStage)
+      .map(row => ({
+        ...(STAGES.find(st => st.id === row.stageId) ?? {
+          id: row.stageId,
+          name: row.stageName,
+          order: 99,
+          color: '#64748b',
+          description: ''
+        }),
+        lotCount: row.batches,
+        paresCount: row.pairs,
+        avgMins: row.avgMinutes ?? 0,
+        saturation: row.saturation,
+        wipPct: row.wipPct
+      }))
+    : fallbackPipelineStages;
 
   // 4. Panel derecho de alertas dinámicas (Critical Alerts)
   const generatedAlerts: { id: string; level: 'crítico' | 'advertencia' | 'informativo'; title: string; desc: string; target: string; time: string }[] = [];
@@ -344,17 +382,20 @@ export const DashboardEjecutivoView: React.FC = () => {
     });
 
   // Alert: Pedidos vencidos o próximos a vencer
-  filteredOrders
-    .filter(o => o.riesgoEntrega === 'VENCIDO' || o.riesgoEntrega === 'ALTO')
+  (erpData?.orderRisk.rows ?? filteredOrders)
+    .filter(o => 'risk' in o
+      ? o.risk === 'VENCIDO' || o.risk === 'ALTO'
+      : o.riesgoEntrega === 'VENCIDO' || o.riesgoEntrega === 'ALTO')
     .slice(0, 3)
     .forEach(o => {
+      const risk = 'risk' in o ? o.risk : o.riesgoEntrega;
       generatedAlerts.push({
         id: `alt-ord-${o.id}`,
-        level: o.riesgoEntrega === 'VENCIDO' ? 'crítico' : 'advertencia',
-        title: o.riesgoEntrega === 'VENCIDO' ? 'Pedido Vencido Demorado' : 'Contrato por Vencer',
-        desc: `Cliente ${o.cliente} reporta demora acumulada en línea de inyección. OC: ${o.oc}`,
+        level: risk === 'VENCIDO' ? 'crítico' : 'advertencia',
+        title: risk === 'VENCIDO' ? 'Pedido Vencido Demorado' : 'Contrato por Vencer',
+        desc: `Cliente ${'cliente' in o ? o.cliente : o.clientName} con riesgo FDB. OC: ${o.oc ?? 'N/D'}`,
         target: o.id,
-        time: o.riesgoEntrega === 'VENCIDO' ? 'Plazo Vencido' : 'Próximos 3 días'
+        time: risk === 'VENCIDO' ? 'Plazo Vencido' : 'Próximos 3 días'
       });
     });
 
@@ -378,10 +419,10 @@ export const DashboardEjecutivoView: React.FC = () => {
     generatedAlerts.push({
       id: 'alt-info-ok',
       level: 'informativo',
-      title: 'Planta Operando Estable',
-      desc: 'Todas las celdas de inyección, mezclado y banda de recortado operan bajo rangos estándar.',
+      title: 'Sin alertas FDB',
+      desc: 'Sin alertas generadas con datos FDB en el periodo.',
       target: 'División Matriz',
-      time: 'Tiempo Real'
+      time: 'Periodo'
     });
   }
 
@@ -489,13 +530,13 @@ export const DashboardEjecutivoView: React.FC = () => {
   const handleShowMoreRiskOrders = () => {
     setRiskOrderLimit(current => current === 10 ? 20 : current === 20 ? 'ALL' : 10);
   };
-  const riskOrdersSource = filteredOrders.filter(o => {
+  const fallbackRiskOrdersSource = filteredOrders.filter(o => {
     const openedAt = new Date(o.fechaAlta || o.createdAt || '');
     const openedByQueryDate = Number.isNaN(openedAt.getTime()) || openedAt <= riskReferenceDate;
     if (!openedByQueryDate) return false;
     return temporalFiltersApplied || !isClosedOrder(o.status || o.estatus);
   });
-  const riskOrders = riskOrdersSource
+  const fallbackRiskOrders = fallbackRiskOrdersSource
     .map(o => {
       // Days remaining
       const commitment = new Date(o.fechaCompromiso || o.deliveryDate || '');
@@ -531,6 +572,29 @@ export const DashboardEjecutivoView: React.FC = () => {
       if (riskDiff !== 0) return riskDiff;
       return a.daysLeft - b.daysLeft;
     });
+  const erpRiskOrders = (erpData?.orderRisk.rows ?? [])
+    .filter(o => temporalFiltersApplied || o.progress < 100)
+    .map(o => ({
+      ...o,
+      clientName: o.cliente,
+      quantity: o.totalPares,
+      modelName: o.modelo || 'Varios modelos',
+      porcentajeAvance: o.progress,
+      deliveryDate: o.fechaCompromiso || '',
+      status: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+      estatus: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+      daysLeft: o.daysLeft ?? 999,
+      dominantStage: STAGES.find(s => s.id === o.dominantStage)?.name || o.dominantStage,
+      displayRisk: o.risk,
+      savedCloseRisk: o.risk,
+      isClosed: o.progress >= 100
+    }))
+    .sort((a, b) => {
+      const riskDiff = riskRank[b.displayRisk] - riskRank[a.displayRisk];
+      if (riskDiff !== 0) return riskDiff;
+      return a.daysLeft - b.daysLeft;
+    });
+  const riskOrders = erpData ? erpRiskOrders : fallbackRiskOrders;
   const displayedRiskOrders = riskOrders.slice(0, riskOrderLimit === 'ALL' ? riskOrders.length : riskOrderLimit);
   const canExpandRiskOrders = riskOrders.length > 10;
   const riskOrderLimitLabel = riskOrderLimit === 'ALL' ? 'TODOS' : riskOrderLimit;
@@ -592,6 +656,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               type="date" 
               value={fechaInicio}
               onChange={(e) => setFechaInicio(e.target.value)}
+              onBlur={(e) => setFechaInicio(e.target.value)}
               className="w-full text-xs font-mono bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:border-cyan-500 focus:outline-none"
             />
           </div>
@@ -604,6 +669,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               type="date" 
               value={fechaFin}
               onChange={(e) => setFechaFin(e.target.value)}
+              onBlur={(e) => setFechaFin(e.target.value)}
               className="w-full text-xs font-mono bg-slate-950 border border-slate-800 rounded p-1.5 text-slate-300 focus:border-cyan-500 focus:outline-none"
             />
           </div>
@@ -700,7 +766,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PEDIDOS ACTIVOS</span>
           <div className="mt-2 text-2xl font-black font-mono text-cyan-400">
-            {kpiActiveOrdersCount}
+            {activeMetric(kpiActiveOrdersCount)}
           </div>
           <span className="text-[10px] text-slate-550 block mt-1 font-mono">Sin archivadas/term.</span>
         </div>
@@ -709,7 +775,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">LOTES ACTIVOS</span>
           <div className="mt-2 text-2xl font-black font-mono text-blue-400">
-            {kpiActiveBatchesCount}
+            {activeMetric(kpiActiveBatchesCount)}
           </div>
           <span className="text-[10px] text-slate-550 block mt-1 font-mono">En líneas operativas</span>
         </div>
@@ -718,7 +784,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PARES EN PLANTA</span>
           <div className="mt-2 text-xl font-black font-mono text-indigo-400">
-            {kpiActiveParesCount.toLocaleString()}
+            {activeMetric(kpiActiveParesCount)}
           </div>
           <span className="text-[10px] text-slate-550 block mt-1 font-mono">Tránsito WIP Total</span>
         </div>
@@ -738,10 +804,10 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiProgressStatus].border} ${SEMAPHORE[kpiProgressStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">AVANCE GLOBAL</span>
           <div className="mt-2 flex items-baseline gap-1">
-            <span className={`text-2xl font-black font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>{kpiGlobalProgress}%</span>
+            <span className={`text-2xl font-black font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>{pctMetric(kpiGlobalProgress)}</span>
           </div>
           <div className="w-full bg-slate-950 rounded-full h-1 mt-1.5 overflow-hidden">
-            <div className="h-full transition-all duration-300" style={{ width: `${Math.min(kpiGlobalProgress, 100)}%`, backgroundColor: SEMAPHORE[kpiProgressStatus].fill }} />
+            <div className="h-full transition-all duration-300" style={{ width: `${hasPeriodData ? Math.min(kpiGlobalProgress, 100) : 0}%`, backgroundColor: SEMAPHORE[kpiProgressStatus].fill }} />
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>Meta 70% / σ {Math.round(progressStdDev)}</span>
         </div>
@@ -750,7 +816,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md transition-colors ${SEMAPHORE[kpiRiskStatus].border} ${SEMAPHORE[kpiRiskStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PEDIDOS EN RIESGO</span>
           <div className={`mt-2 text-2xl font-black font-mono ${SEMAPHORE[kpiRiskStatus].text}`}>
-            {kpiOrdersInRiskCount}
+            {activeMetric(kpiOrdersInRiskCount)}
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiRiskStatus].text}`}>
             Meta 0 / σ {riskStdDev.toFixed(1)}
@@ -926,7 +992,7 @@ export const DashboardEjecutivoView: React.FC = () => {
             <div className="h-[270px] mt-4 flex flex-col items-center justify-center text-center gap-1">
               <Activity className="w-6 h-6 text-slate-700" />
               <p className="text-[11px] font-mono text-slate-500">Sin escaneos de producción en el rango seleccionado.</p>
-              <p className="text-[9px] font-sans text-slate-600">Ajusta las fechas: los escaneos de inyección/banda llegan hasta el 2026-04-20.</p>
+              <p className="text-[9px] font-sans text-slate-600">Ajusta las fechas: ultimo escaneo FDB {erpData?.meta.dataMaxDate ?? '--'}.</p>
             </div>
           ) : (
           <div className="overflow-x-auto mt-4">
@@ -1507,7 +1573,7 @@ export const PipelineLoteView: React.FC = () => {
   // KPI Calculations responsive to filters
   const lotesActivos = filteredBatches.filter(b => !isDeliveredBatch(b)).length;
   const paresActivos = filteredBatches.filter(b => !isDeliveredBatch(b)).reduce((acc, b) => acc + getBatchPairs(b), 0);
-  const baseDateAnchor = new Date('2026-05-25');
+  const baseDateAnchor = new Date();
   const lotesVencidos = filteredBatches.filter(b => {
     const commitment = b.fechaCompromiso ? new Date(b.fechaCompromiso) : null;
     return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && !isDeliveredBatch(b);
@@ -1518,7 +1584,8 @@ export const PipelineLoteView: React.FC = () => {
       return !!commitment && commitment.getTime() < baseDateAnchor.getTime() && !isDeliveredBatch(b);
     })
     .reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
-  const lotesEmbarcadosHoy = filteredBatches.filter(b => isDeliveredBatch(b) && (b.lastUpdate || b.ultimoEscaneo || '').startsWith('2026-05-25')).length;
+  const todayIso = new Date().toISOString().slice(0, 10);
+  const lotesEmbarcadosHoy = filteredBatches.filter(b => isDeliveredBatch(b) && (b.lastUpdate || b.ultimoEscaneo || '').startsWith(todayIso)).length;
 
   // Bottleneck Stage calculation
   const stageStatsMap = loteStages.filter(s => s.id !== 'embarque').map(st => {
@@ -2983,15 +3050,27 @@ export const PipelinePedidoView: React.FC = () => {
   const [filtroEstatus, setFiltroEstatus] = useState('');
   const [filtroRiesgo, setFiltroRiesgo] = useState('');
   const [filtroEtapaDominante, setFiltroEtapaDominante] = useState('');
+  const [operationalData, setOperationalData] = useState<ErpOperationalResponse | null>(null);
+
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    const end = new Date();
+    const start = new Date(end.getTime() - 365 * 24 * 3600 * 1000);
+    dashboardApi.erpOperativo(start.toISOString().slice(0, 10), end.toISOString().slice(0, 10))
+      .then(data => { if (!cancelled) setOperationalData(data); })
+      .catch(err => console.warn('Pipeline pedido: ERP operativo fetch failed', err));
+    return () => { cancelled = true; };
+  }, []);
 
   // Strict stage weights
   const STAGE_WEIGHTS: Record<string, number> = {
-    'alta_pedido': 5,
-    'almacen': 10,
-    'inyeccion': 30,
-    'estabilizacion': 45,
-    'aduana': 60,
-    'banda': 80,
+    'alta_pedido': 14,
+    'almacen': 29,
+    'inyeccion': 43,
+    'estabilizacion': 57,
+    'aduana': 71,
+    'banda': 86,
     'embarque': 100
   };
 
@@ -3004,12 +3083,18 @@ export const PipelinePedidoView: React.FC = () => {
     'banda': 'Banda',
     'embarque': 'Embarque'
   };
+  const mapDeliveryRiskToSignal = (risk: string): 'VERDE' | 'AMARILLO' | 'ROJO' | 'GRIS' => {
+    if (risk === 'VENCIDO' || risk === 'ALTO') return 'ROJO';
+    if (risk === 'MEDIO') return 'AMARILLO';
+    if (risk === 'BAJO') return 'VERDE';
+    return 'GRIS';
+  };
 
   // 1. Core calculation per order (taking isolated Tenant data)
   const tenantOrders = orders.filter(o => o.tenantId === currentTenant.id);
   const tenantBatches = batches.filter(b => b.tenantId === currentTenant.id && !isArchivedBatch(b));
 
-  const ordersWithMetrics = tenantOrders.map(o => {
+  const fallbackOrdersWithMetrics = tenantOrders.map(o => {
     const orderBatches = tenantBatches.filter(b => b.orderId === o.id);
     const committedBatchPairs = orderBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
     const totalPares = committedBatchPairs || o.totalPares || o.quantity || 0;
@@ -3070,7 +3155,7 @@ export const PipelinePedidoView: React.FC = () => {
       risk = 'GRIS';
     } else {
       const commitmentDate = new Date(compStr);
-      const now = new Date('2026-05-25'); // Anchored UTC base
+      const now = new Date();
       const timeDiff = commitmentDate.getTime() - now.getTime();
       const daysDiff = Math.ceil(timeDiff / (1000 * 3600 * 24));
 
@@ -3102,6 +3187,42 @@ export const PipelinePedidoView: React.FC = () => {
         .reduce((sum, b) => sum + getBatchPairs(b), 0)
     };
   });
+  const erpOrdersWithMetrics = (operationalData?.orderPipeline ?? []).map(o => ({
+    id: o.id,
+    tenantId: currentTenant.id,
+    clientId: o.cliente,
+    clientName: o.cliente,
+    modelId: o.modelo || 'varios',
+    modelName: o.modelo || 'Varios modelos',
+    modelo: o.modelo || 'Varios modelos',
+    color: o.color || 'N/D',
+    quantity: o.totalPares,
+    exchangeRate,
+    totalUSD: 0,
+    totalMXN: 0,
+    createdAt: o.fechaAlta || '',
+    deliveryDate: o.fechaCompromiso || '',
+    status: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+    discountAuthorized: false,
+    discountPercentage: 0,
+    cliente: o.cliente,
+    oc: o.oc || undefined,
+    fechaAlta: o.fechaAlta || undefined,
+    fechaCompromiso: o.fechaCompromiso || undefined,
+    totalPares: o.totalPares,
+    estatus: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+    porcentajeAvance: o.progress,
+    riesgoEntrega: o.risk,
+    progress: o.progress,
+    avgTimeMin: o.avgTimeMin ?? 0,
+    dominantStage: o.dominantStage,
+    risk: mapDeliveryRiskToSignal(o.risk),
+    pairsByStage: o.pairsByStage,
+    batchesCount: o.batchesCount,
+    shippedPairs: o.shippedPairs,
+    inProcessPairs: o.inProcessPairs
+  }));
+  const ordersWithMetrics = operationalData?.orderPipeline.length ? erpOrdersWithMetrics : fallbackOrdersWithMetrics;
 
   // Unique attribute pools for Filter dropdowns
   const clientOptions = Array.from(new Set(ordersWithMetrics.map(o => o.cliente || o.clientName || ''))).filter(Boolean);
@@ -3144,12 +3265,12 @@ export const PipelinePedidoView: React.FC = () => {
   const pendingBacklog = Math.max(0, totalCommittedPairs - totalShippedPairs);
 
   // Weighted Average Progress across active/filtered orders
-  const avgProgress = filteredOrders.length > 0 
-    ? Math.round(filteredOrders.reduce((sum, o) => sum + o.progress, 0) / filteredOrders.length)
+  const avgProgress = totalCommittedPairs > 0
+    ? Math.round(filteredOrders.reduce((sum, o) => sum + o.progress * o.totalPares, 0) / totalCommittedPairs)
     : 0;
 
   // Overdue count: past commitment date & not fully shipped/completed
-  const baseDateAnchor = new Date('2026-05-25');
+  const baseDateAnchor = new Date();
   const overdueOrdersCount = filteredOrders.filter(o => {
     const compStr = o.fechaCompromiso || o.deliveryDate;
     if (!compStr) return false;
@@ -3193,14 +3314,10 @@ export const PipelinePedidoView: React.FC = () => {
     'Entrega': o.pairsByStage['embarque'] || 0,
   }));
 
-  // Line Chart Data: Historical progress trend
-  const lineChartData = [
-    { day: 'Día -15', 'Progreso Promedio %': Math.max(0, avgProgress - 42) },
-    { day: 'Día -10', 'Progreso Promedio %': Math.max(0, avgProgress - 25) },
-    { day: 'Día -5', 'Progreso Promedio %': Math.max(0, avgProgress - 12) },
-    { day: 'Día -2', 'Progreso Promedio %': Math.max(0, avgProgress - 4) },
-    { day: 'Hoy', 'Progreso Promedio %': avgProgress },
-  ];
+  const lineChartData = (operationalData?.dailyProduction ?? []).slice(-15).map(row => ({
+    day: row.fecha.slice(5),
+    'Pares Producidos': row.pares
+  }));
 
   // Ranking data: Backlog
   const backlogRanking = [...filteredOrders]
@@ -3545,24 +3662,28 @@ export const PipelinePedidoView: React.FC = () => {
             Pares acumulados por día en pedidos filtrados.
           </p>
           <div className="h-60 overflow-x-auto">
+            {lineChartData.length === 0 ? (
+              <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN DATOS FDB EN PERIODO</div>
+            ) : (
             <div className="min-w-[300px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%">
               <RechartsLineChart
                 data={lineChartData}
                 margin={{ top: 10, right: 15, left: -25, bottom: 5 }}
-              >
+                >
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="day" stroke="#64748b" style={{ fontSize: '9px' }} />
-                <RechartsYAxis domain={[0, 100]} stroke="#64748b" style={{ fontSize: '9px' }} />
+                <RechartsYAxis stroke="#64748b" style={{ fontSize: '9px' }} />
                 <RechartsTooltip
                   contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '8px' }}
                   labelStyle={{ color: '#94a3b8', fontSize: '10px' }}
                   itemStyle={{ fontSize: '10px', color: '#22d3ee' }}
                 />
-                <RechartsLine type="monotone" dataKey="Progreso Promedio %" stroke="#06b6d4" strokeWidth={3} dot={{ r: 4 }} />
+                <RechartsLine type="monotone" dataKey="Pares Producidos" stroke="#06b6d4" strokeWidth={3} dot={{ r: 4 }} />
               </RechartsLineChart>
             </RechartsResponsiveContainer>
             </div>
+            )}
           </div>
         </div>
 
@@ -3893,7 +4014,7 @@ export const ProduccionAreaView: React.FC = () => {
 
   // 2. Vista histórica timescale selector
   // 'tiempo_real' | 'dia' | 'semana' | 'mes' | 'rango'
-  const [timeframe, setTimeframe] = useState<'tiempo_real' | 'dia' | 'semana' | 'mes' | 'rango'>('dia');
+  const [timeframe, setTimeframe] = useState<'tiempo_real' | 'dia' | 'semana' | 'mes' | 'rango'>('rango');
 
   // 3. Filters States
   const [filtroTurno, setFiltroTurno] = useState<string>('');
@@ -3903,9 +4024,30 @@ export const ProduccionAreaView: React.FC = () => {
   const [filtroMaquina, setFiltroMaquina] = useState<string>('');
   const [filtroBanda, setFiltroBanda] = useState<string>('');
   
-  const [selectedFecha, setSelectedFecha] = useState<string>('2026-05-25');
-  const [rangoInicio, setRangoInicio] = useState<string>('2026-05-18');
-  const [rangoFin, setRangoFin] = useState<string>('2026-05-25');
+  const [selectedFecha, setSelectedFecha] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [rangoInicio, setRangoInicio] = useState<string>(() => new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
+  const [rangoFin, setRangoFin] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [operationalData, setOperationalData] = useState<ErpOperationalResponse | null>(null);
+
+  const getProductionQueryRange = (): [string, string] => {
+    if (timeframe === 'rango') return [rangoInicio, rangoFin];
+    if (timeframe === 'semana' || timeframe === 'mes') {
+      const start = new Date(`${selectedFecha}T00:00:00`);
+      start.setDate(start.getDate() - (timeframe === 'semana' ? 7 : 30));
+      return [start.toISOString().slice(0, 10), selectedFecha];
+    }
+    return [selectedFecha, selectedFecha];
+  };
+
+  useEffect(() => {
+    if (!backendEnabled) return;
+    const [start, end] = getProductionQueryRange();
+    let cancelled = false;
+    dashboardApi.erpOperativo(start, end)
+      .then(data => { if (!cancelled) setOperationalData(data); })
+      .catch(err => console.warn('Produccion por area: ERP operativo fetch failed', err));
+    return () => { cancelled = true; };
+  }, [timeframe, selectedFecha, rangoInicio, rangoFin]);
 
   // 4. Modal de nuevo registro state
   const [showAddLogModal, setShowAddLogModal] = useState(false);
@@ -3945,22 +4087,70 @@ export const ProduccionAreaView: React.FC = () => {
     'salidas_tercera': '#f97316'
   };
 
+  const areaKeyFromErp = (area: string): HourlyProductionLog['area'] => {
+    const upper = area.toUpperCase();
+    if (upper.includes('ALMAC')) return 'almacen';
+    if (upper.includes('INYE')) return 'inyeccion';
+    if (upper.includes('ADUANA') || upper.includes('CALIDAD')) return 'aduana';
+    if (upper.includes('BANDA')) return 'banda';
+    if (upper.includes('EMBAR')) return 'embarque';
+    if (upper.includes('FACT') || upper.includes('ENTREGA')) return 'entregas';
+    if (upper.includes('TERCERA')) return 'salidas_tercera';
+    return 'inyeccion';
+  };
+
+  const turnoFromErp = (turno: string): HourlyProductionLog['turno'] => {
+    if (turno === '1') return 'MAÑANA';
+    if (turno === '2') return 'TARDE';
+    return 'NOCHE';
+  };
+
+  const qualityByProductionKey = new Map<string, { reprocesos: number; segundas: number }>();
+  for (const q of operationalData?.quality ?? []) {
+    const key = `${q.fecha}|${q.modelo}|${areaKeyFromErp(q.area)}`;
+    const current = qualityByProductionKey.get(key) ?? { reprocesos: 0, segundas: 0 };
+    current.reprocesos += q.reproceso;
+    current.segundas += q.segundas;
+    qualityByProductionKey.set(key, current);
+  }
+
+  const fdbProductionLogs: HourlyProductionLog[] = (operationalData?.productionHourly ?? []).map((row, index) => {
+    const area = areaKeyFromErp(row.area);
+    const q = qualityByProductionKey.get(`${row.fecha}|${row.modelo}|${area}`) ?? { reprocesos: 0, segundas: 0 };
+    return {
+      id: row.id || `fdb_${row.fecha}_${row.hora}_${area}_${index}`,
+      tenantId: currentTenant.id,
+      fecha: row.fecha,
+      hora: row.hora,
+      turno: turnoFromErp(row.turno),
+      area,
+      tarjetaViajera: row.tarjetaViajera || 'FDB-AGG',
+      responsable: row.responsable || 'FDB',
+      modeloName: row.modelo,
+      color: row.color,
+      metaHora: row.metaHora,
+      produccionReal: row.produccionReal,
+      reprocesos: q.reprocesos,
+      segundas: q.segundas
+    };
+  });
+  const allProductionLogs = [...fdbProductionLogs, ...logs];
+
   // Distinct values for filter options
   const activeResponsables = users.filter(user => user.active).map(user => user.username);
-  const uniqueResponsables = activeResponsables.length > 0 ? activeResponsables : Array.from(new Set(logs.map(l => l.responsable))).filter(Boolean);
-  const uniqueModels = Array.from(new Set(logs.map(l => l.modeloName))).filter(Boolean);
-  const uniqueColors = Array.from(new Set(logs.map(l => l.color))).filter(Boolean);
+  const uniqueResponsables = activeResponsables.length > 0 ? activeResponsables : Array.from(new Set(allProductionLogs.map(l => l.responsable))).filter(Boolean);
+  const uniqueModels = Array.from(new Set(allProductionLogs.map(l => l.modeloName))).filter(Boolean);
+  const uniqueColors = Array.from(new Set(allProductionLogs.map(l => l.color))).filter(Boolean);
 
   // Time-aware filtering based on historical view selector
   const getFilteredLogsByTime = () => {
-    return logs.filter(log => {
+    return allProductionLogs.filter(log => {
       // Strict isolation: only this tenant
       if (log.tenantId !== currentTenant.id) return false;
 
       const dateStr = log.fecha;
       if (timeframe === 'tiempo_real') {
-        // Real-time focuses on today Monday 2026-05-25
-        return dateStr === '2026-05-25';
+        return dateStr === new Date().toISOString().slice(0, 10);
       } else if (timeframe === 'dia') {
         return dateStr === selectedFecha;
       } else if (timeframe === 'semana') {
@@ -4057,7 +4247,7 @@ export const ProduccionAreaView: React.FC = () => {
   // Unrecorded timeline calculation (Tiempo sin registro)
   // Check unique hours of selectedDate (defaults to '2026-05-25')
   const loggedHoursOfSelectedDay = Array.from(new Set(
-    logs.filter(l => l.tenantId === currentTenant.id && l.fecha === selectedFecha && (activeArea === 'TODAS' || l.area === activeArea))
+    allProductionLogs.filter(l => l.tenantId === currentTenant.id && l.fecha === selectedFecha && (activeArea === 'TODAS' || l.area === activeArea))
         .map(l => l.hora.split(':')[0])
   ));
   const unloggedHoursCount = Math.max(0, 24 - loggedHoursOfSelectedDay.length);
@@ -4119,9 +4309,9 @@ export const ProduccionAreaView: React.FC = () => {
     setFiltroColor('');
     setFiltroMaquina('');
     setFiltroBanda('');
-    setSelectedFecha('2026-05-25');
-    setRangoInicio('2026-05-18');
-    setRangoFin('2026-05-25');
+    setSelectedFecha(new Date().toISOString().slice(0, 10));
+    setRangoInicio(new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
+    setRangoFin(new Date().toISOString().slice(0, 10));
   };
 
   // --- RECHARTS DATA WRAPPERS ---
@@ -4262,7 +4452,7 @@ export const ProduccionAreaView: React.FC = () => {
           {timeframe === 'tiempo_real' && (
             <div className="flex items-center gap-2 text-xs text-indigo-400 font-bold bg-indigo-950/20 px-3 py-1.5 rounded-lg border border-indigo-900/40 font-mono animate-pulse">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-              LIVE FEED • MONITOREO EN CURSO (HOY: 2026-05-25)
+              LIVE FEED • MONITOREO EN CURSO (HOY: {new Date().toISOString().slice(0, 10)})
             </div>
           )}
 
@@ -5052,26 +5242,7 @@ export const ProduccionAreaView: React.FC = () => {
 
 /* 5. Modelos y Productos View */
 
-interface ModelPerformanceLog {
-  id: string;
-  tenantId: string;
-  modeloId: string;
-  modeloName: string;
-  color: string;
-  cliente: string;
-  fecha: string; // YYYY-MM-DD
-  paresProducidos: number;
-  paresDefectuosos: number;
-  paresSegundas: number;
-  paresReprocesos: number;
-  leadTimeHours: number;
-  tiempoInyeccionMins: number;
-  tiempoEstabilizacionMins: number;
-  tiempoBandaMins: number;
-  entregaCumplida: boolean;
-  etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Almacén';
-  estatus: 'Active' | 'Warning' | 'Critical';
-}
+type ModelPerformanceLog = ModelPerformanceRow;
 
 export const ModelosProductosView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
@@ -5090,8 +5261,8 @@ export const ModelosProductosView: React.FC = () => {
   const [filtroColor, setFiltroColor] = useState<string>('');
   const [filtroCliente, setFiltroCliente] = useState<string>('');
   const [filtroFecha, setFiltroFecha] = useState<string>('');
-  const [filtroRangoInicio, setFiltroRangoInicio] = useState<string>('2026-05-10');
-  const [filtroRangoFin, setFiltroRangoFin] = useState<string>('2026-05-25');
+  const [filtroRangoInicio, setFiltroRangoInicio] = useState<string>(() => new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
+  const [filtroRangoFin, setFiltroRangoFin] = useState<string>(() => new Date().toISOString().slice(0, 10));
   const [filtroEtapa, setFiltroEtapa] = useState<string>('');
   const [filtroArea, setFiltroArea] = useState<string>('');
   const [filtroEstatus, setFiltroEstatus] = useState<string>('');
@@ -5099,6 +5270,17 @@ export const ModelosProductosView: React.FC = () => {
   useEffect(() => {
     setPerformanceLogs([]);
   }, [currentTenant.id]);
+
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    const start = filtroFecha || filtroRangoInicio;
+    const end = filtroFecha || filtroRangoFin;
+    dashboardApi.erpOperativo(start, end)
+      .then(data => { if (!cancelled) setPerformanceLogs(data.models); })
+      .catch(err => console.warn('Modelos: ERP operativo fetch failed', err));
+    return () => { cancelled = true; };
+  }, [currentTenant.id, filtroFecha, filtroRangoInicio, filtroRangoFin]);
 
   const uniqueModels = Array.from(new Set(performanceLogs.map(l => l.modeloName))).filter(Boolean) as string[];
   const uniqueColors = Array.from(new Set(performanceLogs.map(l => l.color))).filter(Boolean) as string[];
@@ -5387,8 +5569,8 @@ export const ModelosProductosView: React.FC = () => {
     setFiltroColor('');
     setFiltroCliente('');
     setFiltroFecha('');
-    setFiltroRangoInicio('2026-05-10');
-    setFiltroRangoFin('2026-05-25');
+    setFiltroRangoInicio(new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
+    setFiltroRangoFin(new Date().toISOString().slice(0, 10));
     setFiltroEtapa('');
     setFiltroArea('');
     setFiltroEstatus('');
@@ -11589,12 +11771,14 @@ export const ReportesHistoricosView: React.FC = () => {
     const hoy = new Date();
     const fechaFin = hoy.toISOString().slice(0, 10);
     const fechaInicio = new Date(hoy.getTime() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
-    dashboardApi.erpEjecutivo(fechaInicio, fechaFin)
-      .then(data => { if (!cancelled) setErpProduccion(data.produccion); })
-      .catch(err => console.warn('Reportes: ERP ejecutivo fetch failed', err));
-    dashboardApi.erpMovimientos(fechaInicio, fechaFin, 50)
-      .then(data => { if (!cancelled) setErpMovimientos(data); })
-      .catch(err => console.warn('Reportes: ERP movimientos fetch failed', err));
+    dashboardApi.erpOperativo(fechaInicio, fechaFin)
+      .then(data => {
+        if (!cancelled) {
+          setErpProduccion(data.productionHourly);
+          setErpMovimientos(data.movements.slice(0, 50));
+        }
+      })
+      .catch(err => console.warn('Reportes: ERP operativo fetch failed', err));
     return () => { cancelled = true; };
   }, []);
   const prodHoraSource = erpProduccion;
@@ -11808,7 +11992,20 @@ export const ReportesHistoricosView: React.FC = () => {
 /* 13. Catálogos View */
 export const CatalogosView: React.FC = () => {
   const { orders, currentTenant } = useDashboard();
-  const clientsFromFdb = Array.from(
+  const [catalogs, setCatalogs] = useState<ErpOperationalResponse['catalogs'] | null>(null);
+
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    const end = new Date();
+    const start = new Date(end.getTime() - 365 * 24 * 3600 * 1000);
+    dashboardApi.erpOperativo(start.toISOString().slice(0, 10), end.toISOString().slice(0, 10))
+      .then(data => { if (!cancelled) setCatalogs(data.catalogs); })
+      .catch(err => console.warn('Catalogos: ERP operativo fetch failed', err));
+    return () => { cancelled = true; };
+  }, []);
+
+  const clientsFromOrders = Array.from(
     new Map(
       orders
         .filter(o => o.tenantId === currentTenant.id)
@@ -11826,12 +12023,48 @@ export const CatalogosView: React.FC = () => {
         })
     ).values()
   );
+  const clientsFromFdb = catalogs?.clients.length
+    ? catalogs.clients.map(c => ({
+      id: String(c.id || c.codigo || c.name || c.nombre),
+      name: String(c.name || c.nombre || c.codigo || 'S/Cliente'),
+      rfc: String(c.rfc || '—'),
+      contactEmail: '—',
+      contactPhone: '—',
+      priority: String(c.clasif || 'MEDIA')
+    }))
+    : clientsFromOrders;
   const clientColumns = [
     { header: 'RFC Fiscal', accessorKey: 'rfc', cell: (c: any) => <span className="font-mono">{c.rfc}</span> },
     { header: 'Razón Social', accessorKey: 'name', cell: (c: any) => <strong className="text-slate-250">{c.name}</strong> },
     { header: 'Email Contacto', accessorKey: 'contactEmail' },
     { header: 'Teléfono', accessorKey: 'contactPhone', cell: (c: any) => <span className="font-mono">{c.contactPhone}</span> },
     { header: 'Prioridad Comercial', accessorKey: 'priority', cell: (c: any) => <StatusBadge status={c.priority} type="priority" /> }
+  ];
+  const modelCatalog = (catalogs?.models ?? []).map(m => ({
+    id: String(m.id || m.codigo || m.name || m.nombre),
+    codigo: String(m.codigo || m.id || ''),
+    name: String(m.name || m.nombre || 'S/Modelo'),
+    linea: String(m.linea || '—'),
+    vigente: m.vigente === false ? 'NO' : 'SI'
+  }));
+  const deptCatalog = (catalogs?.departments ?? []).map(d => ({
+    id: String(d.id || d.codigo || d.name || d.nombre),
+    codigo: String(d.codigo || d.id || ''),
+    name: String(d.name || d.nombre || 'S/Depto'),
+    stage: String(d.stage_id || '—'),
+    orden: String(d.orden || '—')
+  }));
+  const modelColumns = [
+    { header: 'Código', accessorKey: 'codigo', cell: (m: any) => <span className="font-mono">{m.codigo}</span> },
+    { header: 'Modelo', accessorKey: 'name', cell: (m: any) => <strong className="text-slate-250">{m.name}</strong> },
+    { header: 'Línea', accessorKey: 'linea' },
+    { header: 'Vigente', accessorKey: 'vigente' }
+  ];
+  const deptColumns = [
+    { header: 'Código', accessorKey: 'codigo', cell: (d: any) => <span className="font-mono">{d.codigo}</span> },
+    { header: 'Departamento', accessorKey: 'name', cell: (d: any) => <strong className="text-slate-250">{d.name}</strong> },
+    { header: 'Etapa Dashboard', accessorKey: 'stage' },
+    { header: 'Orden', accessorKey: 'orden' }
   ];
 
   return (
@@ -11845,11 +12078,22 @@ export const CatalogosView: React.FC = () => {
         </p>
       </div>
 
-      <DataTable 
-        data={clientsFromFdb} 
-        columns={clientColumns} 
-        idField="id" 
+      <DataTable
+        data={clientsFromFdb}
+        columns={clientColumns}
+        idField="id"
       />
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
+        <div className="space-y-2">
+          <h3 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase">Modelos FDB</h3>
+          <DataTable data={modelCatalog} columns={modelColumns} idField="id" />
+        </div>
+        <div className="space-y-2">
+          <h3 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase">Departamentos FDB</h3>
+          <DataTable data={deptCatalog} columns={deptColumns} idField="id" />
+        </div>
+      </div>
     </div>
   );
 };

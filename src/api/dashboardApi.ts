@@ -47,8 +47,116 @@ export interface MovimientoRow {
   duracionMinutos: number;
 }
 
+export interface DailyProductionRow {
+  fecha: string;
+  pares: number;
+  tarjetas: number;
+}
+
+export interface ModelPerformanceRow {
+  id: string;
+  tenantId: string;
+  modeloId: string;
+  modeloName: string;
+  color: string;
+  cliente: string;
+  fecha: string;
+  paresProducidos: number;
+  paresDefectuosos: number;
+  paresSegundas: number;
+  paresReprocesos: number;
+  leadTimeHours: number;
+  tiempoInyeccionMins: number;
+  tiempoEstabilizacionMins: number;
+  tiempoBandaMins: number;
+  entregaCumplida: boolean;
+  etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Almacén';
+  estatus: 'Active' | 'Warning' | 'Critical';
+}
+
+export type DeliveryRisk = 'VENCIDO' | 'ALTO' | 'MEDIO' | 'BAJO';
+export type StageSaturation = 'OPTIMO' | 'SATURADO' | 'CRITICO';
+
+export interface WipSummary {
+  activeBatches: number;
+  activePairs: number;
+  globalProgress: number;
+}
+
+export interface StagePipelineRow {
+  stageId: StageId;
+  stageName: string;
+  batches: number;
+  pairs: number;
+  avgMinutes: number | null;
+  wipPct: number;
+  saturation: StageSaturation;
+}
+
+export interface OrderPipelineRow {
+  id: string;
+  cliente: string;
+  oc: string | null;
+  modelo: string | null;
+  color: string | null;
+  fechaAlta: string | null;
+  fechaCompromiso: string | null;
+  totalPares: number;
+  shippedPairs: number;
+  inProcessPairs: number;
+  progress: number;
+  avgTimeMin: number | null;
+  dominantStage: StageId;
+  risk: DeliveryRisk;
+  pairsByStage: Record<StageId, number>;
+  batchesCount: number;
+  daysLeft: number | null;
+}
+
+export interface OrderRiskSummary {
+  totalOpen: number;
+  totalRisk: number;
+  vencido: number;
+  alto: number;
+  medio: number;
+  bajo: number;
+  rows: OrderPipelineRow[];
+}
+
+export interface ErpOperationalResponse {
+  meta: {
+    fechaInicio: string;
+    fechaFin: string;
+    hasPeriodData: boolean;
+    dataMaxDate: string | null;
+    lastSync: string | null;
+    source: 'big_zap_fdb';
+  };
+  active: {
+    orders: number | null;
+    batches: number | null;
+    pairs: number | null;
+  };
+  productionHourly: HourlyProductionRow[];
+  quality: CalidadRow[];
+  movements: MovimientoRow[];
+  models: ModelPerformanceRow[];
+  catalogs: {
+    clients: Array<Record<string, unknown>>;
+    models: Array<Record<string, unknown>>;
+    departments: Array<Record<string, unknown>>;
+  };
+  dailyProduction: DailyProductionRow[];
+  wipSummary: WipSummary;
+  stagePipeline: StagePipelineRow[];
+  orderRisk: OrderRiskSummary;
+  orderPipeline: OrderPipelineRow[];
+}
+
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
 const TOKEN_KEY = 'plasyect_api_token';
+let tokenPromise: Promise<string> | null = null;
+let refreshedThisSession = false;
 
 export interface BootstrapResponse {
   tenants: Tenant[];
@@ -76,6 +184,7 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
   const response = await fetch(`${API_BASE_URL}${path}`, { ...options, headers });
   if (response.status === 401 && retry) {
     removeStoredItem(TOKEN_KEY);
+    refreshedThisSession = false;
     return request<T>(path, options, false);
   }
   if (!response.ok) throw new Error(`API ${response.status}: ${path}`);
@@ -83,12 +192,21 @@ async function request<T>(path: string, options: RequestInit = {}, retry = true)
 }
 
 async function getToken(): Promise<string> {
+  if (tokenPromise) return tokenPromise;
   const saved = getStoredString(TOKEN_KEY);
-  if (saved) return saved;
+  if (saved && refreshedThisSession) return saved;
+  tokenPromise = refreshToken().finally(() => {
+    tokenPromise = null;
+  });
+  return tokenPromise;
+}
+
+async function refreshToken(): Promise<string> {
   const response = await fetch(`${API_BASE_URL}/api/auth/auto`, { method: 'POST' });
   if (!response.ok) throw new Error(`Auto auth failed: ${response.status}`);
   const data = await response.json();
   setStoredString(TOKEN_KEY, data.token);
+  refreshedThisSession = true;
   return data.token;
 }
 
@@ -133,6 +251,10 @@ export const dashboardApi = {
   erpEjecutivo: (fechaInicio: string, fechaFin: string) => {
     const qs = new URLSearchParams({ fechaInicio, fechaFin });
     return request<EjecutivoData>(`/api/erp/ejecutivo?${qs}`);
+  },
+  erpOperativo: (fechaInicio: string, fechaFin: string) => {
+    const qs = new URLSearchParams({ fechaInicio, fechaFin });
+    return request<ErpOperationalResponse>(`/api/erp/operativo?${qs}`);
   },
   erpMovimientos: (fechaInicio: string, fechaFin: string, limit = 50) => {
     const qs = new URLSearchParams({ fechaInicio, fechaFin, limit: String(limit) });

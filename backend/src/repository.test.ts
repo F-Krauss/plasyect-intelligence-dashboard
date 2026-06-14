@@ -48,5 +48,8 @@ describe('ERP tarjetas viajeras', () => {
     expect(await service.listTarjetas({ limit: 10 })).toEqual([]);
     expect(await service.getTarjeta('5498-40638')).toBeNull();
     expect(await service.getSyncStatus()).toBeNull();
+    const operational = await service.getOperational('2026-05-01', '2026-05-25');
+    expect(operational.meta.hasPeriodData).toBe(false);
+    expect(operational.active).toEqual({ orders: null, batches: null, pairs: null });
   });
 });

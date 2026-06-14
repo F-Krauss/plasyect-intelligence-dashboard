@@ -148,6 +148,16 @@ export function createRoutes(repository: DashboardRepository, erp: ErpService = 
     }
   });
 
+  router.get('/api/erp/operativo', async (req, res, next) => {
+    try {
+      if (!erp.enabled) return res.status(503).json(getTarjetaViajeraStub('operativo'));
+      const { fechaInicio, fechaFin } = dateRangeQuerySchema.parse(req.query);
+      res.json(await erp.getOperational(fechaInicio, fechaFin));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.get('/api/erp/movimientos', async (req, res, next) => {
     try {
       const { fechaInicio, fechaFin, limit } = movimientosQuerySchema.parse(req.query);
