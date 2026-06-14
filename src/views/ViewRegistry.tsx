@@ -67,6 +67,8 @@ export const DashboardEjecutivoView: React.FC = () => {
   
   // Base date anchor representing the current local time for days-left calculations
   const BASE_DATE = new Date('2026-05-25');
+  const DEFAULT_FECHA_INICIO = '2026-04-20';
+  const DEFAULT_FECHA_FIN = '2026-06-15';
   const SEMAPHORE = {
     ok: {
       fill: '#16a34a',
@@ -119,8 +121,8 @@ export const DashboardEjecutivoView: React.FC = () => {
   };
 
   // 1. Interactive Filter States (defaulting to encompass our mock dates)
-  const [fechaInicio, setFechaInicio] = useState<string>('2026-04-20');
-  const [fechaFin, setFechaFin] = useState<string>('2026-06-15');
+  const [fechaInicio, setFechaInicio] = useState<string>(DEFAULT_FECHA_INICIO);
+  const [fechaFin, setFechaFin] = useState<string>(DEFAULT_FECHA_FIN);
   const [selectedClient, setSelectedClient] = useState<string>('TODOS');
   const [selectedModel, setSelectedModel] = useState<string>('TODOS');
   const [selectedStage, setSelectedStage] = useState<string>('TODOS');
@@ -128,6 +130,7 @@ export const DashboardEjecutivoView: React.FC = () => {
   const [selectedTurno, setSelectedTurno] = useState<string>('TODOS');
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [filtersExpanded, setFiltersExpanded] = useState(false);
+  const [riskOrderLimit, setRiskOrderLimit] = useState<10 | 20 | 'ALL'>(10);
 
   // Real ERP data from BixApp (FDB → Supabase → backend)
   const [erpData, setErpData] = useState<EjecutivoData>({ produccion: [], calidad: [] });
@@ -158,14 +161,18 @@ export const DashboardEjecutivoView: React.FC = () => {
   };
 
   const handleClearFilters = () => {
-    setFechaInicio('2026-04-20');
-    setFechaFin('2026-06-15');
+    setFechaInicio(DEFAULT_FECHA_INICIO);
+    setFechaFin(DEFAULT_FECHA_FIN);
     setSelectedClient('TODOS');
     setSelectedModel('TODOS');
     setSelectedStage('TODOS');
     setSelectedStatus('TODOS');
     setSelectedTurno('TODOS');
   };
+
+  useEffect(() => {
+    setRiskOrderLimit(10);
+  }, [fechaInicio, fechaFin, selectedClient, selectedModel, selectedStatus]);
 
   // Base datasets derived from SaaS tenant configuration
   const tenantOrders = orders.filter(o => o.tenantId === currentTenant.id);
@@ -453,13 +460,41 @@ export const DashboardEjecutivoView: React.FC = () => {
     return { label: area === 'INYECCION' ? 'Inyección' : 'Banda', value: pct, defectsCount, inspected, color: SEMAPHORE[status].fill, status };
   });
 
-  // 6. Top 10 pedidos en riesgo
-  const top10RiskOrders = filteredOrders
+  // 6. Pedidos en riesgo: por default solo abiertos; con fechas modificadas incluye cerrados.
+  const temporalFiltersApplied = fechaInicio !== DEFAULT_FECHA_INICIO || fechaFin !== DEFAULT_FECHA_FIN;
+  const riskReferenceDate = temporalFiltersApplied && fechaFin
+    ? new Date(`${fechaFin}T12:00:00`)
+    : BASE_DATE;
+  const closedOrderStatuses = ['COMPLETADO', 'CANCELADO', 'ENTREGADO'];
+  const riskRank = { VENCIDO: 4, ALTO: 3, MEDIO: 2, BAJO: 1 } as const;
+  const isClosedOrder = (status?: string) => closedOrderStatuses.includes(status || '');
+  const getRiskFromDays = (daysLeft: number): keyof typeof riskRank => {
+    if (daysLeft < 0) return 'VENCIDO';
+    if (daysLeft <= 3) return 'ALTO';
+    if (daysLeft <= 7) return 'MEDIO';
+    return 'BAJO';
+  };
+  const handleShowMoreRiskOrders = () => {
+    setRiskOrderLimit(current => current === 10 ? 20 : current === 20 ? 'ALL' : 10);
+  };
+  const riskOrdersSource = filteredOrders.filter(o => {
+    const openedAt = new Date(o.fechaAlta || o.createdAt || '');
+    const openedByQueryDate = Number.isNaN(openedAt.getTime()) || openedAt <= riskReferenceDate;
+    if (!openedByQueryDate) return false;
+    return temporalFiltersApplied || !isClosedOrder(o.status || o.estatus);
+  });
+  const riskOrders = riskOrdersSource
     .map(o => {
       // Days remaining
-      const commitment = new Date(o.fechaCompromiso || '');
-      const diffTime = commitment.getTime() - BASE_DATE.getTime();
-      const daysLeft = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+      const commitment = new Date(o.fechaCompromiso || o.deliveryDate || '');
+      const daysLeft = Number.isNaN(commitment.getTime())
+        ? 999
+        : Math.ceil((commitment.getTime() - riskReferenceDate.getTime()) / (1000 * 60 * 60 * 24));
+      const computedRisk = getRiskFromDays(daysLeft);
+      const savedCloseRisk = (o.riesgoEntrega || computedRisk) as keyof typeof riskRank;
+      const displayRisk = isClosedOrder(o.status || o.estatus)
+        ? savedCloseRisk
+        : computedRisk;
 
       // Dominant stage (stage with most lots of this order)
       const orderBatches = filteredBatches.filter(b => b.orderId === o.id);
@@ -473,16 +508,20 @@ export const DashboardEjecutivoView: React.FC = () => {
       return {
         ...o,
         daysLeft,
-        dominantStage: dominantStageName
+        dominantStage: dominantStageName,
+        displayRisk,
+        savedCloseRisk,
+        isClosed: isClosedOrder(o.status || o.estatus)
       };
     })
     .sort((a,b) => {
-      // Past due & alert priority
-      if (a.riesgoEntrega === 'VENCIDO' && b.riesgoEntrega !== 'VENCIDO') return -1;
-      if (b.riesgoEntrega === 'VENCIDO' && a.riesgoEntrega !== 'VENCIDO') return 1;
+      const riskDiff = riskRank[b.displayRisk] - riskRank[a.displayRisk];
+      if (riskDiff !== 0) return riskDiff;
       return a.daysLeft - b.daysLeft;
-    })
-    .slice(0, 10);
+    });
+  const displayedRiskOrders = riskOrders.slice(0, riskOrderLimit === 'ALL' ? riskOrders.length : riskOrderLimit);
+  const canExpandRiskOrders = riskOrders.length > 10;
+  const riskOrderLimitLabel = riskOrderLimit === 'ALL' ? 'TODOS' : riskOrderLimit;
 
   return (
     <div className="flex flex-col gap-6">
@@ -708,7 +747,7 @@ export const DashboardEjecutivoView: React.FC = () => {
 
         {/* Card 7: Porcentaje Defectivo */}
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiDefectStatus].border} ${SEMAPHORE[kpiDefectStatus].bg}`}>
-          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">DEFECTIVO GBL</span>
+          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">Defectos Globales</span>
           <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiDefectStatus].text}`}>
             {kpiDefectivePct}%
           </div>
@@ -857,7 +896,7 @@ export const DashboardEjecutivoView: React.FC = () => {
       <div className="order-0 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         
         {/* Chart 1: Producción por hora */}
-        <div className="md:col-span-2 xl:col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[300px]">
+        <div className="md:col-span-2 xl:col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[390px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Activity className="w-3.5 h-3.5" />
@@ -872,14 +911,14 @@ export const DashboardEjecutivoView: React.FC = () => {
             </p>
           </div>
           {!hasHourlyData ? (
-            <div className="h-52 mt-4 flex flex-col items-center justify-center text-center gap-1">
+            <div className="h-[270px] mt-4 flex flex-col items-center justify-center text-center gap-1">
               <Activity className="w-6 h-6 text-slate-700" />
               <p className="text-[11px] font-mono text-slate-500">Sin escaneos de producción en el rango seleccionado.</p>
               <p className="text-[9px] font-sans text-slate-600">Ajusta las fechas: los escaneos de inyección/banda llegan hasta el 2026-04-20.</p>
             </div>
           ) : (
           <div className="overflow-x-auto mt-4">
-          <div className="h-52 min-w-[480px] flex items-end justify-between gap-1 pt-5">
+          <div className="h-[270px] min-w-[480px] flex items-end justify-between gap-1 pt-5">
             {finalHourlyData.map((d, i) => {
               const maxVal = Math.max(...finalHourlyData.map(item => Math.max(item.value, item.target)), 1);
               const pct = (d.value / maxVal) * 100;
@@ -911,7 +950,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 2: Pares por etapa */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Layers className="w-3.5 h-3.5" />
@@ -919,7 +958,7 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Color por saturación de WIP y tiempo en etapa</p>
           </div>
-          <div className="h-40 mt-4 flex items-end justify-between gap-1.5 pt-5">
+          <div className="h-[208px] mt-4 flex items-end justify-between gap-1.5 pt-5">
             {stageParesChartData.map((d, i) => {
               const maxVal = Math.max(...stageParesChartData.map(item => item.value), 1);
               const pct = (d.value / maxVal) * 100;
@@ -940,7 +979,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 3: Top 5 modelos */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Briefcase className="w-3.5 h-3.5" />
@@ -968,7 +1007,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 4: Defectos (Pareto) */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-pink-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <AlertTriangle className="w-3.5 h-3.5" />
@@ -1000,13 +1039,13 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 5: Pedidos por estatus */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Activity className="w-3.5 h-3.5" />
-              ESTATUS CARTERA
+              STATUS PEDIDOS
             </h4>
-            <p className="text-[9px] text-slate-500 font-sans mt-1">Distribución de contratos activos</p>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">Distribución de pedidos activos</p>
           </div>
           <div className="space-y-3 mt-3 grow flex flex-col justify-center">
             {orderStatusData.map((os, i) => {
@@ -1026,13 +1065,13 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 6: Estados de producción */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5" />
-              ESTADOS PRODUCCIÓN
+              STATUS LOTES
             </h4>
-            <p className="text-[9px] text-slate-500 font-sans mt-1">Lotes activos por estado operativo</p>
+            <p className="text-[9px] text-slate-500 font-sans mt-1">Lotes activos por status operativo</p>
           </div>
           <div className="space-y-3 mt-4 grow flex flex-col justify-center">
             {productionStatusData.map((item) => {
@@ -1057,7 +1096,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 7: Cumplimiento por turno */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Clock className="w-3.5 h-3.5" />
@@ -1065,7 +1104,7 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Real contra meta, clasificado con desviación estándar</p>
           </div>
-          <div className="h-40 mt-4 flex items-end justify-between gap-4 pt-5">
+          <div className="h-[208px] mt-4 flex items-end justify-between gap-4 pt-5">
             {shiftComplianceData.map((d) => {
               const pct = Math.min(d.value, 120);
               return (
@@ -1083,7 +1122,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 8: Calidad por área */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[260px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <ShieldAlert className="w-3.5 h-3.5" />
@@ -1112,21 +1151,33 @@ export const DashboardEjecutivoView: React.FC = () => {
 
       </div>
 
-      {/* 6. Tabla Inferior: Top 10 Pedidos en Riesgo */}
+      {/* 6. Tabla Inferior: Pedidos en Riesgo */}
       <div className="order-2 bg-slate-900 border border-slate-800 rounded-lg p-5 shadow-xl space-y-4">
-        <div className="flex justify-between items-center border-b border-slate-850 pb-2">
+        <div className="flex flex-col gap-3 md:flex-row md:justify-between md:items-center border-b border-slate-850 pb-2">
           <div>
             <h3 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase flex items-center gap-1.5">
               <Activity className="w-4 h-4 text-cyan-400" />
-              TOP 10 CONTRATOS EN ALERTA DE RIESGO OPERATIVO
+              TOP PEDIDOS ACTIVOS CON MAYOR RIESGO
             </h3>
             <p className="text-[11px] text-slate-500 mt-0.5">
-              Pedidos ordenados por criticidad de plazo o estancamiento de lotes del mismo contrato.
+              {temporalFiltersApplied
+                ? 'Rango histórico: incluye pedidos cerrados y muestra el riesgo guardado al cierre.'
+                : 'Consulta diaria: solo pedidos abiertos al día actual.'}
             </p>
           </div>
-          <span className="text-[10px] font-mono text-slate-400 bg-slate-950 border border-slate-800 px-2.5 py-1 rounded">
-            ORDEN: FECHA PRIORIDAD
-          </span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[10px] font-mono text-slate-400 bg-slate-950 border border-slate-800 px-2.5 py-1 rounded">
+              {displayedRiskOrders.length}/{riskOrders.length} · VISTA {riskOrderLimitLabel}
+            </span>
+            {canExpandRiskOrders && (
+              <button
+                onClick={handleShowMoreRiskOrders}
+                className="px-3 py-1.5 bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded text-[10px] font-mono font-black uppercase tracking-wider transition-colors"
+              >
+                {riskOrderLimit === 'ALL' ? 'Ver menos' : 'Ver más'}
+              </button>
+            )}
+          </div>
         </div>
 
         <div className="overflow-x-auto border border-slate-950 rounded">
@@ -1145,7 +1196,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-950">
-              {top10RiskOrders.map((o) => {
+              {displayedRiskOrders.map((o) => {
                 const isPassed = o.daysLeft <= 0;
                 const isUrgent = o.daysLeft > 0 && o.daysLeft <= 5;
 
@@ -1153,7 +1204,9 @@ export const DashboardEjecutivoView: React.FC = () => {
                   <tr key={o.id} className="hover:bg-slate-850/40 transition-colors">
                     <td className="p-3">
                       <span className="text-cyan-400 font-mono font-black">{o.id}</span>
-                      <span className="block text-[9px] text-slate-550 font-mono">SAAS REGISTERED</span>
+                      <span className="block text-[9px] text-slate-550 font-mono">
+                        {o.isClosed ? `CERRADO · ${o.status || o.estatus}` : 'ABIERTO'}
+                      </span>
                     </td>
                     <td className="p-3">
                       <span className="text-slate-200 block text-[12px] font-bold">{o.clientName || o.cliente}</span>
@@ -1190,15 +1243,15 @@ export const DashboardEjecutivoView: React.FC = () => {
                       <span className="text-[11px] font-mono text-indigo-400 font-medium">{o.dominantStage}</span>
                     </td>
                     <td className="p-3 text-right">
-                      {o.riesgoEntrega === 'VENCIDO' ? (
+                      {o.displayRisk === 'VENCIDO' ? (
                         <span className="text-[10px] px-2 py-0.5 bg-red-950/60 text-red-400 border border-red-900 rounded inline-block font-mono font-bold uppercase">
                           VENCIDO
                         </span>
-                      ) : o.riesgoEntrega === 'ALTO' ? (
+                      ) : o.displayRisk === 'ALTO' ? (
                         <span className="text-[10px] px-2 py-0.5 bg-amber-950/60 text-amber-400 border border-amber-900 rounded inline-block font-mono font-bold uppercase">
                           ALTO RIESGO
                         </span>
-                      ) : o.riesgoEntrega === 'MEDIO' ? (
+                      ) : o.displayRisk === 'MEDIO' ? (
                         <span className="text-[10px] px-2 py-0.5 bg-indigo-950/60 text-indigo-400 border border-indigo-900 rounded inline-block font-mono font-bold uppercase">
                           MEDIO
                         </span>
@@ -1207,10 +1260,22 @@ export const DashboardEjecutivoView: React.FC = () => {
                           BAJO RIESGO
                         </span>
                       )}
+                      {o.isClosed && (
+                        <span className="block mt-1 text-[9px] text-slate-500 font-mono uppercase">
+                          cierre: {o.savedCloseRisk}
+                        </span>
+                      )}
                     </td>
                   </tr>
                 );
               })}
+              {displayedRiskOrders.length === 0 && (
+                <tr>
+                  <td colSpan={9} className="p-6 text-center text-[11px] text-slate-500 font-mono uppercase">
+                    Sin pedidos con esos filtros.
+                  </td>
+                </tr>
+              )}
             </tbody>
           </table>
         </div>

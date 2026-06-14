@@ -190,7 +190,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ currentTab, setCurrentTab, isM
         <div className="p-4 border-t border-slate-800 shrink-0 bg-slate-905 text-[10px] font-mono text-slate-450 space-y-1.5">
           <div className="flex items-center justify-between">
             <span>SaaS Nivel Industrial</span>
-            <span className="text-emerald-400 animate-pulse font-bold">● SLA OK</span>
           </div>
           <div className="text-[9px] text-slate-500">
             Enforce Tenant: true<br />

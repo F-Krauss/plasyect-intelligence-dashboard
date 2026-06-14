@@ -3,20 +3,14 @@ import {
   Bell,
   Wifi,
   WifiOff,
-  RefreshCw,
   ShieldAlert,
-  DollarSign,
   Lock,
-  Sparkles,
-  Search,
   CheckCircle2,
-  Sliders,
-  X,
   AlertOctagon,
   Menu
 } from 'lucide-react';
 import { useDashboard } from '../context/DashboardContext';
-import { TenantId, Role } from '../types';
+import { Role } from '../types';
 
 interface HeaderProps {
   onMenuClick: () => void;
@@ -24,37 +18,20 @@ interface HeaderProps {
 
 export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
   const {
-    tenants,
-    currentTenant,
-    setCurrentTenant,
     currentUser,
     changeRole,
     verifyOTP,
     clear2FA,
-    exchangeRate,
-    setExchangeRate,
     isOffline,
     toggleOffline,
     offlineQueue,
     audits
   } = useDashboard();
 
-  const [isTenantDropdownOpen, setIsTenantDropdownOpen] = useState(false);
   const [isRoleDropdownOpen, setIsRoleDropdownOpen] = useState(false);
-  const [isRateModalOpen, setIsRateModalOpen] = useState(false);
-  const [tempRate, setTempRate] = useState(exchangeRate.toString());
   const [otpInput, setOtpInput] = useState('');
   const [otpError, setOtpError] = useState(false);
   const [otpSuccess, setOtpSuccess] = useState(false);
-
-  const handleRateSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    const parsed = parseFloat(tempRate);
-    if (!isNaN(parsed) && parsed > 0) {
-      setExchangeRate(parsed);
-      setIsRateModalOpen(false);
-    }
-  };
 
   const handleOTPSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -87,64 +64,7 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
       >
         <Menu className="w-5 h-5" />
       </button>
-
-      {/* Search and Scope Branding */}
-      <div className="flex items-center gap-2 md:gap-6 min-w-0">
-        <div className="flex items-center gap-1.5 md:gap-2 text-slate-500 min-w-0">
-          <Sliders className="w-4 h-4 text-blue-600 shrink-0" />
-          <span className="hidden sm:inline text-xs font-bold tracking-wider font-mono uppercase text-slate-500">
-            Filtro Tenant:
-          </span>
-          
-          <div className="relative">
-            <button 
-              onClick={() => setIsTenantDropdownOpen(!isTenantDropdownOpen)}
-              className="px-3 py-1.5 bg-slate-50 border border-slate-200 hover:bg-slate-100 rounded text-xs font-bold text-blue-600 font-mono flex items-center gap-1.5 cursor-pointer"
-            >
-              {currentTenant.name.split(' - ')[0]}
-              <span className="text-[10px] text-slate-500">▼</span>
-            </button>
-
-            {isTenantDropdownOpen && (
-              <div className="absolute top-8 left-0 dropdown-menu bg-white border border-slate-200 rounded-md shadow-xl w-64 p-1 space-y-0.5 z-50 text-slate-800">
-                {tenants.map(t => (
-                  <button
-                    key={t.id}
-                    onClick={() => {
-                      setCurrentTenant(t.id);
-                      setIsTenantDropdownOpen(false);
-                    }}
-                    className={`w-full text-left px-3 py-2 rounded text-xs font-semibold block ${
-                      currentTenant.id === t.id 
-                        ? 'bg-blue-50 text-blue-600 font-bold border-l-2 border-l-blue-600' 
-                        : 'text-slate-600 hover:bg-slate-50 hover:text-slate-800'
-                    }`}
-                  >
-                    <div>{t.name}</div>
-                    <div className="text-[9px] text-slate-400 font-mono italic mt-0.5">{t.location}</div>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Currency Switcher */}
-        <div className="hidden lg:flex items-center gap-2 text-xs">
-          <span className="text-slate-400 font-sans">Tipo de Cambio:</span>
-          <button 
-            onClick={() => {
-              setTempRate(exchangeRate.toString());
-              setIsRateModalOpen(true);
-            }}
-            className="flex items-center gap-1 bg-slate-50 px-2 py-1.5 rounded border border-slate-200 hover:bg-slate-100 hover:border-blue-500 text-slate-700 font-mono font-bold cursor-pointer transition-colors"
-          >
-            <DollarSign className="w-3.5 h-3.5 text-emerald-600" />
-            1 USD = {exchangeRate} MXN
-            <span className="text-[9px] text-slate-400">✏️</span>
-          </button>
-        </div>
-      </div>
+      <div className="min-w-0 flex-1" />
 
       {/* Center 2FA Attention Banner */}
       {activeUserRequires2FA && (
@@ -243,50 +163,6 @@ export const Header: React.FC<HeaderProps> = ({ onMenuClick }) => {
           </div>
         </div>
       </div>
-
-      {/* Manual Exchange Rate Modifer Modal */}
-      {isRateModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/60 flex items-center justify-center z-50 backdrop-blur-sm">
-          <div className="bg-white border border-slate-200 shadow-2xl rounded-lg p-6 w-full max-w-sm text-slate-800">
-            <div className="flex justify-between items-center mb-4 border-b border-slate-100 pb-2">
-              <h3 className="text-sm font-bold tracking-wider font-mono text-blue-600 uppercase">Tasa de Cambio (Recalcular)</h3>
-              <button onClick={() => setIsRateModalOpen(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-            <form onSubmit={handleRateSubmit} className="space-y-4">
-              <div className="space-y-2">
-                <label className="text-xs text-slate-500 block font-sans">
-                  Tipo de cambio manual para recalculaciones generales MXN/USD:
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none font-mono font-bold text-slate-400">
-                    $
-                  </div>
-                  <input 
-                    type="number" 
-                    step="0.01"
-                    value={tempRate}
-                    onChange={(e) => setTempRate(e.target.value)}
-                    className="w-full pl-8 pr-12 py-2 bg-slate-50 border border-slate-200 rounded text-slate-800 font-mono text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
-                    placeholder="18.50"
-                    required
-                  />
-                  <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none font-mono text-xs text-slate-400 font-bold">
-                    MXN
-                  </div>
-                </div>
-              </div>
-              <button 
-                type="submit"
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-sans font-bold py-2 rounded text-xs tracking-wider uppercase shadow-md shadow-blue-200 cursor-pointer"
-              >
-                Actualizar Conversión
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
 
       {/* Floating 2FA Unlock Portal if role requires it & is not verified */}
       {activeUserRequires2FA && (
