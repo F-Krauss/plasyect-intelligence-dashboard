@@ -134,6 +134,25 @@ const isPastDueDateOnly = (value?: string | null, anchor = dateOnlyTime(new Date
   return due !== null && due < anchor;
 };
 
+type ProductionTargetRow = {
+  fecha: string;
+  hora: string;
+  area: string;
+  metaHora: number;
+};
+
+const productionTargetKey = (row: ProductionTargetRow): string =>
+  `${row.fecha}|${row.hora}|${row.area}`;
+
+const sumUniqueProductionTarget = (rows: ProductionTargetRow[]): number => {
+  const targets = new Map<string, number>();
+  rows.forEach(row => {
+    const key = productionTargetKey(row);
+    if (!targets.has(key)) targets.set(key, row.metaHora || 0);
+  });
+  return Array.from(targets.values()).reduce((sum, value) => sum + value, 0);
+};
+
 export const DashboardEjecutivoView: React.FC = () => {
   const { orders, batches, defects, audits, exchangeRate, currentTenant } = useDashboard();
   
@@ -377,14 +396,14 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // - Cumplimiento contra meta: real / meta
   const totalRealPrs = filteredProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
-  const totalMetaPrs = filteredProdHora.reduce((sum, p) => sum + p.metaHora, 0);
+  const totalMetaPrs = sumUniqueProductionTarget(filteredProdHora);
   const kpiMetaCompliance = totalMetaPrs > 0 ? Number(((totalRealPrs / totalMetaPrs) * 100).toFixed(1)) : 0;
   const productionStdDev = getStdDev(filteredProdHora.map(p => p.produccionReal - p.metaHora));
   const complianceStdDev = getStdDev(filteredProdHora.map(p => p.eficiencia));
   const defectStdDev = getStdDev(filteredQuality.map(q => q.porcentajeDefectivo));
   const progressStdDev = erpData ? 0 : getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
   const riskStdDev = erpData ? 0 : getStdDev(filteredOrders.map(o => (o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO') ? 1 : 0));
-  const todayMetaPrs = todayProdHora.reduce((sum, p) => sum + p.metaHora, 0);
+  const todayMetaPrs = sumUniqueProductionTarget(todayProdHora);
   const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, todayMetaPrs, productionStdDev);
   const kpiProgressStatus = hasPeriodData ? classifyAgainstTarget(kpiGlobalProgress, 70, progressStdDev) : 'neutral';
   const kpiRiskStatus = hasPeriodData ? classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev) : 'neutral';
@@ -515,10 +534,15 @@ export const DashboardEjecutivoView: React.FC = () => {
   //   inyección/banda terminan el 2026-04-20). Agregando el rango completo la
   //   gráfica responde a cualquier cambio de fecha inicio/fin.
   const hourlyChartData: Record<string, { value: number; target: number }> = {};
+  const hourlyTargetSlots = new Set<string>();
   for (const p of filteredProdHora) {
     if (!hourlyChartData[p.hora]) hourlyChartData[p.hora] = { value: 0, target: 0 };
     hourlyChartData[p.hora].value += p.produccionReal;
-    hourlyChartData[p.hora].target += p.metaHora;
+    const targetKey = productionTargetKey(p);
+    if (!hourlyTargetSlots.has(targetKey)) {
+      hourlyChartData[p.hora].target += p.metaHora;
+      hourlyTargetSlots.add(targetKey);
+    }
   }
   const hasHourlyData = filteredProdHora.length > 0;
   // Días reales con escaneos de producción dentro del rango (para el subtítulo).
@@ -586,7 +610,7 @@ export const DashboardEjecutivoView: React.FC = () => {
   const shiftComplianceData = ['1', '2', '3'].map(turno => {
     const rows = filteredProdHora.filter(p => p.turno === turno);
     const real = rows.reduce((sum, p) => sum + p.produccionReal, 0);
-    const target = rows.reduce((sum, p) => sum + p.metaHora, 0);
+    const target = sumUniqueProductionTarget(rows);
     const pct = target > 0 ? Number(((real / target) * 100).toFixed(1)) : 0;
     const std = getStdDev(rows.map(p => p.eficiencia));
     const status = classifyAgainstTarget(pct, 100, std);
@@ -4320,25 +4344,44 @@ export const ProduccionAreaView: React.FC = () => {
     metaHora: getGoalForAreaTurn(log.area, log.turno)?.metaHora || log.metaHora
   }));
 
-  const groupedHourlyLogs = [...configuredFilteredLogs].sort((a, b) =>
-    (a.tarjetaViajera || '').localeCompare(b.tarjetaViajera || '') ||
+  const controlLogsMap = new Map<string, HourlyProductionLog>();
+  configuredFilteredLogs.forEach(log => {
+    const key = `${log.fecha}|${log.hora}|${log.turno}|${log.area}`;
+    const current = controlLogsMap.get(key);
+    if (current) {
+      current.produccionReal += log.produccionReal;
+      current.reprocesos += log.reprocesos;
+      current.segundas += log.segundas;
+      return;
+    }
+    controlLogsMap.set(key, {
+      ...log,
+      id: `fdb_hour_${key}`,
+      tarjetaViajera: 'FDB-HORA',
+      responsable: 'FDB',
+      modeloName: 'Consolidado',
+      color: 'Todos'
+    });
+  });
+  const groupedHourlyLogs = Array.from(controlLogsMap.values()).sort((a, b) =>
     a.fecha.localeCompare(b.fecha) ||
-    a.hora.localeCompare(b.hora)
+    a.hora.localeCompare(b.hora) ||
+    a.area.localeCompare(b.area)
   );
 
   // Calculate top KPIs
   const totalRealProduction = configuredFilteredLogs.reduce((sum, l) => sum + l.produccionReal, 0);
-  const totalTargetProduction = configuredFilteredLogs.reduce((sum, l) => sum + l.metaHora, 0);
+  const totalTargetProduction = groupedHourlyLogs.reduce((sum, l) => sum + l.metaHora, 0);
   const metaCompliance = totalTargetProduction > 0 ? Math.round((totalRealProduction / totalTargetProduction) * 100) : 0;
   
   // Production average per hour
-  const distinctLoggedCount = configuredFilteredLogs.length || 1;
+  const distinctLoggedCount = groupedHourlyLogs.length || 1;
   const avgProductionPerHour = Math.round(totalRealProduction / distinctLoggedCount);
 
   // Best / Worst productive hour segments
   // Group by hour
   const hourVolumes: Record<string, number> = {};
-  configuredFilteredLogs.forEach(l => {
+  groupedHourlyLogs.forEach(l => {
     hourVolumes[l.hora] = (hourVolumes[l.hora] || 0) + l.produccionReal;
   });
   
@@ -4371,11 +4414,7 @@ export const ProduccionAreaView: React.FC = () => {
   const tiempoSinRegistroMinutos = unloggedHoursCount * 60;
 
   // Average Efficiency across matching records
-  const totalEfficiencySum = configuredFilteredLogs.reduce((sum, l) => {
-    const eff = l.metaHora > 0 ? (l.produccionReal / l.metaHora) * 100 : 0;
-    return sum + eff;
-  }, 0);
-  const avgEfficiency = configuredFilteredLogs.length > 0 ? Math.round(totalEfficiencySum / configuredFilteredLogs.length) : 0;
+  const avgEfficiency = totalTargetProduction > 0 ? Math.round((totalRealProduction / totalTargetProduction) * 100) : 0;
 
   // Waste indicators
   const totalReprocesos = configuredFilteredLogs.reduce((sum, l) => sum + l.reprocesos, 0);
@@ -4435,9 +4474,9 @@ export const ProduccionAreaView: React.FC = () => {
   
   // 1. Producción por Hora
   // Map hours chronologically
-  const hoursSorted = Array.from(new Set(configuredFilteredLogs.map(l => l.hora))).sort();
+  const hoursSorted = Array.from(new Set(groupedHourlyLogs.map(l => l.hora))).sort();
   const prodHourChartData = hoursSorted.map(h => {
-    const filteredByHour = configuredFilteredLogs.filter(l => l.hora === h);
+    const filteredByHour = groupedHourlyLogs.filter(l => l.hora === h);
     const real = filteredByHour.reduce((sum, l) => sum + l.produccionReal, 0);
     const meta = filteredByHour.reduce((sum, l) => sum + l.metaHora, 0);
     return { hour: h, 'Producción': real, 'Meta': meta };
@@ -4447,7 +4486,7 @@ export const ProduccionAreaView: React.FC = () => {
   let accumulatedReal = 0;
   let accumulatedMeta = 0;
   const prodAccumulatedChartData = hoursSorted.map(h => {
-    const filteredByHour = configuredFilteredLogs.filter(l => l.hora === h);
+    const filteredByHour = groupedHourlyLogs.filter(l => l.hora === h);
     const real = filteredByHour.reduce((sum, l) => sum + l.produccionReal, 0);
     const meta = filteredByHour.reduce((sum, l) => sum + l.metaHora, 0);
     accumulatedReal += real;
@@ -4457,14 +4496,14 @@ export const ProduccionAreaView: React.FC = () => {
 
   // 3. Producción por Área
   const prodByAreaChartData = Object.entries(AREA_NAMES).map(([key, value]) => {
-    const areaLogs = configuredFilteredLogs.filter(l => l.area === key);
+    const areaLogs = groupedHourlyLogs.filter(l => l.area === key);
     const realSum = areaLogs.reduce((sum, l) => sum + l.produccionReal, 0);
     return { name: value, 'Pares': realSum };
   });
 
   // 4. Producción por Responsable
   const repsMap: Record<string, number> = {};
-  configuredFilteredLogs.forEach(l => {
+  groupedHourlyLogs.forEach(l => {
     repsMap[l.responsable] = (repsMap[l.responsable] || 0) + l.produccionReal;
   });
   const prodByRepChartData = Object.entries(repsMap).map(([name, val]) => ({
@@ -4483,21 +4522,19 @@ export const ProduccionAreaView: React.FC = () => {
   })).sort((a, b) => b['Pares'] - a['Pares']).slice(0, 5);
 
   // 6. Eficiencia por Turno
-  const shiftEffMap: Record<string, { sum: number; count: number }> = {
-    'MAÑANA': { sum: 0, count: 0 },
-    'TARDE': { sum: 0, count: 0 },
-    'NOCHE': { sum: 0, count: 0 }
+  const shiftEffMap: Record<string, { real: number; target: number }> = {
+    'MAÑANA': { real: 0, target: 0 },
+    'TARDE': { real: 0, target: 0 },
+    'NOCHE': { real: 0, target: 0 }
   };
-  configuredFilteredLogs.forEach(l => {
-    const eff = l.metaHora > 0 ? (l.produccionReal / l.metaHora) * 100 : 0;
-    if (shiftEffMap[l.turno]) {
-      shiftEffMap[l.turno].sum += eff;
-      shiftEffMap[l.turno].count += 1;
-    }
+  groupedHourlyLogs.forEach(l => {
+    if (!shiftEffMap[l.turno]) return;
+    shiftEffMap[l.turno].real += l.produccionReal;
+    shiftEffMap[l.turno].target += l.metaHora;
   });
   const efficiencyByShiftChartData = Object.entries(shiftEffMap).map(([shiftName, data]) => ({
     shift: shiftName,
-    'Eficiencia %': data.count > 0 ? Math.round(data.sum / data.count) : 0
+    'Eficiencia %': data.target > 0 ? Math.round((data.real / data.target) * 100) : 0
   }));
 
   return (
@@ -4519,7 +4556,7 @@ export const ProduccionAreaView: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-          {can('produccion_area.create_log') && (
+          {!backendEnabled && can('produccion_area.create_log') && (
             <button
               onClick={() => setShowAddLogModal(true)}
               className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-650 hover:bg-indigo-600 text-slate-950 font-sans font-extrabold rounded-lg text-xs tracking-wide transition cursor-pointer"
@@ -4527,6 +4564,11 @@ export const ProduccionAreaView: React.FC = () => {
               <PlusCircle className="w-4 h-4 text-slate-950" />
               Registrar Log Horario
             </button>
+          )}
+          {backendEnabled && (
+            <span className="px-3.5 py-2 bg-slate-950 border border-slate-800 rounded-lg text-[10px] text-slate-400 font-mono font-bold uppercase">
+              FDB automático
+            </span>
           )}
         </div>
       </div>
@@ -5005,7 +5047,7 @@ export const ProduccionAreaView: React.FC = () => {
             </h3>
           </div>
           <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">
-            Mostrando {groupedHourlyLogs.length} reportes consolidados por Tarjeta Viajera
+            Mostrando {groupedHourlyLogs.length} cortes consolidados por área/hora
           </span>
         </div>
 
@@ -5015,7 +5057,7 @@ export const ProduccionAreaView: React.FC = () => {
             <thead>
               <tr className="bg-slate-900 border-b border-slate-800 text-[10px] font-mono text-slate-400 uppercase tracking-wider leading-none">
                 <th className="py-3 px-3 font-bold">Fecha</th>
-                <th className="py-3 px-3 font-bold">Tarjeta Viajera</th>
+                <th className="py-3 px-3 font-bold">Origen</th>
                 <th className="py-3 px-3 font-bold">Hora segment</th>
                 <th className="py-3 px-3 font-bold">Turno</th>
                 <th className="py-3 px-3 font-bold">Estación/Área</th>
