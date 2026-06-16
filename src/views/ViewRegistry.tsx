@@ -272,6 +272,26 @@ export const DashboardEjecutivoView: React.FC = () => {
     return true;
   });
 
+  const dashboardWipBatches = (erpData?.lotePipeline ?? filteredBatches).filter(b => {
+    const clientVal = b.cliente || b.clientName || '';
+    const modelVal = b.modelo || b.modelName || '';
+    if (selectedClient !== 'TODOS' && clientVal !== selectedClient) return false;
+    if (selectedModel !== 'TODOS' && modelVal !== selectedModel) return false;
+    if (selectedStage !== 'TODOS' && getBatchStageId(b) !== selectedStage) return false;
+    if (selectedStatus !== 'TODOS' && b.status !== selectedStatus) return false;
+    return true;
+  });
+
+  const dashboardActiveOrders = erpData
+    ? erpData.orderPipeline.filter(o => {
+      if (o.progress >= 100) return false;
+      if (selectedClient !== 'TODOS' && o.cliente !== selectedClient) return false;
+      if (selectedModel !== 'TODOS' && o.modelo !== selectedModel) return false;
+      if (selectedStatus !== 'TODOS' && selectedStatus !== 'PROCESANDO' && selectedStatus !== 'PENDIENTE') return false;
+      return true;
+    })
+    : filteredOrders.filter(o => o.status === 'PROCESANDO' || o.status === 'PENDIENTE');
+
   const dashboardClientOptions = Array.from(new Set([
     ...tenantOrders.map(o => o.clientName || o.cliente || '').filter(Boolean),
     ...(erpData?.catalogs.clients.map(c => String(c.name || c.nombre || '')).filter(Boolean) ?? [])
@@ -520,8 +540,9 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // - Top 5 modelos producidos
   const modelCount: Record<string, number> = {};
-  filteredBatches.forEach(b => {
-    modelCount[b.modelo || 'Otro'] = (modelCount[b.modelo || 'Otro'] || 0) + (b.totalPares || 0);
+  dashboardWipBatches.forEach(b => {
+    const modelKey = b.modelo || b.modelName || 'Otro';
+    modelCount[modelKey] = (modelCount[modelKey] || 0) + getBatchPairs(b);
   });
   const top5ModelsData = Object.entries(modelCount)
     .map(([label, value]) => ({ label, value }))
@@ -545,16 +566,22 @@ export const DashboardEjecutivoView: React.FC = () => {
     acc[o.status] = (acc[o.status] || 0) + 1;
     return acc;
   }, {});
-  const orderStatusData = Object.entries(statusCounts).map(([label, value]) => ({
+  const fallbackOrderStatusData = Object.entries(statusCounts).map(([label, value]) => ({
     label: label === 'COMPLETADO' ? 'Terminados' : label === 'PROCESANDO' ? 'En Proceso' : 'Pendientes',
     value: value as number,
     color: label === 'COMPLETADO' ? '#10b981' : label === 'PROCESANDO' ? '#3b82f6' : '#f59e0b'
   }));
+  const orderStatusData = erpData
+    ? [
+      { label: 'En Proceso', value: dashboardActiveOrders.length, color: '#3b82f6' },
+      { label: 'Pendientes', value: 0, color: '#f59e0b' }
+    ]
+    : fallbackOrderStatusData;
   const productionStatusData = [
-    { label: 'Óptimo', value: filteredBatches.filter(b => b.status === 'OPTIMO').length, color: SEMAPHORE.ok.fill },
-    { label: 'Alerta', value: filteredBatches.filter(b => b.status === 'ALERTA').length, color: SEMAPHORE.warning.fill },
-    { label: 'Crítico', value: filteredBatches.filter(b => b.status === 'CRITICO').length, color: SEMAPHORE.danger.fill },
-    { label: 'Detenido', value: filteredBatches.filter(b => b.status === 'DETENIDO').length, color: '#475569' }
+    { label: 'Óptimo', value: dashboardWipBatches.filter(b => b.status === 'OPTIMO').length, color: SEMAPHORE.ok.fill },
+    { label: 'Alerta', value: dashboardWipBatches.filter(b => b.status === 'ALERTA').length, color: SEMAPHORE.warning.fill },
+    { label: 'Crítico', value: dashboardWipBatches.filter(b => b.status === 'CRITICO').length, color: SEMAPHORE.danger.fill },
+    { label: 'Detenido', value: dashboardWipBatches.filter(b => b.status === 'DETENIDO').length, color: '#475569' }
   ];
   const shiftComplianceData = ['1', '2', '3'].map(turno => {
     const rows = filteredProdHora.filter(p => p.turno === turno);
@@ -4223,7 +4250,8 @@ export const ProduccionAreaView: React.FC = () => {
       segundas: q.segundas
     };
   });
-  const allProductionLogs = [...fdbProductionLogs, ...logs];
+  const allProductionLogs = fdbProductionLogs;
+  void logs;
 
   // Distinct values for filter options
   const activeResponsables = users.filter(user => user.active).map(user => user.username);
