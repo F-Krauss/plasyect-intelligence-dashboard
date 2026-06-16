@@ -351,15 +351,21 @@ function daysLeftFromDate(value: unknown, today = new Date()): number | null {
   return Math.ceil((due.getTime() - base.getTime()) / 86_400_000);
 }
 
+function isCurrentPlantWipRow(row: ErpRecord, now = new Date()): boolean {
+  const status = String(row.status_depto ?? '');
+  if (!['15', '25', '30'].includes(status)) return false;
+  const lastScan = toIsoOrNull(row.ultimo_escaneo);
+  if (!lastScan) return false;
+  return now.getTime() - new Date(lastScan).getTime() <= config.BIGZAP_PLANT_ACTIVE_DAYS * 86_400_000;
+}
+
 function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
   wipSummary: WipSummary;
   stagePipeline: StagePipelineRow[];
   orderPipeline: OrderPipelineRow[];
   orderRisk: OrderRiskSummary;
 } {
-  const active = tarjetas.filter((row) =>
-    row.cancelado !== true && !['40', '50'].includes(String(row.status_depto ?? ''))
-  );
+  const active = tarjetas.filter((row) => row.cancelado !== true && isCurrentPlantWipRow(row));
   const stageMap = new Map<string, { batches: number; pairs: number; minutesTotal: number; minutesCount: number }>();
   for (const row of active) {
     const stageId = stageIdFromDepto(row.status_depto, row.stage_id);
@@ -392,7 +398,7 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
     .filter((row) => row.batches > 0 || row.pairs > 0);
 
   const orderMap = new Map<string, OrderPipelineRow & { weighted: number; timeTotal: number; timeCount: number }>();
-  for (const row of tarjetas) {
+  for (const row of active) {
     if (row.cancelado === true || row.pedido_folio == null) continue;
     const id = `PED-${String(row.pedido_folio)}`;
     const stageId = stageIdFromDepto(row.status_depto, row.stage_id);
@@ -787,12 +793,20 @@ class PgErpService implements ErpService {
         [fechaInicio, fechaFin]
       ),
       this.pool.query<ErpRecord>(
-        `select
+        `with current_plant as (
+           select *
+           from public.tarjetas_viajeras
+           where cancelado = false
+             and coalesce(status_depto, '') in ('15','25','30')
+             and ultimo_escaneo is not null
+             and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
+         )
+         select
            (count(distinct pedido_folio) filter (where pedido_folio is not null))::int as orders,
            count(*)::int as batches,
            coalesce(sum(coalesce(pares, 0)), 0)::int as pairs
-         from public.tarjetas_viajeras
-         where cancelado = false and coalesce(status_depto, '') not in ('40','50')`
+         from current_plant`,
+        [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       ),
       this.pool.query<ErpRecord>(
         `select a.fecha::text as fecha,
@@ -908,7 +922,9 @@ class PgErpService implements ErpService {
              ultimo_escaneo
            from public.tarjetas_viajeras
            where cancelado = false
-             and coalesce(status_depto, '') not in ('40','50')
+             and coalesce(status_depto, '') in ('15','25','30')
+             and ultimo_escaneo is not null
+             and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
          ),
          grouped as (
            select
@@ -939,6 +955,8 @@ class PgErpService implements ErpService {
            when 'embarque' then 7
            else 99
          end`
+        ,
+        [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       ),
       this.pool.query<ErpRecord>(
         `with lotes as (
@@ -972,6 +990,9 @@ class PgErpService implements ErpService {
            from public.tarjetas_viajeras
            where cancelado = false
              and pedido_folio is not null
+             and coalesce(status_depto, '') in ('15','25','30')
+             and ultimo_escaneo is not null
+             and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
          ),
          stage_pairs as (
            select id, stage_id, sum(pares)::int as pairs
@@ -1016,13 +1037,17 @@ class PgErpService implements ErpService {
          group by r.id, r.cliente, r.oc, r.modelo, r.color, r.fecha_alta, r.fecha_compromiso, r.batches_count,
                   r.total_pares, r.shipped_pairs, r.in_process_pairs, r.avg_time_min, d.stage_id
          order by r.fecha_compromiso nulls last, r.id`
+        ,
+        [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       ),
       this.pool.query<ErpRecord>(
         `select * from public.tarjetas_viajeras
          where cancelado = false
-           and ( (coalesce(status_depto, '') not in ('40','50') and coalesce(stage_id, '') <> 'embarque')
-                 or ultimo_escaneo >= date_trunc('day', now()) )
-         order by ultimo_escaneo desc nulls last`
+           and coalesce(status_depto, '') in ('15','25','30')
+           and ultimo_escaneo is not null
+           and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
+         order by ultimo_escaneo desc nulls last`,
+        [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       )
     ]);
 

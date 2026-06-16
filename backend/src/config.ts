@@ -21,6 +21,9 @@ const configSchema = z.object({
   BIGZAP_BATCH_LIMIT: z.coerce.number().int().min(1).max(5000).default(800),
   // Ventana (dias) para seguir mostrando lotes ya facturados como "recientes".
   BIGZAP_ACTIVE_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  // Ventana que usa la vista de planta BigZap para WIP vivo. Excluye rezagos
+  // viejos que siguen abiertos en LOTCAB pero no aparecen como pares en proceso.
+  BIGZAP_PLANT_ACTIVE_DAYS: z.coerce.number().int().min(1).max(365).default(55),
   // Zona horaria de la planta. escaneado_at se guarda como timestamptz (UTC);
   // hora del dia / turno / fecha de los tableros deben calcularse en esta TZ,
   // no en UTC. Debe coincidir con PLANT_TZ del sync-service.
