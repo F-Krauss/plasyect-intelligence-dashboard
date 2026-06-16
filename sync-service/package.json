@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "Sincroniza tarjetas viajeras de BixApp (Firebird BIGZAP.FDB) hacia PostgreSQL/Supabase sin modificar la base original.",
+  "description": "Sincroniza tarjetas viajeras de Bigzap (Firebird BIGZAP.FDB) hacia PostgreSQL/Supabase.",
   "scripts": {
     "dev": "tsx src/index.ts",
     "dev:once": "tsx src/index.ts --once",

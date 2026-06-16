@@ -20,7 +20,11 @@ const configSchema = z.object({
   // Maximo de tarjetas viajeras activas que carga el bootstrap del dashboard.
   BIGZAP_BATCH_LIMIT: z.coerce.number().int().min(1).max(5000).default(800),
   // Ventana (dias) para seguir mostrando lotes ya facturados como "recientes".
-  BIGZAP_ACTIVE_DAYS: z.coerce.number().int().min(1).max(365).default(30)
+  BIGZAP_ACTIVE_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  // Zona horaria de la planta. escaneado_at se guarda como timestamptz (UTC);
+  // hora del dia / turno / fecha de los tableros deben calcularse en esta TZ,
+  // no en UTC. Debe coincidir con PLANT_TZ del sync-service.
+  PLANT_TZ: z.string().default('America/Mexico_City')
 });
 
 export const config = configSchema.parse(process.env);

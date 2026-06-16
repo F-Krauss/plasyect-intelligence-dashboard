@@ -1,6 +1,3 @@
-/**
- * Busca columnas que puedan referenciar defectos/calidad en todo el FDB.
- */
 import 'dotenv/config';
 import { withFirebird } from '../src/firebird.js';
 

@@ -20,9 +20,12 @@ function attach(): Promise<Database> {
 }
 
 function beginReadOnly(db: Database): Promise<Transaction> {
-  const isolation = Firebird.ISOLATION_READ_COMMITED_READ_ONLY ?? Firebird.ISOLATION_READ_COMMITED;
+  const isolation = Firebird.ISOLATION_READ_COMMITTED;
+  if (!isolation) {
+    throw new Error('node-firebird no expone ISOLATION_READ_COMMITTED; no se puede abrir Firebird con seguridad.');
+  }
   return new Promise((resolve, reject) => {
-    db.transaction(isolation, (err, tr) => (err ? reject(err) : resolve(tr)));
+    db.transaction({ isolation, readOnly: true }, (err, tr) => (err ? reject(err) : resolve(tr)));
   });
 }
 
@@ -34,10 +37,7 @@ function trQuery(tr: Transaction, sql: string, params: unknown[]): Promise<FbRow
 
 export type FbQuery = (sql: string, params?: unknown[]) => Promise<FbRow[]>;
 
-/**
- * Abre una conexion y una transaccion de SOLO LECTURA, ejecuta el bloque y
- * cierra todo. Nunca emite escrituras a la base de BixApp.
- */
+
 export async function withFirebird<T>(fn: (query: FbQuery) => Promise<T>): Promise<T> {
   const db = await attach();
   try {

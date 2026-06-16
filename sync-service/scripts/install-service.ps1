@@ -1,12 +1,3 @@
-# Instala plasyect-bigzap-sync como servicio de Windows usando NSSM.
-# Ejecutar como Administrador en el Windows Server 2022:
-#   powershell -ExecutionPolicy Bypass -File scripts\install-service.ps1
-#
-# Prerrequisitos:
-#   - Node.js LTS instalado (https://nodejs.org)
-#   - NSSM en el PATH o en C:\nssm\nssm.exe (https://nssm.cc/download)
-#   - `npm ci && npm run build` ya ejecutados en esta carpeta
-#   - .env configurado (copiar de .env.example)
 
 $ErrorActionPreference = 'Stop'
 

@@ -543,7 +543,9 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       totalUSD: order.totalUSD || 0,
       totalMXN: (order.totalUSD || 0) * exchangeRate,
       createdAt: order.createdAt || order.fechaAlta || new Date().toISOString(),
-      deliveryDate: order.deliveryDate || new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString(),
+      // Sin fecha de entrega fabricada: si no viene, queda vacia (N/D). La fecha
+      // real de compromiso proviene del FDB (pedido_fecha_salida).
+      deliveryDate: order.deliveryDate || '',
       status: order.status || 'PENDIENTE',
       discountAuthorized: order.discountAuthorized || false,
       discountPercentage: order.discountPercentage || 0

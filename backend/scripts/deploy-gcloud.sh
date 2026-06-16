@@ -75,11 +75,16 @@ SET_SECRETS="JWT_SECRET=JWT_SECRET:latest"
 if [[ -n "${DATABASE_URL:-}" ]]; then
   require_secret DATABASE_URL
   SET_SECRETS="${SET_SECRETS},DATABASE_URL=DATABASE_URL:latest"
+elif gcloud secrets describe DATABASE_URL --project="$PROJECT_ID" >/dev/null 2>&1; then
+  SET_SECRETS="${SET_SECRETS},DATABASE_URL=DATABASE_URL:latest"
 fi
 
 if [[ -n "${SUPABASE_URL:-}" && -n "${SUPABASE_SERVICE_ROLE_KEY:-}" ]]; then
   require_secret SUPABASE_URL
   require_secret SUPABASE_SERVICE_ROLE_KEY
+  SET_SECRETS="${SET_SECRETS},SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest"
+elif gcloud secrets describe SUPABASE_URL --project="$PROJECT_ID" >/dev/null 2>&1 && \
+     gcloud secrets describe SUPABASE_SERVICE_ROLE_KEY --project="$PROJECT_ID" >/dev/null 2>&1; then
   SET_SECRETS="${SET_SECRETS},SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest"
 fi
 

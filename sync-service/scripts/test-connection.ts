@@ -1,11 +1,7 @@
 import 'dotenv/config';
 import pg from 'pg';
 
-/**
- * Prueba de conexion a PostgreSQL/Supabase.
- * Usa el mismo DATABASE_URL y PGSSL que el servicio de sincronizacion.
- * Ejecutar: npx tsx scripts/test-connection.ts
- */
+
 async function main(): Promise<void> {
   const connectionString = process.env.DATABASE_URL;
   if (!connectionString) throw new Error('Falta DATABASE_URL en el entorno (.env)');

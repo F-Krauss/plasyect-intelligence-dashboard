@@ -1,6 +1,8 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 import { config, hasDatabaseUrl, hasSupabaseConfig } from './config.js';
 import { getPool } from './db.js';
+import { mapTarjetaToBatch, type TarjetaViajeraRow } from './bigzap-map.js';
+import type { Batch } from './domain.js';
 
 /**
  * Acceso a los datos de BixApp (tarjetas viajeras) sincronizados por
@@ -166,6 +168,10 @@ export interface ErpOperationalResponse {
   stagePipeline: StagePipelineRow[];
   orderRisk: OrderRiskSummary;
   orderPipeline: OrderPipelineRow[];
+  // Lotes activos + vencidos + embarcados hoy, universo completo de tarjetas_viajeras
+  // (sin el cap del bootstrap), mapeados con la misma logica canonica. Fuente unica
+  // para que Pipeline por Lote coincida con Pipeline por Pedido.
+  lotePipeline: Batch[];
 }
 
 /** Un movimiento = un escaneo de tarjeta viajera (AVANCE). La entrada es el
@@ -321,6 +327,22 @@ function summarizeOrderRisk(rows: OrderPipelineRow[]): OrderRiskSummary {
   return { totalOpen, totalRisk: vencido + alto, vencido, alto, medio, bajo, rows };
 }
 
+/**
+ * Hora del dia (0-23) de un timestamptz/ISO en la zona horaria de la planta.
+ * new Date(iso).getHours() usa la TZ del proceso Node (UTC en Cloud Run), lo que
+ * corre la hora ~6 h. Intl con timeZone fija la hora de pared real de la planta.
+ */
+function hourInTz(value: unknown, tz: string): number {
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) return 0;
+  const hour = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    hour: '2-digit',
+    hourCycle: 'h23'
+  }).format(date);
+  return Number.parseInt(hour, 10) % 24;
+}
+
 function daysLeftFromDate(value: unknown, today = new Date()): number | null {
   if (!value) return null;
   const due = new Date(String(value).slice(0, 10) + 'T12:00:00Z');
@@ -369,13 +391,6 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
     })
     .filter((row) => row.batches > 0 || row.pairs > 0);
 
-  const weightedProgressSum = stagePipeline.reduce((sum, row) => sum + row.pairs * (STAGE_WEIGHTS[row.stageId] ?? 14), 0);
-  const wipSummary = {
-    activeBatches: active.length,
-    activePairs,
-    globalProgress: activePairs > 0 ? Math.round(weightedProgressSum / activePairs) : 0
-  };
-
   const orderMap = new Map<string, OrderPipelineRow & { weighted: number; timeTotal: number; timeCount: number }>();
   for (const row of tarjetas) {
     if (row.cancelado === true || row.pedido_folio == null) continue;
@@ -421,7 +436,7 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
   }
 
   const orderPipeline = Array.from(orderMap.values()).map((row) => {
-    const progress = row.totalPares > 0 ? Math.min(100, Math.round(row.weighted / row.totalPares)) : 0;
+    const progress = row.totalPares > 0 ? Math.min(100, Math.round((row.shippedPairs / row.totalPares) * 100)) : 0;
     const dominantStage = Object.entries(row.pairsByStage).sort((a, b) => b[1] - a[1])[0]?.[0] ?? 'alta_pedido';
     const daysLeft = daysLeftFromDate(row.fechaCompromiso);
     const delivered = row.totalPares > 0 && row.shippedPairs >= row.totalPares;
@@ -443,6 +458,20 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
     if (b.fechaCompromiso) return 1;
     return a.id.localeCompare(b.id);
   });
+  const activeOrderTotals = orderPipeline
+    .filter((row) => row.progress < 100)
+    .reduce((acc, row) => {
+      acc.total += row.totalPares;
+      acc.shipped += row.shippedPairs;
+      return acc;
+    }, { total: 0, shipped: 0 });
+  const wipSummary = {
+    activeBatches: active.length,
+    activePairs,
+    globalProgress: activeOrderTotals.total > 0
+      ? Math.round((activeOrderTotals.shipped / activeOrderTotals.total) * 100)
+      : 0
+  };
 
   return { wipSummary, stagePipeline, orderPipeline, orderRisk: summarizeOrderRisk(orderPipeline) };
 }
@@ -577,7 +606,7 @@ class PgErpService implements ErpService {
              ad.area,
              ad.orden,
              ad.meta_hora,
-             coalesce(cl.ultimo_escaneo, cl.fecha_programacion::timestamp at time zone 'UTC') as event_at
+             coalesce(cl.ultimo_escaneo, cl.fecha_programacion::timestamp at time zone $3) as event_at
            from current_lotes cl
            join area_def ad on cl.current_orden > ad.orden and ad.area <> 'SALIDAS DE TERCERA'
            where not exists (
@@ -592,27 +621,35 @@ class PgErpService implements ErpService {
            select * from exact_completed
            union all
            select * from inferred_completed
+         ),
+         completed_local as (
+           -- event_at es timestamptz (UTC). Lo bajamos a hora de pared de la
+           -- planta ($3) antes de derivar fecha / hora / turno; si no, extract(hour)
+           -- corre en UTC y corre todo ~6 h (la produccion aparece en la tarde/noche
+           -- y los turnos quedan mal etiquetados).
+           select c.*, (c.event_at at time zone $3) as event_local
+           from completed c
          )
          SELECT
            c.area,
-           c.event_at::date::text AS fecha,
-           lpad(extract(hour from c.event_at)::int::text, 2, '0') || ':00' AS hora,
+           c.event_local::date::text AS fecha,
+           lpad(extract(hour from c.event_local)::int::text, 2, '0') || ':00' AS hora,
            CASE
-             WHEN extract(hour from c.event_at) >= 7 AND extract(hour from c.event_at) < 15 THEN '1'
-             WHEN extract(hour from c.event_at) >= 15 AND extract(hour from c.event_at) < 23 THEN '2'
+             WHEN extract(hour from c.event_local) >= 7 AND extract(hour from c.event_local) < 15 THEN '1'
+             WHEN extract(hour from c.event_local) >= 15 AND extract(hour from c.event_local) < 23 THEN '2'
              ELSE '3'
            END AS turno,
            c.meta_hora,
            COALESCE(SUM(l.pares), 0)::int AS produccion_real,
            COALESCE(e.nombre, l.estilo, 'Varios') AS modelo,
            COALESCE(l.piecol, l.combina, 'N/D') AS color
-         FROM completed c
+         FROM completed_local c
          JOIN public.bigzap_lotes l ON l.programa = c.programa AND l.lote = c.lote
          LEFT JOIN public.bigzap_estilos e ON e.codigo = l.estilo
-         WHERE c.event_at::date BETWEEN $1::date AND $2::date
-         GROUP BY c.area, c.event_at::date, extract(hour from c.event_at), c.meta_hora, e.nombre, l.estilo, l.piecol, l.combina
+         WHERE c.event_local::date BETWEEN $1::date AND $2::date
+         GROUP BY c.area, c.event_local::date, extract(hour from c.event_local), c.meta_hora, e.nombre, l.estilo, l.piecol, l.combina
          ORDER BY fecha, area, hora`,
-        [fechaInicio, fechaFin]
+        [fechaInicio, fechaFin, config.PLANT_TZ]
       ),
       this.pool.query<ErpRecord>(
         `SELECT
@@ -712,10 +749,10 @@ class PgErpService implements ErpService {
        FROM mov m
        LEFT JOIN public.bigzap_lotes l ON l.programa = m.programa AND l.lote = m.lote
        LEFT JOIN public.bigzap_departamentos d ON d.codigo = m.depto
-       WHERE m.entrada::date BETWEEN $1::date AND $2::date
+       WHERE (m.entrada at time zone $4)::date BETWEEN $1::date AND $2::date
        ORDER BY m.entrada DESC
        LIMIT $3`,
-      [fechaInicio, fechaFin, limit]
+      [fechaInicio, fechaFin, limit, config.PLANT_TZ]
     );
     return rows.map(r => ({
       idMovimiento: String(r.id_movimiento ?? ''),
@@ -730,7 +767,7 @@ class PgErpService implements ErpService {
   }
 
   async getOperational(fechaInicio: string, fechaFin: string): Promise<ErpOperationalResponse> {
-    const [ejecutivo, movements, sync, metaRows, activeRows, dailyRows, modelRows, clientsRows, catalogModelsRows, deptRows, stageRows, orderRows] = await Promise.all([
+    const [ejecutivo, movements, sync, metaRows, activeRows, dailyRows, modelRows, clientsRows, catalogModelsRows, deptRows, stageRows, orderRows, loteRows] = await Promise.all([
       this.getEjecutivoDashboard(fechaInicio, fechaFin),
       this.getMovimientos(fechaInicio, fechaFin, 500),
       this.getSyncStatus(),
@@ -825,13 +862,13 @@ class PgErpService implements ErpService {
            coalesce(avg(extract(epoch from (coalesce(s.calidad_at, s.banda_at) - s.inyeccion_at)) / 60.0) filter (where s.inyeccion_at is not null and coalesce(s.calidad_at, s.banda_at) is not null), 0)::float as tiempo_inyeccion_mins,
            coalesce(avg(extract(epoch from (s.banda_at - s.calidad_at)) / 60.0) filter (where s.banda_at is not null and s.calidad_at is not null), 0)::float as tiempo_estabilizacion_mins,
            coalesce(avg(extract(epoch from (s.embarque_at - s.banda_at)) / 60.0) filter (where s.embarque_at is not null and s.banda_at is not null), 0)::float as tiempo_banda_mins,
-           count(*) filter (where s.embarque_at is not null and (lb.fecha_salida is null or s.embarque_at::date <= lb.fecha_salida))::int as entregas_cumplidas
+           count(*) filter (where s.embarque_at is not null and (lb.fecha_salida is null or (s.embarque_at at time zone $3)::date <= lb.fecha_salida))::int as entregas_cumplidas
          from lot_base lb
          left join defects d on d.programa = lb.programa and d.lote = lb.lote
          left join scans s on s.programa = lb.programa and s.lote = lb.lote
          group by lb.estilo, lb.modelo, lb.color, lb.cliente, lb.fecha_programacion, lb.status_depto
          order by lb.fecha_programacion, pares_producidos desc`,
-        [fechaInicio, fechaFin]
+        [fechaInicio, fechaFin, config.PLANT_TZ]
       ),
       this.pool.query<ErpRecord>(
         `select codigo as id, codigo, nombre as name, rfc, clasif
@@ -963,23 +1000,13 @@ class PgErpService implements ErpService {
              coalesce(sum(pares), 0)::int as total_pares,
              coalesce(sum(pares) filter (where delivered), 0)::int as shipped_pairs,
              coalesce(sum(pares) filter (where not delivered), 0)::int as in_process_pairs,
-             coalesce(sum(pares * case stage_id
-               when 'alta_pedido' then 14
-               when 'almacen' then 29
-               when 'inyeccion' then 43
-               when 'estabilizacion' then 57
-               when 'aduana' then 71
-               when 'banda' then 86
-               when 'embarque' then 100
-               else 14
-             end), 0)::numeric as weighted_progress,
              round(avg(greatest(0, extract(epoch from (now() - ultimo_escaneo)) / 60.0)) filter (where ultimo_escaneo is not null))::int as avg_time_min
            from lotes
            group by id
          )
          select
            r.*,
-           case when r.total_pares > 0 then least(100, round(r.weighted_progress / r.total_pares)::int) else 0 end as progress,
+           case when r.total_pares > 0 then least(100, round(r.shipped_pairs::numeric / r.total_pares * 100)::int) else 0 end as progress,
            d.stage_id as dominant_stage,
            jsonb_object_agg(sp.stage_id, sp.pairs) as pairs_by_stage,
            case when r.fecha_compromiso is null then null else (r.fecha_compromiso::date - current_date)::int end as days_left
@@ -987,8 +1014,15 @@ class PgErpService implements ErpService {
          left join dominant d on d.id = r.id
          left join stage_pairs sp on sp.id = r.id
          group by r.id, r.cliente, r.oc, r.modelo, r.color, r.fecha_alta, r.fecha_compromiso, r.batches_count,
-                  r.total_pares, r.shipped_pairs, r.in_process_pairs, r.weighted_progress, r.avg_time_min, d.stage_id
+                  r.total_pares, r.shipped_pairs, r.in_process_pairs, r.avg_time_min, d.stage_id
          order by r.fecha_compromiso nulls last, r.id`
+      ),
+      this.pool.query<ErpRecord>(
+        `select * from public.tarjetas_viajeras
+         where cancelado = false
+           and ( (coalesce(status_depto, '') not in ('40','50') and coalesce(stage_id, '') <> 'embarque')
+                 or ultimo_escaneo >= date_trunc('day', now()) )
+         order by ultimo_escaneo desc nulls last`
       )
     ]);
 
@@ -1010,12 +1044,6 @@ class PgErpService implements ErpService {
         saturation: saturationFor(batches, avgMinutes)
       };
     });
-    const weightedProgressSum = stagePipeline.reduce((sum, row) => sum + row.pairs * (STAGE_WEIGHTS[row.stageId] ?? 14), 0);
-    const wipSummary: WipSummary = {
-      activeBatches,
-      activePairs,
-      globalProgress: activePairs > 0 ? Math.round(weightedProgressSum / activePairs) : 0
-    };
     const orderPipeline: OrderPipelineRow[] = orderRows.rows.map((row) => {
       const totalPares = Number(row.total_pares ?? 0);
       const shippedPairs = Number(row.shipped_pairs ?? 0);
@@ -1042,6 +1070,20 @@ class PgErpService implements ErpService {
         daysLeft
       };
     });
+    const activeOrderTotals = orderPipeline
+      .filter((row) => row.progress < 100)
+      .reduce((acc, row) => {
+        acc.total += row.totalPares;
+        acc.shipped += row.shippedPairs;
+        return acc;
+      }, { total: 0, shipped: 0 });
+    const wipSummary: WipSummary = {
+      activeBatches,
+      activePairs,
+      globalProgress: activeOrderTotals.total > 0
+        ? Math.round((activeOrderTotals.shipped / activeOrderTotals.total) * 100)
+        : 0
+    };
     const models: ModelPerformanceRow[] = modelRows.rows.map((row) => ({
       id: `${String(row.modelo_id ?? 'modelo')}-${String(row.fecha ?? '')}-${String(row.color ?? '')}-${String(row.cliente ?? '')}`,
       tenantId: config.DEFAULT_TENANT_ID,
@@ -1062,6 +1104,9 @@ class PgErpService implements ErpService {
       etapaActiva: stageFromDepto(row.status_depto),
       estatus: statusFromModelRow(row)
     }));
+    const lotePipeline: Batch[] = loteRows.rows.map((row) =>
+      mapTarjetaToBatch(row as unknown as TarjetaViajeraRow, config.DEFAULT_TENANT_ID as Batch['tenantId'])
+    );
 
     return {
       meta: {
@@ -1094,7 +1139,8 @@ class PgErpService implements ErpService {
       wipSummary,
       stagePipeline,
       orderRisk: summarizeOrderRisk(orderPipeline),
-      orderPipeline
+      orderPipeline,
+      lotePipeline
     };
   }
 }
@@ -1194,7 +1240,7 @@ class SupabaseErpService implements ErpService {
     // Group avance by fecha+depto+hour
     const prodMap = new Map<string, { area: string; fecha: string; hora: string; turno: string; metaHora: number; pares: number; modelo: string; color: string }>();
     for (const a of avanceRes.data ?? []) {
-      const hora = new Date(a.escaneado_at).getHours();
+      const hora = hourInTz(a.escaneado_at, config.PLANT_TZ);
       const lot = loteMap.get(`${a.programa}-${a.lote}`);
       const modelo = lot ? (estiloMap.get(String(lot.estilo)) || String(lot.estilo || 'Varios')) : 'Varios';
       const color = lot ? String(lot.piecol || lot.combina || 'N/D') : 'N/D';
@@ -1374,6 +1420,15 @@ class SupabaseErpService implements ErpService {
       current.tarjetas += 1;
       dailyMap.set(p.fecha, current);
     }
+    const todayIso = new Date().toISOString().slice(0, 10);
+    const lotePipeline: Batch[] = (tarjetasRes.data ?? [])
+      .filter((row) => {
+        if (row.cancelado === true) return false;
+        const delivered = ['40', '50'].includes(String(row.status_depto ?? '')) || row.stage_id === 'embarque';
+        const embarcadoHoy = String(row.ultimo_escaneo ?? '').slice(0, 10) === todayIso;
+        return !delivered || embarcadoHoy;
+      })
+      .map((row) => mapTarjetaToBatch(row as unknown as TarjetaViajeraRow, config.DEFAULT_TENANT_ID as Batch['tenantId']));
 
     return {
       meta: {
@@ -1402,7 +1457,8 @@ class SupabaseErpService implements ErpService {
       wipSummary: operationalSummaries.wipSummary,
       stagePipeline: operationalSummaries.stagePipeline,
       orderRisk: operationalSummaries.orderRisk,
-      orderPipeline: operationalSummaries.orderPipeline
+      orderPipeline: operationalSummaries.orderPipeline,
+      lotePipeline
     };
   }
 }
@@ -1443,7 +1499,8 @@ export class DisabledErpService implements ErpService {
       wipSummary: { activeBatches: 0, activePairs: 0, globalProgress: 0 },
       stagePipeline: [],
       orderRisk: { totalOpen: 0, totalRisk: 0, vencido: 0, alto: 0, medio: 0, bajo: 0, rows: [] },
-      orderPipeline: []
+      orderPipeline: [],
+      lotePipeline: []
     };
   }
 }

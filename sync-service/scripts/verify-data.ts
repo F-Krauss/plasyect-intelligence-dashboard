@@ -1,7 +1,3 @@
-/**
- * Verificacion de calidad de datos sincronizados desde BIGZAP.FDB.
- * Uso: npx tsx scripts/verify-data.ts
- */
 import 'dotenv/config';
 import pg from 'pg';
 

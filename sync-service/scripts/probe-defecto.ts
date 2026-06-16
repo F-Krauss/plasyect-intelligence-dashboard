@@ -1,7 +1,3 @@
-/**
- * Sondea tablas candidatas de calidad/defectos directamente en el FDB
- * (solo lectura). Uso: npx tsx scripts/probe-defecto.ts
- */
 import 'dotenv/config';
 import { withFirebird } from '../src/firebird.js';
 

@@ -3,11 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import pg from 'pg';
 
-/**
- * Aplica las migraciones SQL del backend contra la base apuntada por DATABASE_URL.
- * Idempotente: las migraciones usan "create table if not exists".
- * Ejecutar: npx tsx scripts/apply-migrations.ts
- */
+
 const MIGRATIONS = [
   '../../backend/migrations/001_initial_schema.sql',
   '../../backend/migrations/002_bigzap_tarjetas.sql',

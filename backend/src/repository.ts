@@ -129,13 +129,11 @@ export class SupabaseRepository implements DashboardRepository {
   constructor(private readonly supabase: SupabaseClient) {}
 
   async bootstrap(): Promise<BootstrapData> {
-    const [tenants, users, clients, models, orders, batches, machines, bands, defects, audits, ocrDocuments, bigzap] = await Promise.all([
+    const [tenants, users, clients, models, machines, bands, defects, audits, ocrDocuments, bigzap] = await Promise.all([
       this.readStatic<Tenant>('tenants'),
       this.readStatic<UserSession>('app_users'),
       this.readStatic<Client>('clients'),
       this.readStatic<Model>('models'),
-      this.list('orders') as Promise<Order[]>,
-      this.list('batches') as Promise<Batch[]>,
       this.readStatic<Machine>('machines'),
       this.readStatic<Band>('bands'),
       this.list('defects') as Promise<QualityDefect[]>,
@@ -144,10 +142,10 @@ export class SupabaseRepository implements DashboardRepository {
       this.loadBigzap()
     ]);
 
-    const realBatches = bigzap?.batches ?? [];
-    const realOrders = bigzap?.orders ?? [];
-    const resolvedOrders = realOrders.length ? realOrders : orders;
-    const resolvedBatches = realBatches.length ? realBatches : batches;
+    // Pedidos y lotes provienen EXCLUSIVAMENTE del FDB (bigzap). Sin fallback a
+    // store manual/seed: si el FDB no trae datos, se devuelven arreglos vacios.
+    const resolvedOrders = bigzap?.orders ?? [];
+    const resolvedBatches = bigzap?.batches ?? [];
 
     return {
       tenants: tenants.length ? tenants : seedData.tenants,
@@ -270,13 +268,11 @@ export class PgRepository implements DashboardRepository {
   }
 
   async bootstrap(): Promise<BootstrapData> {
-    const [tenants, users, clients, models, orders, batches, machines, bands, defects, audits, ocrDocuments, bigzap] = await Promise.all([
+    const [tenants, users, clients, models, machines, bands, defects, audits, ocrDocuments, bigzap] = await Promise.all([
       this.safeStatic<Tenant>('tenants'),
       this.safeStatic<UserSession>('app_users'),
       this.safeStatic<Client>('clients'),
       this.safeStatic<Model>('models'),
-      this.safeList('orders') as Promise<Order[]>,
-      this.safeList('batches') as Promise<Batch[]>,
       this.safeStatic<Machine>('machines'),
       this.safeStatic<Band>('bands'),
       this.safeList('defects') as Promise<QualityDefect[]>,
@@ -285,10 +281,10 @@ export class PgRepository implements DashboardRepository {
       this.loadBigzap()
     ]);
 
-    const realBatches = bigzap?.batches ?? [];
-    const realOrders = bigzap?.orders ?? [];
-    const resolvedOrders = realOrders.length ? realOrders : orders;
-    const resolvedBatches = realBatches.length ? realBatches : batches;
+    // Pedidos y lotes provienen EXCLUSIVAMENTE del FDB (bigzap). Sin fallback a
+    // store manual/seed: si el FDB no trae datos, se devuelven arreglos vacios.
+    const resolvedOrders = bigzap?.orders ?? [];
+    const resolvedBatches = bigzap?.batches ?? [];
 
     return {
       tenants: tenants.length ? tenants : seedData.tenants,

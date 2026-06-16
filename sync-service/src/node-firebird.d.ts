@@ -21,12 +21,15 @@ declare module 'node-firebird' {
 
   export interface Database {
     query(sql: string, params: unknown[], callback: (err: Error | null, result: Record<string, unknown>[]) => void): void;
-    transaction(isolation: number[] | undefined, callback: (err: Error | null, transaction: Transaction) => void): void;
+    transaction(
+      options: number[] | { isolation: number[]; readOnly?: boolean },
+      callback: (err: Error | null, transaction: Transaction) => void
+    ): void;
     detach(callback?: (err: Error | null) => void): void;
   }
 
-  export const ISOLATION_READ_COMMITED: number[];
-  export const ISOLATION_READ_COMMITED_READ_ONLY: number[];
+  export const ISOLATION_READ_COMMITTED: number[];
+  export const ISOLATION_READ_COMMITTED_READ_ONLY: number[];
   export const ISOLATION_READ_UNCOMMITTED: number[];
   export const ISOLATION_REPEATABLE_READ: number[];
   export const ISOLATION_SERIALIZABLE: number[];
@@ -35,8 +38,8 @@ declare module 'node-firebird' {
 
   const Firebird: {
     attach: typeof attach;
-    ISOLATION_READ_COMMITED: number[];
-    ISOLATION_READ_COMMITED_READ_ONLY: number[];
+    ISOLATION_READ_COMMITTED: number[];
+    ISOLATION_READ_COMMITTED_READ_ONLY: number[];
     ISOLATION_READ_UNCOMMITTED: number[];
     ISOLATION_REPEATABLE_READ: number[];
     ISOLATION_SERIALIZABLE: number[];

@@ -1,6 +1,3 @@
-/**
- * Distribucion de CALIDAD en tablas transaccionales del FDB.
- */
 import 'dotenv/config';
 import { withFirebird } from '../src/firebird.js';
 

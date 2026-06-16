@@ -91,11 +91,6 @@ function resolveStage(row: TarjetaViajeraRow): StageId {
   return 'inyeccion';
 }
 
-function stageProgress(stage: StageId): number {
-  const idx = STAGE_ORDER.indexOf(stage);
-  return Math.round(((idx + 1) / STAGE_ORDER.length) * 100);
-}
-
 function minutesSince(iso: string | null): number | undefined {
   if (!iso) return undefined;
   const then = new Date(iso).getTime();
@@ -143,7 +138,7 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
     cycleTimeSeconds: 0,
     status,
     defectRate: 0,
-    lastUpdate: row.ultimo_escaneo || row.fecha_programacion || new Date().toISOString(),
+    lastUpdate: row.ultimo_escaneo || row.fecha_programacion || null,
 
     // Campos en espanol que usa el pipeline por lote
     idLote: row.tarjeta,
@@ -160,7 +155,7 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
     fechaCompromiso: fechaCompromiso ?? undefined,
     ultimoEscaneo: row.ultimo_escaneo ?? undefined,
     tiempoEnEtapaMinutos: minutesSince(row.ultimo_escaneo),
-    porcentajeAvance: stageProgress(stage),
+    porcentajeAvance: entregado ? 100 : 0,
     estatus: status,
     responsableActual: undefined,
     observaciones: cancelado ? 'Lote cancelado en BixApp.' : undefined,
@@ -196,8 +191,8 @@ export function mapPedidoToOrder(row: PedidoRow, tenantId: TenantId): Order {
     exchangeRate: 0,
     totalUSD: 0,
     totalMXN: 0,
-    createdAt: row.fecha_pedido ?? new Date().toISOString(),
-    deliveryDate: row.fecha_salida ?? row.fecha_recepcion ?? new Date().toISOString(),
+    createdAt: row.fecha_pedido ?? null,
+    deliveryDate: row.fecha_salida ?? row.fecha_recepcion ?? null,
     status: estatus,
     discountAuthorized: false,
     discountPercentage: 0,

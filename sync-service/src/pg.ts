@@ -11,10 +11,6 @@ export type JsonRow = Record<string, unknown>;
 
 const CHUNK = 2000;
 
-/**
- * Upsert por lotes usando jsonb_to_recordset: un solo statement por chunk.
- * `columns` define nombre y tipo de cada campo del registro JSON.
- */
 export async function upsertJson(
   table: string,
   columns: Array<{ name: string; type: string }>,

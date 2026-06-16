@@ -151,6 +151,9 @@ export interface ErpOperationalResponse {
   stagePipeline: StagePipelineRow[];
   orderRisk: OrderRiskSummary;
   orderPipeline: OrderPipelineRow[];
+  // Lotes activos + vencidos + embarcados hoy desde el universo completo del FDB
+  // (sin el cap del bootstrap). Fuente unica del Pipeline por Lote.
+  lotePipeline: Batch[];
 }
 
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/$/, '');
@@ -218,6 +221,24 @@ function patch<T>(path: string, payload: unknown): Promise<T> {
   return request<T>(path, { method: 'PATCH', body: JSON.stringify(payload) });
 }
 
+const ERP_OPERATIVO_CACHE_MS = 60_000;
+const erpOperativoCache = new Map<string, { at: number; promise: Promise<ErpOperationalResponse> }>();
+
+function getCachedErpOperativo(fechaInicio: string, fechaFin: string): Promise<ErpOperationalResponse> {
+  const qs = new URLSearchParams({ fechaInicio, fechaFin });
+  const key = qs.toString();
+  const cached = erpOperativoCache.get(key);
+  if (cached && Date.now() - cached.at < ERP_OPERATIVO_CACHE_MS) return cached.promise;
+
+  const promise = request<ErpOperationalResponse>(`/api/erp/operativo?${qs}`)
+    .catch(error => {
+      erpOperativoCache.delete(key);
+      throw error;
+    });
+  erpOperativoCache.set(key, { at: Date.now(), promise });
+  return promise;
+}
+
 export const dashboardApi = {
   bootstrap: () => request<BootstrapResponse>('/api/bootstrap'),
   createOrder: (order: Order) => post<Order>('/api/orders', order),
@@ -253,8 +274,7 @@ export const dashboardApi = {
     return request<EjecutivoData>(`/api/erp/ejecutivo?${qs}`);
   },
   erpOperativo: (fechaInicio: string, fechaFin: string) => {
-    const qs = new URLSearchParams({ fechaInicio, fechaFin });
-    return request<ErpOperationalResponse>(`/api/erp/operativo?${qs}`);
+    return getCachedErpOperativo(fechaInicio, fechaFin);
   },
   erpMovimientos: (fechaInicio: string, fechaFin: string, limit = 50) => {
     const qs = new URLSearchParams({ fechaInicio, fechaFin, limit: String(limit) });
