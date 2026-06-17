@@ -5471,50 +5471,81 @@ export const ModelosProductosView: React.FC = () => {
   // Group stats by model to resolve rank and rates
   const modelSummaries: Record<string, {
     name: string;
+    lotes: number;
     producido: number;
     defectuosos: number;
     segundas: number;
     reprocesos: number;
     leadTimeSum: number;
+    leadTimeWeight: number;
     timeInySum: number;
+    timeInyWeight: number;
     timeEstSum: number;
+    timeEstWeight: number;
     timeBndSum: number;
+    timeBndWeight: number;
     count: number;
-    compliedOnes: number;
+    entregasCumplidas: number;
+    entregasTotal: number;
   }> = {};
 
   filteredRecords.forEach(l => {
     if (!modelSummaries[l.modeloName]) {
       modelSummaries[l.modeloName] = {
         name: l.modeloName,
+        lotes: 0,
         producido: 0,
         defectuosos: 0,
         segundas: 0,
         reprocesos: 0,
         leadTimeSum: 0,
+        leadTimeWeight: 0,
         timeInySum: 0,
+        timeInyWeight: 0,
         timeEstSum: 0,
+        timeEstWeight: 0,
         timeBndSum: 0,
+        timeBndWeight: 0,
         count: 0,
-        compliedOnes: 0
+        entregasCumplidas: 0,
+        entregasTotal: 0
       };
     }
     const ms = modelSummaries[l.modeloName];
+    const weight = Math.max(1, l.lotes || 0);
+    ms.lotes += l.lotes || 0;
     ms.producido += l.paresProducidos;
     ms.defectuosos += l.paresDefectuosos;
     ms.segundas += l.paresSegundas;
     ms.reprocesos += l.paresReprocesos;
-    ms.leadTimeSum += l.leadTimeHours;
-    ms.timeInySum += l.tiempoInyeccionMins;
-    ms.timeEstSum += l.tiempoEstabilizacionMins;
-    ms.timeBndSum += l.tiempoBandaMins;
-    ms.count += 1;
-    if (l.entregaCumplida) {
-      ms.compliedOnes += 1;
+    if (l.leadTimeHours > 0) {
+      ms.leadTimeSum += l.leadTimeHours * weight;
+      ms.leadTimeWeight += weight;
     }
+    if (l.tiempoInyeccionMins > 0) {
+      ms.timeInySum += l.tiempoInyeccionMins * weight;
+      ms.timeInyWeight += weight;
+    }
+    if (l.tiempoEstabilizacionMins > 0) {
+      ms.timeEstSum += l.tiempoEstabilizacionMins * weight;
+      ms.timeEstWeight += weight;
+    }
+    if (l.tiempoBandaMins > 0) {
+      ms.timeBndSum += l.tiempoBandaMins * weight;
+      ms.timeBndWeight += weight;
+    }
+    ms.count += 1;
+    ms.entregasCumplidas += l.entregasCumplidas || 0;
+    ms.entregasTotal += l.entregasTotal || 0;
   });
 
   const summariesList = Object.values(modelSummaries);
+  const avgLeadTime = (m: typeof summariesList[number]) => m.leadTimeWeight > 0 ? m.leadTimeSum / m.leadTimeWeight : 0;
+  const avgInyTime = (m: typeof summariesList[number]) => m.timeInyWeight > 0 ? m.timeInySum / m.timeInyWeight : 0;
+  const avgEstTime = (m: typeof summariesList[number]) => m.timeEstWeight > 0 ? m.timeEstSum / m.timeEstWeight : 0;
+  const avgBndTime = (m: typeof summariesList[number]) => m.timeBndWeight > 0 ? m.timeBndSum / m.timeBndWeight : 0;
+  const modelCompliance = (m: typeof summariesList[number]) =>
+    m.entregasTotal > 0 ? Math.round((m.entregasCumplidas / m.entregasTotal) * 100) : 0;
 
   // KPI calculations
   const totalModelosActivos = summariesList.length;
@@ -5541,21 +5572,19 @@ export const ModelosProductosView: React.FC = () => {
 
   // 4. Modelo con Mayor Lead Time Promedio
   const sortedByLeadTime = [...summariesList].sort((a, b) => {
-    const aAvg = a.count > 0 ? (a.leadTimeSum / a.count) : 0;
-    const bAvg = b.count > 0 ? (b.leadTimeSum / b.count) : 0;
-    return bAvg - aAvg;
+    return avgLeadTime(b) - avgLeadTime(a);
   });
   const modeloMayorLeadTime = sortedByLeadTime[0]?.name || 'Ninguno';
 
   // 5. Modelo con Mejor Cumplimiento de Entrega
   const sortedByCompliance = [...summariesList].sort((a, b) => {
-    const aComp = a.count > 0 ? (a.compliedOnes / a.count) : 0;
-    const bComp = b.count > 0 ? (b.compliedOnes / b.count) : 0;
-    return bComp - aComp;
+    return modelCompliance(b) - modelCompliance(a);
   });
   const modeloMejorCumplimiento = sortedByCompliance[0]?.name || 'Ninguno';
+  const totalEntregasCumplidas = summariesList.reduce((sum, m) => sum + m.entregasCumplidas, 0);
+  const totalEntregas = summariesList.reduce((sum, m) => sum + m.entregasTotal, 0);
   const cumplimientoPromedioPedido = summariesList.length > 0
-    ? Math.round(summariesList.reduce((sum, m) => sum + (m.count > 0 ? (m.compliedOnes / m.count) * 100 : 0), 0) / summariesList.length)
+    ? (totalEntregas > 0 ? Math.round((totalEntregasCumplidas / totalEntregas) * 100) : 0)
     : 0;
 
   // 6. Porcentaje participación del modelo principal
@@ -5577,12 +5606,14 @@ export const ModelosProductosView: React.FC = () => {
       };
     }
     const withVol = summariesList.filter(m => m.producido > 0);
-    const avg = (sum: number, count: number) => (count > 0 ? sum / count : 0);
-
     // 1. Calidad: modelo con mayor tasa de defecto
     const defectLeader = (withVol.length ? withVol : summariesList)
       .slice()
-      .sort((a, b) => avg(b.defectuosos, b.producido) - avg(a.defectuosos, a.producido))[0];
+      .sort((a, b) => {
+        const bRate = b.producido > 0 ? b.defectuosos / b.producido : 0;
+        const aRate = a.producido > 0 ? a.defectuosos / a.producido : 0;
+        return bRate - aRate;
+      })[0];
     const dlRate = defectLeader.producido > 0 ? (defectLeader.defectuosos / defectLeader.producido) * 100 : 0;
     const dlShare = totalDefectos > 0 ? Math.round((defectLeader.defectuosos / totalDefectos) * 100) : 0;
     const calidadText = dlRate > 0
@@ -5590,18 +5621,18 @@ export const ModelosProductosView: React.FC = () => {
       : `Sin defectos registrados en el corte filtrado: ${totalPares.toLocaleString()} pares producidos limpios en ${summariesList.length} modelo(s).`;
 
     // 2. Lead times: modelo con mayor tiempo de estabilización promedio
-    const stbLeader = summariesList.slice().sort((a, b) => avg(b.timeEstSum, b.count) - avg(a.timeEstSum, a.count))[0];
-    const stbAvg = Math.round(avg(stbLeader.timeEstSum, stbLeader.count));
-    const ltAvg = avg(stbLeader.leadTimeSum, stbLeader.count).toFixed(1);
-    const compStb = stbLeader.count > 0 ? Math.round((stbLeader.compliedOnes / stbLeader.count) * 100) : 0;
+    const stbLeader = summariesList.slice().sort((a, b) => avgEstTime(b) - avgEstTime(a))[0];
+    const stbAvg = Math.round(avgEstTime(stbLeader));
+    const ltAvg = avgLeadTime(stbLeader).toFixed(1);
+    const compStb = modelCompliance(stbLeader);
     const leadText = `${stbLeader.name} acumula el mayor tiempo de estabilización promedio (${stbAvg} min) y un lead time de ${ltAvg} h por corrida` +
       (compStb >= 80 ? `, aunque mantiene buen cumplimiento (${compStb}%). Revisar capacidad del túnel de estabilización.` : ` con cumplimiento de ${compStb}%. Cuello de botella probable en estabilización.`);
 
     // 3. Volumen y cumplimiento: líder de volumen + rezagado en entregas
     const top = sortedByVol[0];
     const topShare = totalPares > 0 ? Math.round((top.producido / totalPares) * 100) : 0;
-    const worstComp = summariesList.slice().sort((a, b) => avg(a.compliedOnes, a.count) - avg(b.compliedOnes, b.count))[0];
-    const worstCompPct = worstComp.count > 0 ? Math.round((worstComp.compliedOnes / worstComp.count) * 100) : 0;
+    const worstComp = summariesList.slice().sort((a, b) => modelCompliance(a) - modelCompliance(b))[0];
+    const worstCompPct = modelCompliance(worstComp);
     const volText = `${top.name} lidera el volumen con ${topShare}% del total (${top.producido.toLocaleString()} pares). Cumplimiento promedio ${cumplimientoPromedioPedido}%` +
       (worstComp.name !== top.name ? `; ${worstComp.name} es el más rezagado en entregas (${worstCompPct}%).` : '.');
 
@@ -5677,19 +5708,19 @@ export const ModelosProductosView: React.FC = () => {
   // Chart 4: Lead time promedio por modelo
   const leadTimeChartData = summariesList.map(m => ({
     name: m.name,
-    'Lead Time Hrs': m.count > 0 ? Number((m.leadTimeSum / m.count).toFixed(1)) : 0
+    'Lead Time Hrs': Number(avgLeadTime(m).toFixed(1))
   })).sort((a, b) => b['Lead Time Hrs'] - a['Lead Time Hrs']);
 
   // Chart 5: Productividad por modelo (Average volume produced per run)
   const productividadModelData = summariesList.map(m => ({
     name: m.name,
-    'Prod. Promedio Batch': m.count > 0 ? Math.round(m.producido / m.count) : 0
+    'Prod. Promedio Batch': m.lotes > 0 ? Math.round(m.producido / m.lotes) : 0
   })).sort((a, b) => b['Prod. Promedio Batch'] - a['Prod. Promedio Batch']);
 
   // Chart 6: Cumplimiento de entrega por modelo (%)
   const cumplimientoModelData = summariesList.map(m => ({
     name: m.name,
-    'Cumplimiento %': m.count > 0 ? Math.round((m.compliedOnes / m.count) * 100) : 0
+    'Cumplimiento %': modelCompliance(m)
   })).sort((a, b) => b['Cumplimiento %'] - a['Cumplimiento %']);
 
   // Chart 7: Producción por Color
@@ -5705,11 +5736,27 @@ export const ModelosProductosView: React.FC = () => {
   // Dynamic context matching based on active selection (selectedProductModel)
   const selectedModelLogs = filteredRecords.filter(l => l.modeloName === selectedProductModel);
   const selectedModelStats = summariesList.find(s => s.name === selectedProductModel) || {
-    name: selectedProductModel, producido: 0, defectuosos: 0, segundas: 0, reprocesos: 0, leadTimeSum: 0, timeInySum: 0, timeEstSum: 0, timeBndSum: 0, count: 0, compliedOnes: 0
+    name: selectedProductModel,
+    lotes: 0,
+    producido: 0,
+    defectuosos: 0,
+    segundas: 0,
+    reprocesos: 0,
+    leadTimeSum: 0,
+    leadTimeWeight: 0,
+    timeInySum: 0,
+    timeInyWeight: 0,
+    timeEstSum: 0,
+    timeEstWeight: 0,
+    timeBndSum: 0,
+    timeBndWeight: 0,
+    count: 0,
+    entregasCumplidas: 0,
+    entregasTotal: 0
   };
 
   const selectedModelDefectPct = selectedModelStats.producido > 0 ? Number(((selectedModelStats.defectuosos / selectedModelStats.producido) * 100).toFixed(2)) : 0;
-  const selectedModelCompliance = selectedModelStats.count > 0 ? Math.round((selectedModelStats.compliedOnes / selectedModelStats.count) * 100) : 0;
+  const selectedModelCompliance = modelCompliance(selectedModelStats);
 
   // Colors & Clientes & Tallas used by selection
   const selectedModelColors = Array.from(new Set(selectedModelLogs.map(l => l.color)));
@@ -6179,10 +6226,10 @@ export const ModelosProductosView: React.FC = () => {
                   <th className="py-3 px-3 font-bold text-slate-300">Modelo</th>
                   <th className="py-3 px-3 text-right font-bold">Total Pares</th>
                   <th className="py-3 px-3 text-right font-bold">% Partic.</th>
-                  <th className="py-3 px-3 text-right font-bold">LeadTime Acum.</th>
-                  <th className="py-3 px-3 text-right font-bold">Iny. Acum</th>
-                  <th className="py-3 px-3 text-right font-bold">Estb. Acum</th>
-                  <th className="py-3 px-3 text-right font-bold">Banda Acum</th>
+                  <th className="py-3 px-3 text-right font-bold">LeadTime Prom.</th>
+                  <th className="py-3 px-3 text-right font-bold">Iny. Prom</th>
+                  <th className="py-3 px-3 text-right font-bold">Aduana Prom</th>
+                  <th className="py-3 px-3 text-right font-bold">Banda Prom</th>
                   <th className="py-3 px-3 text-right font-bold text-red-400">% Defect.</th>
                   <th className="py-3 px-3 text-right font-bold">Segundas</th>
                   <th className="py-3 px-3 text-right font-bold">Cumplimiento</th>
@@ -6192,7 +6239,7 @@ export const ModelosProductosView: React.FC = () => {
                 {summariesList.map((m) => {
                   const part = totalPares > 0 ? ((m.producido / totalPares) * 100).toFixed(1) : '0';
                   const defRate = m.producido > 0 ? ((m.defectuosos / m.producido) * 100).toFixed(1) : '0';
-                  const compliance = m.count > 0 ? Math.round((m.compliedOnes / m.count) * 100) : 0;
+                  const compliance = modelCompliance(m);
                   const isSelected = selectedProductModel === m.name;
 
                   return (
@@ -6209,10 +6256,10 @@ export const ModelosProductosView: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-3 text-right text-slate-300 font-mono font-semibold">{m.producido.toLocaleString()}</td>
                       <td className="py-3.5 px-3 text-right text-slate-400 font-mono">{part}%</td>
-                      <td className="py-3.5 px-3 text-right text-slate-300 font-mono">{m.leadTimeSum.toLocaleString()} hrs</td>
-                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{m.timeInySum.toLocaleString()}m</td>
-                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{m.timeEstSum.toLocaleString()}m</td>
-                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{m.timeBndSum.toLocaleString()}m</td>
+                      <td className="py-3.5 px-3 text-right text-slate-300 font-mono">{avgLeadTime(m).toFixed(1)} hrs</td>
+                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{Math.round(avgInyTime(m)).toLocaleString()}m</td>
+                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{Math.round(avgEstTime(m)).toLocaleString()}m</td>
+                      <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{Math.round(avgBndTime(m)).toLocaleString()}m</td>
                       <td className="py-3.5 px-3 text-right text-red-400 font-mono font-bold">{defRate}%</td>
                       <td className="py-3.5 px-3 text-right text-slate-400 font-mono">{m.segundas.toLocaleString()}</td>
                       <td className="py-3.5 px-3 text-right font-mono font-bold text-cyan-400">{compliance}%</td>
@@ -6265,7 +6312,7 @@ export const ModelosProductosView: React.FC = () => {
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-850">
                 <span className="text-[10px] font-mono text-indigo-400 uppercase block">Lead Time Promedio</span>
                 <span className="text-sm font-bold font-mono text-slate-200">
-                  {selectedModelStats.count > 0 ? (selectedModelStats.leadTimeSum / selectedModelStats.count).toFixed(1) : 0} hrs
+                  {avgLeadTime(selectedModelStats).toFixed(1)} hrs
                 </span>
               </div>
             </div>
@@ -6280,11 +6327,11 @@ export const ModelosProductosView: React.FC = () => {
                 <div className="flex justify-between text-[11px]">
                   <span className="text-slate-400">Inyección de Compuesto</span>
                   <strong className="text-slate-300 font-mono">
-                    {selectedModelStats.count > 0 ? Math.round(selectedModelStats.timeInySum / selectedModelStats.count) : 0} mins
+                    {Math.round(avgInyTime(selectedModelStats))} mins
                   </strong>
                 </div>
                 <div className="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden">
-                  <div className="h-full bg-amber-500" style={{ width: `${Math.min(100, (selectedModelStats.count > 0 ? (selectedModelStats.timeInySum / selectedModelStats.count) : 0) * 1.5)}%` }}></div>
+                  <div className="h-full bg-amber-500" style={{ width: `${Math.min(100, avgInyTime(selectedModelStats) * 1.5)}%` }}></div>
                 </div>
               </div>
 
@@ -6292,11 +6339,11 @@ export const ModelosProductosView: React.FC = () => {
                 <div className="flex justify-between text-[11px]">
                   <span className="text-slate-400">Túnel de Estabilización</span>
                   <strong className="text-slate-300 font-mono">
-                    {selectedModelStats.count > 0 ? Math.round(selectedModelStats.timeEstSum / selectedModelStats.count) : 0} mins
+                    {Math.round(avgEstTime(selectedModelStats))} mins
                   </strong>
                 </div>
                 <div className="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden">
-                  <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, (selectedModelStats.count > 0 ? (selectedModelStats.timeEstSum / selectedModelStats.count) : 0) * 0.8)}%` }}></div>
+                  <div className="h-full bg-indigo-500" style={{ width: `${Math.min(100, avgEstTime(selectedModelStats) * 0.8)}%` }}></div>
                 </div>
               </div>
 
@@ -6304,11 +6351,11 @@ export const ModelosProductosView: React.FC = () => {
                 <div className="flex justify-between text-[11px]">
                   <span className="text-slate-400">Banda de Recorte / Acabado</span>
                   <strong className="text-slate-300 font-mono">
-                    {selectedModelStats.count > 0 ? Math.round(selectedModelStats.timeBndSum / selectedModelStats.count) : 0} mins
+                    {Math.round(avgBndTime(selectedModelStats))} mins
                   </strong>
                 </div>
                 <div className="w-full bg-slate-900 h-1.5 rounded-full overflow-hidden">
-                  <div className="h-full bg-cyan-400" style={{ width: `${Math.min(100, (selectedModelStats.count > 0 ? (selectedModelStats.timeBndSum / selectedModelStats.count) : 0) * 2)}%` }}></div>
+                  <div className="h-full bg-cyan-400" style={{ width: `${Math.min(100, avgBndTime(selectedModelStats) * 2)}%` }}></div>
                 </div>
               </div>
             </div>

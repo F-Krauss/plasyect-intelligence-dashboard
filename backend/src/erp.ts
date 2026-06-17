@@ -76,6 +76,7 @@ export interface ModelPerformanceRow {
   color: string;
   cliente: string;
   fecha: string;
+  lotes: number;
   paresProducidos: number;
   paresDefectuosos: number;
   paresSegundas: number;
@@ -84,6 +85,8 @@ export interface ModelPerformanceRow {
   tiempoInyeccionMins: number;
   tiempoEstabilizacionMins: number;
   tiempoBandaMins: number;
+  entregasCumplidas: number;
+  entregasTotal: number;
   entregaCumplida: boolean;
   etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Almacén';
   estatus: 'Active' | 'Warning' | 'Critical';
@@ -246,8 +249,10 @@ function statusFromModelRow(row: ErpRecord): ModelPerformanceRow['estatus'] {
   const defectRate = Number(row.pares_producidos ?? 0) > 0
     ? Number(row.pares_defectuosos ?? 0) / Number(row.pares_producidos ?? 0)
     : 0;
+  const entregasTotal = Number(row.entregas_total ?? 0);
+  const entregasCumplidas = Number(row.entregas_cumplidas ?? 0);
   if (defectRate > 0.05) return 'Critical';
-  if (defectRate > 0.02 || Number(row.entregas_cumplidas ?? 0) < Number(row.lotes ?? 0)) return 'Warning';
+  if (defectRate > 0.02 || (entregasTotal > 0 && entregasCumplidas < entregasTotal)) return 'Warning';
   return 'Active';
 }
 
@@ -822,10 +827,11 @@ class PgErpService implements ErpService {
         [fechaInicio, fechaFin]
       ),
       this.pool.query<ErpRecord>(
-        `with lot_base as (
+        `with lot_dim as (
            select l.programa, l.lote, l.estilo, coalesce(e.nombre, l.estilo, 'S/Modelo') as modelo,
                   coalesce(l.piecol, l.combina, 'N/D') as color,
-                  l.fecha_programacion, l.pares, l.status_depto,
+                  coalesce(l.pares, 0)::numeric as pares,
+                  l.status_depto,
                   coalesce(c.nombre, lp.cliente, 'S/Cliente') as cliente,
                   pe.fecha_salida
            from public.bigzap_lotes l
@@ -838,50 +844,168 @@ class PgErpService implements ErpService {
            ) lp on true
            left join public.bigzap_pedidos pe on pe.folio = lp.pedido
            left join public.bigzap_clientes c on c.codigo = lp.cliente
-           where l.fecha_programacion between $1::date and $2::date
+           where l.cancelado = false
          ),
-         defects as (
-           select programa, lote,
-                  sum(case when calidad <> 1 then coalesce(pares, 0) else 0 end)::int as defectuosos,
-                  sum(case when calidad = 2 then coalesce(pares, 0) else 0 end)::int as segundas,
-                  sum(case when calidad = 3 then coalesce(pares, 0) else 0 end)::int as reprocesos
-           from public.bigzap_pt_movimientos
-           group by programa, lote
+         production as (
+           select
+             (a.escaneado_at at time zone $3)::date::text as fecha,
+             coalesce(d.estilo, d.modelo) as modelo_id,
+             d.modelo as modelo_name,
+             d.color,
+             d.cliente,
+             max(d.status_depto) as status_depto,
+             count(*)::int as lotes,
+             coalesce(sum(d.pares), 0)::int as pares_producidos
+           from public.bigzap_avance a
+           join lot_dim d on d.programa = a.programa and d.lote = a.lote
+           where a.depto = '15'
+             and a.escaneado_at is not null
+             and (a.escaneado_at at time zone $3)::date between $1::date and $2::date
+           group by (a.escaneado_at at time zone $3)::date, d.estilo, d.modelo, d.color, d.cliente
          ),
-         scans as (
-           select programa, lote,
-                  min(escaneado_at) as first_scan,
-                  max(escaneado_at) as last_scan,
-                  min(escaneado_at) filter (where depto = '15') as inyeccion_at,
-                  min(escaneado_at) filter (where depto in ('20','25')) as calidad_at,
-                  min(escaneado_at) filter (where depto in ('30','35','39')) as banda_at,
-                  min(escaneado_at) filter (where depto in ('40','50')) as embarque_at
+         scan_lots as (
+           select distinct programa, lote
            from public.bigzap_avance
            where escaneado_at is not null
-           group by programa, lote
+             and (escaneado_at at time zone $3)::date between $1::date and $2::date
+         ),
+         scan_events as (
+           select
+             a.programa,
+             a.lote,
+             a.depto,
+             a.escaneado_at,
+             case
+               when a.depto = '10' then 'almacen'
+               when a.depto = '15' then 'inyeccion'
+               when a.depto in ('20','25') then 'aduana'
+               when a.depto in ('30','35','39') then 'banda'
+               when a.depto in ('40','50') then 'embarque'
+               else null
+             end as area,
+             case
+               when a.depto = '10' then 1
+               when a.depto = '15' then 2
+               when a.depto in ('20','25') then 3
+               when a.depto in ('30','35','39') then 4
+               when a.depto in ('40','50') then 5
+               else null
+             end as orden
+           from public.bigzap_avance a
+           join scan_lots sl on sl.programa = a.programa and sl.lote = a.lote
+           where a.escaneado_at is not null
+         ),
+         ordered_scans as (
+           select
+             s.*,
+             lead(s.escaneado_at) over (partition by s.programa, s.lote order by s.escaneado_at) as next_at,
+             lead(s.orden) over (partition by s.programa, s.lote order by s.escaneado_at) as next_orden
+           from scan_events s
+         ),
+         durations as (
+           select
+             (s.next_at at time zone $3)::date::text as fecha,
+             coalesce(d.estilo, d.modelo) as modelo_id,
+             d.modelo as modelo_name,
+             d.color,
+             d.cliente,
+             s.area,
+             extract(epoch from (s.next_at - s.escaneado_at)) / 60.0 as duration_mins
+           from ordered_scans s
+           join lot_dim d on d.programa = s.programa and d.lote = s.lote
+           where s.area in ('inyeccion', 'aduana', 'banda')
+             and s.next_at is not null
+             and s.next_orden > s.orden
+             and (s.next_at at time zone $3)::date between $1::date and $2::date
+             and extract(epoch from (s.next_at - s.escaneado_at)) / 60.0 between 0 and 14400
+         ),
+         duration_rollup as (
+           select
+             fecha,
+             modelo_id,
+             modelo_name,
+             color,
+             cliente,
+             coalesce(avg(duration_mins) filter (where area = 'inyeccion'), 0)::float as tiempo_inyeccion_mins,
+             coalesce(avg(duration_mins) filter (where area = 'aduana'), 0)::float as tiempo_estabilizacion_mins,
+             coalesce(avg(duration_mins) filter (where area = 'banda'), 0)::float as tiempo_banda_mins
+           from durations
+           group by fecha, modelo_id, modelo_name, color, cliente
+         ),
+         defects as (
+           select
+             m.fecha_movimiento::text as fecha,
+             coalesce(d.estilo, d.modelo) as modelo_id,
+             d.modelo as modelo_name,
+             d.color,
+             d.cliente,
+             sum(case when m.calidad <> 1 then coalesce(m.pares, 0) else 0 end)::int as pares_defectuosos,
+             sum(case when m.calidad = 2 then coalesce(m.pares, 0) else 0 end)::int as pares_segundas,
+             sum(case when m.calidad = 3 then coalesce(m.pares, 0) else 0 end)::int as pares_reprocesos
+           from public.bigzap_pt_movimientos m
+           join lot_dim d on d.programa = m.programa and d.lote = m.lote
+           where m.fecha_movimiento between $1::date and $2::date
+           group by m.fecha_movimiento, d.estilo, d.modelo, d.color, d.cliente
+         ),
+         compliance as (
+           select
+             (a.escaneado_at at time zone $3)::date::text as fecha,
+             coalesce(d.estilo, d.modelo) as modelo_id,
+             d.modelo as modelo_name,
+             d.color,
+             d.cliente,
+             count(*) filter (
+               where d.fecha_salida is null
+                  or (a.escaneado_at at time zone $3)::date <= d.fecha_salida
+             )::int as entregas_cumplidas,
+             count(*)::int as entregas_total
+           from public.bigzap_avance a
+           join lot_dim d on d.programa = a.programa and d.lote = a.lote
+           where a.depto in ('40','50')
+             and a.escaneado_at is not null
+             and (a.escaneado_at at time zone $3)::date between $1::date and $2::date
+           group by (a.escaneado_at at time zone $3)::date, d.estilo, d.modelo, d.color, d.cliente
+         ),
+         keys as (
+           select fecha, modelo_id, modelo_name, color, cliente from production
+           union
+           select fecha, modelo_id, modelo_name, color, cliente from duration_rollup
+           union
+           select fecha, modelo_id, modelo_name, color, cliente from defects
+           union
+           select fecha, modelo_id, modelo_name, color, cliente from compliance
          )
          select
-           coalesce(lb.estilo, lb.modelo) as modelo_id,
-           lb.modelo as modelo_name,
-           lb.color,
-           lb.cliente,
-           lb.fecha_programacion::text as fecha,
-           lb.status_depto,
-           count(*)::int as lotes,
-           coalesce(sum(lb.pares), 0)::int as pares_producidos,
-           coalesce(sum(d.defectuosos), 0)::int as pares_defectuosos,
-           coalesce(sum(d.segundas), 0)::int as pares_segundas,
-           coalesce(sum(d.reprocesos), 0)::int as pares_reprocesos,
-           coalesce(avg(extract(epoch from (s.last_scan - s.first_scan)) / 3600.0), 0)::float as lead_time_hours,
-           coalesce(avg(extract(epoch from (coalesce(s.calidad_at, s.banda_at) - s.inyeccion_at)) / 60.0) filter (where s.inyeccion_at is not null and coalesce(s.calidad_at, s.banda_at) is not null), 0)::float as tiempo_inyeccion_mins,
-           coalesce(avg(extract(epoch from (s.banda_at - s.calidad_at)) / 60.0) filter (where s.banda_at is not null and s.calidad_at is not null), 0)::float as tiempo_estabilizacion_mins,
-           coalesce(avg(extract(epoch from (s.embarque_at - s.banda_at)) / 60.0) filter (where s.embarque_at is not null and s.banda_at is not null), 0)::float as tiempo_banda_mins,
-           count(*) filter (where s.embarque_at is not null and (lb.fecha_salida is null or (s.embarque_at at time zone $3)::date <= lb.fecha_salida))::int as entregas_cumplidas
-         from lot_base lb
-         left join defects d on d.programa = lb.programa and d.lote = lb.lote
-         left join scans s on s.programa = lb.programa and s.lote = lb.lote
-         group by lb.estilo, lb.modelo, lb.color, lb.cliente, lb.fecha_programacion, lb.status_depto
-         order by lb.fecha_programacion, pares_producidos desc`,
+           k.modelo_id,
+           k.modelo_name,
+           k.color,
+           k.cliente,
+           k.fecha,
+           coalesce(p.status_depto, '15') as status_depto,
+           coalesce(p.lotes, 0)::int as lotes,
+           coalesce(p.pares_producidos, 0)::int as pares_producidos,
+           coalesce(df.pares_defectuosos, 0)::int as pares_defectuosos,
+           coalesce(df.pares_segundas, 0)::int as pares_segundas,
+           coalesce(df.pares_reprocesos, 0)::int as pares_reprocesos,
+           (
+             coalesce(dr.tiempo_inyeccion_mins, 0)
+             + coalesce(dr.tiempo_estabilizacion_mins, 0)
+             + coalesce(dr.tiempo_banda_mins, 0)
+           ) / 60.0 as lead_time_hours,
+           coalesce(dr.tiempo_inyeccion_mins, 0)::float as tiempo_inyeccion_mins,
+           coalesce(dr.tiempo_estabilizacion_mins, 0)::float as tiempo_estabilizacion_mins,
+           coalesce(dr.tiempo_banda_mins, 0)::float as tiempo_banda_mins,
+           coalesce(c.entregas_cumplidas, 0)::int as entregas_cumplidas,
+           coalesce(c.entregas_total, 0)::int as entregas_total
+         from keys k
+         left join production p using (fecha, modelo_id, modelo_name, color, cliente)
+         left join duration_rollup dr using (fecha, modelo_id, modelo_name, color, cliente)
+         left join defects df using (fecha, modelo_id, modelo_name, color, cliente)
+         left join compliance c using (fecha, modelo_id, modelo_name, color, cliente)
+         where coalesce(p.pares_producidos, 0) > 0
+            or coalesce(df.pares_defectuosos, 0) > 0
+            or coalesce(c.entregas_total, 0) > 0
+         order by k.fecha, pares_producidos desc`,
         [fechaInicio, fechaFin, config.PLANT_TZ]
       ),
       this.pool.query<ErpRecord>(
@@ -1117,6 +1241,7 @@ class PgErpService implements ErpService {
       color: String(row.color ?? 'N/D'),
       cliente: String(row.cliente ?? 'S/Cliente'),
       fecha: String(row.fecha ?? ''),
+      lotes: Number(row.lotes ?? 0),
       paresProducidos: Number(row.pares_producidos ?? 0),
       paresDefectuosos: Number(row.pares_defectuosos ?? 0),
       paresSegundas: Number(row.pares_segundas ?? 0),
@@ -1125,7 +1250,11 @@ class PgErpService implements ErpService {
       tiempoInyeccionMins: Math.round(Number(row.tiempo_inyeccion_mins ?? 0)),
       tiempoEstabilizacionMins: Math.round(Number(row.tiempo_estabilizacion_mins ?? 0)),
       tiempoBandaMins: Math.round(Number(row.tiempo_banda_mins ?? 0)),
-      entregaCumplida: Number(row.entregas_cumplidas ?? 0) >= Number(row.lotes ?? 0),
+      entregasCumplidas: Number(row.entregas_cumplidas ?? 0),
+      entregasTotal: Number(row.entregas_total ?? 0),
+      entregaCumplida: Number(row.entregas_total ?? 0) > 0
+        ? Number(row.entregas_cumplidas ?? 0) >= Number(row.entregas_total ?? 0)
+        : false,
       etapaActiva: stageFromDepto(row.status_depto),
       estatus: statusFromModelRow(row)
     }));
@@ -1423,6 +1552,7 @@ class SupabaseErpService implements ErpService {
         color,
         cliente: 'S/Cliente',
         fecha,
+        lotes: 0,
         paresProducidos: 0,
         paresDefectuosos: 0,
         paresSegundas: 0,
@@ -1431,10 +1561,13 @@ class SupabaseErpService implements ErpService {
         tiempoInyeccionMins: 0,
         tiempoEstabilizacionMins: 0,
         tiempoBandaMins: 0,
+        entregasCumplidas: 0,
+        entregasTotal: 0,
         entregaCumplida: false,
         etapaActiva: stageFromDepto(lot.status_depto),
         estatus: 'Active'
       };
+      existing.lotes += 1;
       existing.paresProducidos += Number(lot.pares ?? 0);
       modelRows.set(key, existing);
     }

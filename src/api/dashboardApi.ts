@@ -61,6 +61,7 @@ export interface ModelPerformanceRow {
   color: string;
   cliente: string;
   fecha: string;
+  lotes: number;
   paresProducidos: number;
   paresDefectuosos: number;
   paresSegundas: number;
@@ -69,6 +70,8 @@ export interface ModelPerformanceRow {
   tiempoInyeccionMins: number;
   tiempoEstabilizacionMins: number;
   tiempoBandaMins: number;
+  entregasCumplidas: number;
+  entregasTotal: number;
   entregaCumplida: boolean;
   etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Almacén';
   estatus: 'Active' | 'Warning' | 'Critical';
