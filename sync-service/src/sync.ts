@@ -6,6 +6,9 @@ import { getSyncState, recordSyncRun, setSyncState, upsertJson, type JsonRow } f
 
 const IN_CHUNK = 500;
 
+const sizeColumns = (prefix: string): string =>
+  Array.from({ length: 30 }, (_, index) => `${prefix}${String(index + 1).padStart(2, '0')}`).join(', ');
+
 const LOTCAB_COLS = `LC_PROG, LC_LOTE, LC_ESTILO, LC_PIECOL, LC_COMBINA, LC_CORRIDA, LC_FECPRO,
   LC_PARLOT, LC_STATUS, LC_CANCELA, LC_FECCAN, LC_SEMPRO, LC_ANOPRO, LC_PLANTA, LC_SUBDEPTO,
   LC_IMPRESO, LC_IMPETI,
@@ -31,7 +34,7 @@ function maxDate(current: string | null, candidate: string | null): string | nul
   return current;
 }
 
-function paresPorTalla(row: FbRow, prefix: string): Record<string, number> | null {
+export function paresPorTalla(row: FbRow, prefix: string): Record<string, number> | null {
   const tallas: Record<string, number> = {};
   for (let i = 1; i <= 30; i++) {
     const suffix = String(i).padStart(2, '0');
@@ -41,16 +44,42 @@ function paresPorTalla(row: FbRow, prefix: string): Record<string, number> | nul
   return Object.keys(tallas).length > 0 ? tallas : null;
 }
 
+function legacyPtmovRow(r: FbRow): JsonRow {
+  return {
+    fecha_movimiento: fbDate(r.PT_FECMOV),
+    movto: fbString(r.PT_MOVTO),
+    tipo: fbString(r.PT_TIPO),
+    docto: fbString(r.PT_DOCTO),
+    programa: fbNumber(r.PT_PROG),
+    lote: fbNumber(r.PT_LOTE),
+    pedido: fbNumber(r.PT_PEDIDO),
+    renglon: fbNumber(r.PT_RENGLON),
+    calidad: fbNumber(r.PT_CALIDAD),
+    pares: fbNumber(r.PT_PARES),
+    distingue: fbNumber(r.PT_DISTINGUE),
+    observa: fbString(r.PT_OBSERVA)
+  };
+}
+
+export function legacyPtmovId(row: FbRow): string {
+  return createHash('md5')
+    .update(Object.values(legacyPtmovRow(row)).map((value) => String(value ?? '')).join('|'))
+    .digest('hex');
+}
+
 interface Extraction {
   depa: FbRow[];
   subdepto: FbRow[];
   estilos: FbRow[];
+  lineas: FbRow[];
+  combinaciones: FbRow[];
   clientes: FbRow[];
   pedidos: FbRow[];
   avance: FbRow[];
   lotcab: FbRow[];
   lotdet: FbRow[];
   ptmov: FbRow[];
+  observaciones: FbRow[];
 }
 
 async function fetchLotesPorPares(query: FbQuery, sql: (lotes: string) => string, pairs: Array<{ prog: number; lote: number }>): Promise<FbRow[]> {
@@ -75,11 +104,23 @@ async function extract(watermarks: { avance: string | null; lotcab: string | nul
   return withFirebird(async (query) => {
     const depa = await query('SELECT DP_CODDEP, DP_DESCRIP FROM DEPA');
     const subdepto = await query('SELECT SD_CODIGO, SD_DESCRIP, SD_DEPPAD, SD_PLANTA FROM SUBDEPTO');
-    const estilos = await query('SELECT ES_CODEST, ES_NOMEST, ES_LINEA, ES_VIGENTE FROM ESTILO');
-    const clientes = await query('SELECT CC_CODCTE, CC_NOMCTE, CC_RFCCTE, CC_CLASIF FROM CTES');
+    const estilos = await query(
+      `SELECT ES_CODEST, ES_NOMEST, ES_LINEA, ES_VIGENTE, ES_FOTO, ES_COSTO, ES_ESCALA,
+              ES_CATEGORIA, ES_FLUJO, ES_DIAPRO, ES_TIPPROD, ES_ALTPIS, ES_CODUNI
+       FROM ESTILO`
+    );
+    const lineas = await query('SELECT LI_CODLIN, LI_DESCRIP FROM LINEA');
+    const combinaciones = await query('SELECT CO_CODCOM, CO_DESCRIP FROM COMBINA');
+    const clientes = await query(
+      `SELECT CC_CODCTE, CC_NOMCTE, CC_RFCCTE, CC_CLASIF, CC_TELEFONO, CC_INTERNET,
+              CC_DIRECCION, CC_CIUDAD, CC_ESTADO, CC_LIMCRE, CC_DIACRE
+       FROM CTES`
+    );
     const pedidos = await query(
       `SELECT PE_FOLPED, PE_CODCTE, PE_FECPED, PE_FECREC, PE_FECSAL, PE_FECCAN,
-              PE_PARPED, PE_PARFAC, PE_PEDCTE, PE_TIENDA, PE_TEMPORADA FROM PEDIDOS`
+              PE_PARPED, PE_PARFAC, PE_PEDCTE, PE_TIENDA, PE_TEMPORADA,
+              PE_ORIGEN, PE_PORDES, PE_DIACRE, PE_OBSERV
+       FROM PEDIDOS`
     );
 
     const avance = watermarks.avance
@@ -119,27 +160,54 @@ async function extract(watermarks: { avance: string | null; lotcab: string | nul
     const lotdet = watermarks.lotcab
       ? await fetchLotesPorPares(
           query,
-          (l) => `SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES
+          (l) => `SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES,
+                         ${sizeColumns('LD_PTO')}
                   FROM LOTDET WHERE LD_PROG = ? AND LD_LOTE IN (${l})`,
           lotcab
             .map((r) => ({ prog: fbNumber(r.LC_PROG), lote: fbNumber(r.LC_LOTE) }))
             .filter((p): p is { prog: number; lote: number } => p.prog !== null && p.lote !== null)
         )
-      : await query('SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES FROM LOTDET');
+      : await query(`SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES,
+                            ${sizeColumns('LD_PTO')} FROM LOTDET`);
 
     const ptmov = watermarks.ptmov
       ? await query(
           `SELECT PT_FECMOV, PT_MOVTO, PT_TIPO, PT_DOCTO, PT_PROG, PT_LOTE, PT_PEDIDO, PT_RENGLON,
-                  PT_CALIDAD, PT_PARES, PT_DISTINGUE, PT_OBSERVA
+                  PT_CALIDAD, PT_PARES, PT_DISTINGUE, PT_OBSERVA, PT_PLANTA, PT_FOLALM,
+                  ${sizeColumns('PT_PTO')}
            FROM PTMOV WHERE PT_FECMOV >= ?`,
           [dateParam(minusDays(watermarks.ptmov, config.overlapDays))]
         )
       : await query(
           `SELECT PT_FECMOV, PT_MOVTO, PT_TIPO, PT_DOCTO, PT_PROG, PT_LOTE, PT_PEDIDO, PT_RENGLON,
-                  PT_CALIDAD, PT_PARES, PT_DISTINGUE, PT_OBSERVA FROM PTMOV`
+                  PT_CALIDAD, PT_PARES, PT_DISTINGUE, PT_OBSERVA, PT_PLANTA, PT_FOLALM,
+                  ${sizeColumns('PT_PTO')} FROM PTMOV`
         );
 
-    return { depa, subdepto, estilos, clientes, pedidos, avance, lotcab, lotdet, ptmov };
+    let observaciones: FbRow[];
+    if (!watermarks.lotcab) {
+      observaciones = await query('SELECT OL_PROGRAMA, OL_LOTE, OL_OBSERVA FROM OBSLOT');
+    } else {
+      const active = await query(
+        `SELECT o.OL_PROGRAMA, o.OL_LOTE, o.OL_OBSERVA
+         FROM OBSLOT o
+         JOIN LOTCAB l ON l.LC_PROG = o.OL_PROGRAMA AND l.LC_LOTE = o.OL_LOTE
+         WHERE l.LC_STATUS IN ('15', '25', '30') AND l.LC_CANCELA <> 'CA'`
+      );
+      const touched = await fetchLotesPorPares(
+        query,
+        (l) => `SELECT OL_PROGRAMA, OL_LOTE, OL_OBSERVA FROM OBSLOT
+                WHERE OL_PROGRAMA = ? AND OL_LOTE IN (${l})`,
+        lotcab
+          .map((r) => ({ prog: fbNumber(r.LC_PROG), lote: fbNumber(r.LC_LOTE) }))
+          .filter((p): p is { prog: number; lote: number } => p.prog !== null && p.lote !== null)
+      );
+      const byLote = new Map<string, FbRow>();
+      for (const row of [...active, ...touched]) byLote.set(`${row.OL_PROGRAMA}|${row.OL_LOTE}`, row);
+      observaciones = [...byLote.values()];
+    }
+
+    return { depa, subdepto, estilos, lineas, combinaciones, clientes, pedidos, avance, lotcab, lotdet, ptmov, observaciones };
   });
 }
 
@@ -184,7 +252,16 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'codigo', type: 'text' },
       { name: 'nombre', type: 'text' },
       { name: 'linea', type: 'text' },
-      { name: 'vigente', type: 'boolean' }
+      { name: 'vigente', type: 'boolean' },
+      { name: 'foto', type: 'text' },
+      { name: 'costo', type: 'numeric' },
+      { name: 'escala', type: 'numeric' },
+      { name: 'categoria', type: 'text' },
+      { name: 'flujo', type: 'text' },
+      { name: 'dias_proceso', type: 'numeric' },
+      { name: 'tipo_producto', type: 'text' },
+      { name: 'altura_piso', type: 'numeric' },
+      { name: 'unidad', type: 'text' }
     ],
     'codigo',
     data.estilos
@@ -192,8 +269,35 @@ async function load(data: Extraction): Promise<Record<string, number>> {
         codigo: fbString(r.ES_CODEST),
         nombre: fbString(r.ES_NOMEST),
         linea: fbString(r.ES_LINEA),
-        vigente: fbString(r.ES_VIGENTE) === 'S'
+        vigente: fbString(r.ES_VIGENTE) === 'S',
+        foto: fbString(r.ES_FOTO),
+        costo: fbNumber(r.ES_COSTO),
+        escala: fbNumber(r.ES_ESCALA),
+        categoria: fbString(r.ES_CATEGORIA),
+        flujo: fbString(r.ES_FLUJO),
+        dias_proceso: fbNumber(r.ES_DIAPRO),
+        tipo_producto: fbString(r.ES_TIPPROD),
+        altura_piso: fbNumber(r.ES_ALTPIS),
+        unidad: fbString(r.ES_CODUNI)
       }))
+      .filter((r) => r.codigo)
+  );
+
+  counts.lineas = await upsertJson(
+    'public.bigzap_lineas',
+    [{ name: 'codigo', type: 'text' }, { name: 'nombre', type: 'text' }],
+    'codigo',
+    data.lineas
+      .map((r) => ({ codigo: fbString(r.LI_CODLIN), nombre: fbString(r.LI_DESCRIP) }))
+      .filter((r) => r.codigo)
+  );
+
+  counts.combinaciones = await upsertJson(
+    'public.bigzap_combinaciones',
+    [{ name: 'codigo', type: 'text' }, { name: 'nombre', type: 'text' }],
+    'codigo',
+    data.combinaciones
+      .map((r) => ({ codigo: fbString(r.CO_CODCOM), nombre: fbString(r.CO_DESCRIP) }))
       .filter((r) => r.codigo)
   );
 
@@ -203,7 +307,14 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'codigo', type: 'text' },
       { name: 'nombre', type: 'text' },
       { name: 'rfc', type: 'text' },
-      { name: 'clasif', type: 'text' }
+      { name: 'clasif', type: 'text' },
+      { name: 'telefono', type: 'text' },
+      { name: 'internet', type: 'text' },
+      { name: 'direccion', type: 'text' },
+      { name: 'ciudad', type: 'text' },
+      { name: 'estado', type: 'text' },
+      { name: 'limite_credito', type: 'numeric' },
+      { name: 'dias_credito', type: 'int' }
     ],
     'codigo',
     data.clientes
@@ -211,7 +322,14 @@ async function load(data: Extraction): Promise<Record<string, number>> {
         codigo: fbString(r.CC_CODCTE),
         nombre: fbString(r.CC_NOMCTE),
         rfc: fbString(r.CC_RFCCTE),
-        clasif: fbString(r.CC_CLASIF)
+        clasif: fbString(r.CC_CLASIF),
+        telefono: fbString(r.CC_TELEFONO),
+        internet: fbString(r.CC_INTERNET),
+        direccion: fbString(r.CC_DIRECCION),
+        ciudad: fbString(r.CC_CIUDAD),
+        estado: fbString(r.CC_ESTADO),
+        limite_credito: fbNumber(r.CC_LIMCRE),
+        dias_credito: fbNumber(r.CC_DIACRE)
       }))
       .filter((r) => r.codigo)
   );
@@ -308,7 +426,11 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'pares_facturados', type: 'int' },
       { name: 'pedido_cliente', type: 'text' },
       { name: 'tienda', type: 'text' },
-      { name: 'temporada', type: 'text' }
+      { name: 'temporada', type: 'text' },
+      { name: 'origen', type: 'text' },
+      { name: 'porcentaje_descuento', type: 'numeric' },
+      { name: 'dias_credito', type: 'int' },
+      { name: 'observaciones', type: 'text' }
     ],
     'folio',
     data.pedidos
@@ -323,7 +445,11 @@ async function load(data: Extraction): Promise<Record<string, number>> {
         pares_facturados: fbNumber(r.PE_PARFAC),
         pedido_cliente: fbString(r.PE_PEDCTE),
         tienda: fbString(r.PE_TIENDA),
-        temporada: fbString(r.PE_TEMPORADA)
+        temporada: fbString(r.PE_TEMPORADA),
+        origen: fbString(r.PE_ORIGEN),
+        porcentaje_descuento: fbNumber(r.PE_PORDES),
+        dias_credito: fbNumber(r.PE_DIACRE),
+        observaciones: fbString(r.PE_OBSERV)
       }))
       .filter((r) => r.folio !== null)
   );
@@ -337,7 +463,8 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'renglon', type: 'int' },
       { name: 'cliente', type: 'text' },
       { name: 'corrida', type: 'text' },
-      { name: 'pares', type: 'int' }
+      { name: 'pares', type: 'int' },
+      { name: 'pares_por_talla', type: 'jsonb' }
     ],
     'programa, lote, pedido, renglon',
     data.lotdet
@@ -348,7 +475,8 @@ async function load(data: Extraction): Promise<Record<string, number>> {
         renglon: fbNumber(r.LD_REN),
         cliente: fbString(r.LD_CODCTE),
         corrida: fbString(r.LD_CORRIDA),
-        pares: fbNumber(r.LD_PARES)
+        pares: fbNumber(r.LD_PARES),
+        pares_por_talla: paresPorTalla(r, 'LD_PTO')
       }))
       .filter((r) => r.programa !== null && r.lote !== null && r.pedido !== null && r.renglon !== null)
   );
@@ -368,29 +496,40 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'calidad', type: 'int' },
       { name: 'pares', type: 'int' },
       { name: 'distingue', type: 'bigint' },
-      { name: 'observa', type: 'text' }
+      { name: 'observa', type: 'text' },
+      { name: 'pares_por_talla', type: 'jsonb' },
+      { name: 'planta', type: 'text' },
+      { name: 'folio_almacen', type: 'bigint' }
     ],
     'id',
     data.ptmov.map((r) => {
-      const row = {
-        fecha_movimiento: fbDate(r.PT_FECMOV),
-        movto: fbString(r.PT_MOVTO),
-        tipo: fbString(r.PT_TIPO),
-        docto: fbString(r.PT_DOCTO),
-        programa: fbNumber(r.PT_PROG),
-        lote: fbNumber(r.PT_LOTE),
-        pedido: fbNumber(r.PT_PEDIDO),
-        renglon: fbNumber(r.PT_RENGLON),
-        calidad: fbNumber(r.PT_CALIDAD),
-        pares: fbNumber(r.PT_PARES),
-        distingue: fbNumber(r.PT_DISTINGUE),
-        observa: fbString(r.PT_OBSERVA)
+      const legacyRow = legacyPtmovRow(r);
+      const id = legacyPtmovId(r);
+      return {
+        id,
+        ...legacyRow,
+        pares_por_talla: paresPorTalla(r, 'PT_PTO'),
+        planta: fbString(r.PT_PLANTA),
+        folio_almacen: fbNumber(r.PT_FOLALM)
       };
-      const id = createHash('md5')
-        .update(Object.values(row).map((v) => String(v ?? '')).join('|'))
-        .digest('hex');
-      return { id, ...row };
     })
+  );
+
+  counts.observaciones_lote = await upsertJson(
+    'public.bigzap_lote_observaciones',
+    [
+      { name: 'programa', type: 'int' },
+      { name: 'lote', type: 'int' },
+      { name: 'observacion', type: 'text' }
+    ],
+    'programa, lote',
+    data.observaciones
+      .map((r) => ({
+        programa: fbNumber(r.OL_PROGRAMA),
+        lote: fbNumber(r.OL_LOTE),
+        observacion: fbString(r.OL_OBSERVA)
+      }))
+      .filter((r) => r.programa !== null && r.lote !== null)
   );
 
   return counts;

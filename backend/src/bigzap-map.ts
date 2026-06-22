@@ -7,7 +7,7 @@ import type { Batch, Order, TenantId } from './domain.js';
  * reales sin cambios.
  */
 
-type StageId = 'alta_pedido' | 'almacen' | 'inyeccion' | 'estabilizacion' | 'aduana' | 'banda' | 'embarque';
+type StageId = 'alta_pedido' | 'almacen' | 'inyeccion' | 'estabilizacion' | 'aduana' | 'banda' | 'embarque' | 'facturacion';
 
 const STAGE_ORDER: StageId[] = [
   'alta_pedido',
@@ -16,7 +16,8 @@ const STAGE_ORDER: StageId[] = [
   'estabilizacion',
   'aduana',
   'banda',
-  'embarque'
+  'embarque',
+  'facturacion'
 ];
 
 // Respaldo por si la vista no trae stage_id (departamento sin fila en catalogo).
@@ -30,7 +31,7 @@ const DEPTO_STAGE: Record<string, StageId> = {
   '35': 'banda',
   '39': 'banda',
   '40': 'embarque',
-  '50': 'embarque'
+  '50': 'facturacion'
 };
 
 export interface TarjetaViajeraRow {
@@ -41,6 +42,8 @@ export interface TarjetaViajeraRow {
   estilo_nombre: string | null;
   piecol: string | null;
   combina: string | null;
+  color_codigo?: string | null;
+  color_nombre?: string | null;
   corrida: string | null;
   pares: number | null;
   fecha_programacion: string | null;
@@ -55,6 +58,7 @@ export interface TarjetaViajeraRow {
   cancelado: boolean | null;
   tarjeta_impresa: boolean | null;
   pares_por_talla: Record<string, number> | null;
+  observacion?: string | null;
   pedido_folio: number | null;
   cliente_codigo: string | null;
   cliente_nombre: string | null;
@@ -111,7 +115,7 @@ function deliveryRisk(fechaSalida: string | null, entregado: boolean): 'BAJO' | 
 
 export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): Batch {
   const stage = resolveStage(row);
-  const entregado = stage === 'embarque' || row.status_depto === '40' || row.status_depto === '50';
+  const entregado = stage === 'facturacion' || row.status_depto === '50';
   const cancelado = row.cancelado === true;
   const status: string = cancelado ? 'ARCHIVADO' : entregado ? 'ENTREGADO' : 'OPTIMO';
   const pares = row.pares ?? 0;
@@ -127,7 +131,7 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
     oc: row.pedido_oc ?? undefined,
     modelId: row.estilo || 'estilo_desconocido',
     modelName,
-    color: row.piecol || row.combina || 'N/D',
+    color: row.color_nombre || row.piecol || row.combina || 'N/D',
     size: 0,
     quantityShoes: pares,
     stage,
@@ -158,7 +162,7 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
     porcentajeAvance: entregado ? 100 : 0,
     estatus: status,
     responsableActual: undefined,
-    observaciones: cancelado ? 'Lote cancelado en BixApp.' : undefined,
+    observaciones: cancelado ? 'Lote cancelado en BixApp.' : row.observacion ?? undefined,
 
     // Zona previa / actual reales (escaneos), para rastreo en tiempo real
     zonaActual: row.zona_actual_nombre || row.status_depto_nombre || undefined,
