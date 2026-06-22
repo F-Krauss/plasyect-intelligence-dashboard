@@ -2,6 +2,10 @@ import type { AuditLog, Band, Batch, Client, Machine, Model, Order, QualityDefec
 import { getStoredString, removeStoredItem, setStoredString } from '../utils/storage';
 
 export interface HourlyProductionRow {
+  id?: string;
+  tarjetaViajera?: string;
+  pedido?: string;
+  lote?: string;
   area: string;
   fecha: string;
   hora: string;
@@ -62,6 +66,8 @@ export interface ModelPerformanceRow {
   cliente: string;
   fecha: string;
   lotes: number;
+  pedidos?: number;
+  paresPorTalla?: Record<string, number>;
   paresProducidos: number;
   paresDefectuosos: number;
   paresSegundas: number;
@@ -73,7 +79,7 @@ export interface ModelPerformanceRow {
   entregasCumplidas: number;
   entregasTotal: number;
   entregaCumplida: boolean;
-  etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Almacén';
+  etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Facturación' | 'Almacén';
   estatus: 'Active' | 'Warning' | 'Critical';
 }
 
@@ -105,6 +111,7 @@ export interface OrderPipelineRow {
   fechaAlta: string | null;
   fechaCompromiso: string | null;
   totalPares: number;
+  producedPairs: number;
   shippedPairs: number;
   inProcessPairs: number;
   progress: number;
@@ -114,6 +121,12 @@ export interface OrderPipelineRow {
   pairsByStage: Record<StageId, number>;
   batchesCount: number;
   daysLeft: number | null;
+  origin: string | null;
+  discountPercentage: number | null;
+  creditDays: number | null;
+  notes: string | null;
+  plannedPairsBySize: Record<string, number>;
+  shippedPairsBySize: Record<string, number>;
 }
 
 export interface OrderRiskSummary {
@@ -133,6 +146,7 @@ export interface ErpOperationalResponse {
     hasPeriodData: boolean;
     dataMaxDate: string | null;
     lastSync: string | null;
+    qualityAvailable: boolean;
     source: 'big_zap_fdb';
   };
   active: {
@@ -148,6 +162,8 @@ export interface ErpOperationalResponse {
     clients: Array<Record<string, unknown>>;
     models: Array<Record<string, unknown>>;
     departments: Array<Record<string, unknown>>;
+    lines: Array<Record<string, unknown>>;
+    combinations: Array<Record<string, unknown>>;
   };
   dailyProduction: DailyProductionRow[];
   wipSummary: WipSummary;

@@ -1,13 +1,13 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { 
-  Order, 
-  Batch, 
-  Machine, 
-  Band, 
-  QualityDefect, 
-  AuditLog, 
-  Tenant, 
-  Role, 
+import {
+  Order,
+  Batch,
+  Machine,
+  Band,
+  QualityDefect,
+  AuditLog,
+  Tenant,
+  Role,
   UserSession,
   TenantId,
   StageId,
@@ -15,7 +15,8 @@ import {
   PermissionKey,
   ProductionTurn,
   ProductionGoal,
-  ProductionAreaId
+  ProductionAreaId,
+  SemaphoreConfig
 } from '../types';
 import { TENANTS } from '../data/appConfig';
 import { backendEnabled, dashboardApi, sendApiMutation } from '../api/dashboardApi';
@@ -177,6 +178,11 @@ interface DashboardContextType {
   getEffectivePermissions: (user?: AppUser) => Set<PermissionKey>;
   can: (permission: PermissionKey) => boolean;
   getGoalForAreaTurn: (area: ProductionAreaId, turnCode?: string) => ProductionGoal | undefined;
+  dailyProdTarget: number;
+  setDailyProdTarget: (v: number) => void;
+  semaphoreConfig: SemaphoreConfig;
+  setSemaphoreConfig: (v: SemaphoreConfig) => void;
+  workingHours: number;
   verifyOTP: (code: string) => boolean;
   clear2FA: () => void;
   orders: Order[];
@@ -185,6 +191,8 @@ interface DashboardContextType {
   bands: Band[];
   defects: QualityDefect[];
   audits: AuditLog[];
+  isDataLoading: boolean;
+  dataLoadError: string | null;
   exchangeRate: number;
   setExchangeRate: (rate: number) => void;
   isOffline: boolean;
@@ -237,6 +245,14 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     return parseFloat(getStoredString('plasyect_exchange_rate') || '18.45');
   });
 
+  const [dailyProdTarget, setDailyProdTargetState] = useState<number>(() => {
+    return parseInt(getStoredString('plasyect_daily_prod_target') || '3300', 10);
+  });
+
+  const [semaphoreConfig, setSemaphoreConfigState] = useState<SemaphoreConfig>(() => {
+    return getStoredJson<SemaphoreConfig>('plasyect_semaphore_config', { greenDays: 7, yellowDays: 4, redDays: 2 });
+  });
+
   const [isOffline, setIsOffline] = useState(false);
   const [offlineQueue, setOfflineQueue] = useState<any[]>(() => {
     return getStoredJson<any[]>('plasyect_offline_queue', []);
@@ -249,11 +265,18 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [bands, setBands] = useState<Band[]>([]);
   const [defects, setDefects] = useState<QualityDefect[]>([]);
   const [audits, setAudits] = useState<AuditLog[]>([]);
+  const [isDataLoading, setIsDataLoading] = useState(backendEnabled);
+  const [dataLoadError, setDataLoadError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!backendEnabled) return;
+    if (!backendEnabled) {
+      setIsDataLoading(false);
+      return;
+    }
     clearHeavyLocalCaches();
     let active = true;
+    setIsDataLoading(true);
+    setDataLoadError(null);
     dashboardApi.bootstrap()
       .then(data => {
         if (!active) return;
@@ -266,12 +289,17 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       })
       .catch(error => {
         console.warn('Backend bootstrap failed. No local mock data will be used.', error);
+        if (!active) return;
+        setDataLoadError('No se pudo cargar informacion base.');
         setOrders([]);
         setBatches([]);
         setMachines([]);
         setBands([]);
         setDefects([]);
         setAudits([]);
+      })
+      .finally(() => {
+        if (active) setIsDataLoading(false);
       });
     return () => {
       active = false;
@@ -443,6 +471,35 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     addAuditLog('CONFIG', 'EXCHANGE_RATE_CHANGED', `Tasa de cambio manual establecida en $${rate} MXN/USD`);
   };
 
+  const setDailyProdTarget = (v: number) => {
+    setDailyProdTargetState(v);
+    setStoredString('plasyect_daily_prod_target', v.toString());
+  };
+
+  const setSemaphoreConfig = (v: SemaphoreConfig) => {
+    setSemaphoreConfigState(v);
+    setStoredJson('plasyect_semaphore_config', v);
+  };
+
+  const computeWorkingHours = (activeTurns: ProductionTurn[]): number => {
+    if (!activeTurns.length) return 16;
+    const toMinutes = (t: string) => {
+      const [h, m] = t.split(':').map(Number);
+      return h * 60 + (m || 0);
+    };
+    const starts = activeTurns.map(t => toMinutes(t.startTime));
+    const ends = activeTurns.map(t => {
+      const e = toMinutes(t.endTime);
+      const s = toMinutes(t.startTime);
+      return e < s ? e + 1440 : e;
+    });
+    const earliest = Math.min(...starts);
+    const latest = Math.max(...ends);
+    return Math.max(1, Math.round((latest - earliest) / 60));
+  };
+
+  const workingHours = computeWorkingHours(tenantTurns.filter(t => t.active));
+
   const addAuditLog = (module: string, event: string, details: string) => {
     const newLog: AuditLog = {
       id: `aud_${Date.now()}_${Math.floor(Math.random() * 1000)}`,
@@ -584,7 +641,7 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setBatches(prev => prev.map(b => {
       if (b.id === batchId) {
         const prevStage = b.stage;
-        const isDelivered = nextStage === 'embarque';
+        const isDelivered = nextStage === 'facturacion';
         const updated = {
           ...b,
           stage: nextStage,
@@ -737,6 +794,11 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       getEffectivePermissions,
       can,
       getGoalForAreaTurn,
+      dailyProdTarget,
+      setDailyProdTarget,
+      semaphoreConfig,
+      setSemaphoreConfig,
+      workingHours,
       verifyOTP,
       clear2FA,
       orders,
@@ -745,6 +807,8 @@ export const DashboardProvider: React.FC<{ children: React.ReactNode }> = ({ chi
       bands,
       defects,
       audits,
+      isDataLoading,
+      dataLoadError,
       exchangeRate,
       setExchangeRate,
       isOffline,

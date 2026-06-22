@@ -95,18 +95,12 @@ function LoadingScreen({ label = 'Cargando sistema', mode = 'full' }: { label?: 
 function DashboardLayout() {
   const [currentTab, setCurrentTab] = useState<string>('dashboard');
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false);
-  const [bootLoading, setBootLoading] = useState(true);
   const [moduleLoading, setModuleLoading] = useState(false);
   const [loadingModuleLabel, setLoadingModuleLabel] = useState(TAB_LABELS.dashboard);
   const mainRef = useRef<HTMLElement | null>(null);
   const tabChangeTimerRef = useRef<number | null>(null);
   const moduleLoadingTimerRef = useRef<number | null>(null);
-  const { can } = useDashboard();
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setBootLoading(false), 650);
-    return () => window.clearTimeout(timer);
-  }, []);
+  const { can, isDataLoading } = useDashboard();
 
   useEffect(() => {
     return () => {
@@ -181,12 +175,16 @@ function DashboardLayout() {
     }
   };
 
+  if (isDataLoading) {
+    return (
+      <div className="relative h-screen w-screen bg-slate-955 text-slate-200 overflow-hidden font-sans">
+        <LoadingScreen label="Cargando informacion" />
+      </div>
+    );
+  }
+
   return (
     <div className="relative flex h-screen w-screen bg-slate-955 text-slate-200 overflow-hidden font-sans selection:bg-blue-500 selection:text-white">
-      <AnimatePresence>
-        {bootLoading && <LoadingScreen label="Iniciando sesion" />}
-      </AnimatePresence>
-
       {/* Mobile sidebar backdrop */}
       {mobileSidebarOpen && (
         <div
