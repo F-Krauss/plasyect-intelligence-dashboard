@@ -40,6 +40,7 @@ export type ProductionAreaId =
   | 'aduana'
   | 'banda'
   | 'embarque'
+  | 'facturacion'
   | 'entregas'
   | 'salidas_tercera';
 
@@ -70,6 +71,13 @@ export interface ProductionTurn {
   endTime: string;
   active: boolean;
   responsableUserId?: string;
+  areaId?: ProductionAreaId;
+}
+
+export interface SemaphoreConfig {
+  greenDays: number;
+  yellowDays: number;
+  redDays: number;
 }
 
 export interface ProductionGoal {
@@ -100,7 +108,8 @@ export type StageId =
   | 'estabilizacion' 
   | 'aduana' 
   | 'banda' 
-  | 'embarque';
+  | 'embarque'
+  | 'facturacion';
 
 export interface Stage {
   id: StageId;
@@ -186,9 +195,12 @@ export interface Batch {
 
   // Campos opcionales en español poblados desde FDB / OCR
   idLote?: string;
+  programa?: number;
+  lote?: number;
   tarjetaViajera?: string;
   codigoBarras?: string;
   cliente?: string;
+  oc?: string;
   modelo?: string;
   totalPares?: number;
   etapaActual?: StageId;
@@ -201,6 +213,9 @@ export interface Batch {
   estatus?: 'OPTIMO' | 'ALERTA' | 'CRITICO' | 'DETENIDO' | 'ARCHIVADO' | 'ENTREGADO';
   responsableActual?: string;
   observaciones?: string;
+  corrida?: string;
+  tarjetaImpresa?: boolean;
+  paresPorTalla?: Record<string, number>;
 
   // Zona previa / actual reales tomadas de los escaneos de la Tarjeta Viajera (ERP BixApp).
   // Cuando vienen del ERP llevan el nombre del departamento (DEPA); si no, la vista las

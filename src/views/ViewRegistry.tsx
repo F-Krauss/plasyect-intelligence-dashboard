@@ -4,6 +4,7 @@ import * as d3 from 'd3';
 import { 
   BarChart as RechartsBarChart, 
   Bar as RechartsBar, 
+  Cell as RechartsCell,
   XAxis as RechartsXAxis, 
   YAxis as RechartsYAxis, 
   CartesianGrid as RechartsCartesianGrid, 
@@ -108,6 +109,31 @@ const RechartsResponsiveContainer: React.FC<StableResponsiveContainerProps> = ({
   );
 };
 
+const ModuleLoadingState: React.FC<{ label: string }> = ({ label }) => (
+  <div className="min-h-[420px] flex items-center justify-center rounded-xl border border-slate-900 bg-slate-950 p-8">
+    <div className="flex flex-col items-center gap-4 text-center">
+      <div className="relative h-14 w-14">
+        <div className="absolute inset-0 rounded-full border-2 border-cyan-500/20" />
+        <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-cyan-400 animate-spin" />
+      </div>
+      <div>
+        <div className="text-xs font-black uppercase tracking-[0.22em] text-slate-200">Cargando</div>
+        <div className="mt-1 text-[10px] font-mono uppercase tracking-[0.16em] text-slate-500">{label}</div>
+      </div>
+    </div>
+  </div>
+);
+
+const ModuleDataErrorState: React.FC<{ label: string }> = ({ label }) => (
+  <div className="min-h-[320px] flex items-center justify-center rounded-xl border border-rose-900/40 bg-rose-950/10 p-8 text-center">
+    <div>
+      <AlertTriangle className="mx-auto mb-3 h-8 w-8 text-rose-400" />
+      <div className="text-xs font-black uppercase tracking-[0.18em] text-rose-300">No cargo informacion</div>
+      <div className="mt-2 text-xs text-slate-400">{label}</div>
+    </div>
+  </div>
+);
+
 const getBatchStageId = (batch: Pick<Batch, 'etapaActual' | 'stage'>): StageId =>
   (batch.etapaActual || batch.stage || 'alta_pedido') as StageId;
 
@@ -121,13 +147,111 @@ const isArchivedBatch = (batch: Pick<Batch, 'status' | 'estatus'>): boolean => {
 };
 
 const isDeliveredBatch = (batch: Pick<Batch, 'etapaActual' | 'stage' | 'status' | 'estatus'>): boolean =>
-  getBatchStageId(batch) === 'embarque' || batch.status === 'ENTREGADO' || batch.estatus === 'ENTREGADO';
+  getBatchStageId(batch) === 'facturacion' || batch.status === 'ENTREGADO' || batch.estatus === 'ENTREGADO';
+
+const getCompletedPairsFromStages = (pairsByStage?: Record<string, number>, fallback = 0): number => {
+  const facturacionOrder = STAGES.find(stage => stage.id === 'facturacion')?.order ?? 8;
+  const hasStageData = Object.values(pairsByStage ?? {}).some(pairs => Number(pairs || 0) > 0);
+  const completedPairs = Object.entries(pairsByStage ?? {}).reduce((sum, [stageId, pairs]) => {
+    const stageOrder = STAGES.find(stage => stage.id === stageId)?.order;
+    return stageOrder !== undefined && stageOrder >= facturacionOrder ? sum + Number(pairs || 0) : sum;
+  }, 0);
+  return completedPairs > 0 || hasStageData ? completedPairs : fallback;
+};
+
+const getProducedPairsFromStages = (pairsByStage?: Record<string, number>, fallback = 0): number => {
+  const productionStartOrder = STAGES.find(stage => stage.id === 'inyeccion')?.order ?? 3;
+  const hasStageData = Object.values(pairsByStage ?? {}).some(pairs => Number(pairs || 0) > 0);
+  const producedPairs = Object.entries(pairsByStage ?? {}).reduce((sum, [stageId, pairs]) => {
+    const stageOrder = STAGES.find(stage => stage.id === stageId)?.order;
+    return stageOrder !== undefined && stageOrder >= productionStartOrder ? sum + Number(pairs || 0) : sum;
+  }, 0);
+  return producedPairs > 0 || hasStageData ? producedPairs : fallback;
+};
 
 const dateOnlyTime = (value?: string | null): number | null => {
   if (!value) return null;
   const date = new Date(`${String(value).slice(0, 10)}T12:00:00Z`);
   return Number.isNaN(date.getTime()) ? null : date.getTime();
 };
+
+const dateInPlantTz = (value?: string | Date | null): string => {
+  if (!value) return '';
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit'
+  }).format(date);
+};
+
+const todayPlantDate = (): string => dateInPlantTz(new Date());
+
+// Calendar dates from the API are date-only (YYYY-MM-DD). Parsing such a string
+// with `new Date(...)` treats it as UTC midnight, so formatting it in a negative
+// offset timezone (e.g. America/Mexico_City) shifts it back one day. Parse and
+// format in UTC so the displayed day matches the stored calendar date.
+const formatPlantDateLabel = (value?: string | null): string => {
+  if (!value) return '';
+  const normalized = /^\d{4}-\d{2}-\d{2}$/.test(value) ? `${value}T00:00:00Z` : value;
+  const date = new Date(normalized);
+  if (Number.isNaN(date.getTime())) return '';
+  return new Intl.DateTimeFormat('es-MX', {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  }).format(date);
+};
+
+const nonZeroNumber = (value: number, locale = 'es-MX'): string =>
+  value > 0 ? value.toLocaleString(locale) : '--';
+
+const nonZeroPercent = (value: number): string =>
+  value > 0 ? `${value}%` : '--';
+
+const PRODUCTION_DAY_START_HOUR = 9;
+const PRODUCTION_DAY_END_HOUR = 20;
+const WIP_DAILY_TARGET = 3000;
+const EFFICIENCY_DAILY_TARGET = 3300;
+const PRODUCTION_DAY_HOURS = PRODUCTION_DAY_END_HOUR - PRODUCTION_DAY_START_HOUR;
+const WIP_HOURLY_TARGET = WIP_DAILY_TARGET / PRODUCTION_DAY_HOURS;
+
+const enumerateDateRange = (start: string, end: string): string[] => {
+  if (!start || !end || start > end) return [];
+  const dates: string[] = [];
+  const cursor = new Date(`${start}T12:00:00Z`);
+  const limit = new Date(`${end}T12:00:00Z`);
+  while (cursor <= limit) {
+    dates.push(cursor.toISOString().slice(0, 10));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+};
+
+const elapsedProductionHoursForDate = (date: string, now = new Date()): number => {
+  const today = todayPlantDate();
+  if (date < today) return PRODUCTION_DAY_HOURS;
+  if (date > today) return 0;
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Mexico_City',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(now);
+  const hour = Number(parts.find(part => part.type === 'hour')?.value ?? '0');
+  const minute = Number(parts.find(part => part.type === 'minute')?.value ?? '0');
+  const decimalHour = hour + minute / 60;
+  return Math.min(PRODUCTION_DAY_HOURS, Math.max(0, decimalHour - PRODUCTION_DAY_START_HOUR));
+};
+
+const expectedWipProduction = (start: string, end: string): number =>
+  enumerateDateRange(start, end).reduce(
+    (sum, date) => sum + elapsedProductionHoursForDate(date) * WIP_HOURLY_TARGET,
+    0
+  );
 
 const isPastDueDateOnly = (value?: string | null, anchor = dateOnlyTime(new Date().toISOString()) ?? Date.now()): boolean => {
   const due = dateOnlyTime(value);
@@ -154,12 +278,12 @@ const sumUniqueProductionTarget = (rows: ProductionTargetRow[]): number => {
 };
 
 export const DashboardEjecutivoView: React.FC = () => {
-  const { orders, batches, defects, audits, exchangeRate, currentTenant } = useDashboard();
+  const { orders, batches, defects, audits, exchangeRate, currentTenant, dailyProdTarget, semaphoreConfig, workingHours } = useDashboard();
   
   // Base date anchor representing the current local time for days-left calculations
   const BASE_DATE = new Date();
-  const DEFAULT_FECHA_FIN = new Date().toISOString().slice(0, 10);
-  const DEFAULT_FECHA_INICIO = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+  const DEFAULT_FECHA_FIN = todayPlantDate();
+  const DEFAULT_FECHA_INICIO = DEFAULT_FECHA_FIN;
   const SEMAPHORE = {
     ok: {
       fill: '#16a34a',
@@ -225,15 +349,31 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // Real ERP data from BixApp (FDB → Supabase → backend)
   const [erpData, setErpData] = useState<ErpOperationalResponse | null>(null);
-  const [erpLoading, setErpLoading] = useState(false);
+  const [erpLoading, setErpLoading] = useState(backendEnabled);
+  const [erpLoadError, setErpLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
     setErpLoading(true);
+    setErpLoadError(null);
     dashboardApi.erpOperativo(fechaInicio, fechaFin)
-      .then(data => { if (!cancelled) setErpData(data); })
-      .catch(err => { if (!cancelled) console.warn('ERP ejecutivo fetch failed', err); })
+      .then(data => {
+        if (cancelled) return;
+        const fallbackDate = data.meta.dataMaxDate;
+        if (data.productionHourly.length === 0 && fallbackDate && fechaInicio === fechaFin && fechaInicio !== fallbackDate) {
+          setFechaInicio(fallbackDate);
+          setFechaFin(fallbackDate);
+          return;
+        }
+        setErpData(data);
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('ERP ejecutivo fetch failed', err);
+          setErpLoadError('Dashboard Ejecutivo');
+        }
+      })
       .finally(() => { if (!cancelled) setErpLoading(false); });
     return () => { cancelled = true; };
   }, [fechaInicio, fechaFin]);
@@ -241,9 +381,13 @@ export const DashboardEjecutivoView: React.FC = () => {
   const handleRefresh = () => {
     setIsRefreshing(true);
     if (backendEnabled) {
+      setErpLoadError(null);
       dashboardApi.erpOperativo(fechaInicio, fechaFin)
         .then(data => setErpData(data))
-        .catch(err => console.warn('ERP refresh failed', err))
+        .catch(err => {
+          console.warn('ERP refresh failed', err);
+          setErpLoadError('Dashboard Ejecutivo');
+        })
         .finally(() => setIsRefreshing(false));
     } else {
       setTimeout(() => setIsRefreshing(false), 600);
@@ -270,9 +414,9 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // Filter application - Orders
   const filteredOrders = tenantOrders.filter(o => {
-    const oDate = o.fechaAlta || o.createdAt || '';
-    if (fechaInicio && oDate && new Date(oDate) < new Date(fechaInicio)) return false;
-    if (fechaFin && oDate && new Date(oDate) > new Date(fechaFin)) return false;
+    const oDate = dateInPlantTz(o.fechaAlta || o.createdAt || '');
+    if (fechaInicio && oDate && oDate < fechaInicio) return false;
+    if (fechaFin && oDate && oDate > fechaFin) return false;
     if (selectedClient !== 'TODOS' && o.clientName !== selectedClient) return false;
     if (selectedModel !== 'TODOS' && o.modelName !== selectedModel) return false;
     if (selectedStatus !== 'TODOS' && o.status !== selectedStatus) return false;
@@ -281,9 +425,9 @@ export const DashboardEjecutivoView: React.FC = () => {
 
   // Filter application - Batches
   const filteredBatches = tenantBatches.filter(b => {
-    const bDate = b.fechaAlta || b.createdAt || '';
-    if (fechaInicio && bDate && new Date(bDate) < new Date(fechaInicio)) return false;
-    if (fechaFin && bDate && new Date(bDate) > new Date(fechaFin)) return false;
+    const bDate = dateInPlantTz(b.fechaAlta || b.createdAt || '');
+    if (fechaInicio && bDate && bDate < fechaInicio) return false;
+    if (fechaFin && bDate && bDate > fechaFin) return false;
     if (selectedClient !== 'TODOS' && b.cliente !== selectedClient) return false;
     if (selectedModel !== 'TODOS' && b.modelo !== selectedModel) return false;
     if (selectedStage !== 'TODOS' && getBatchStageId(b) !== selectedStage) return false;
@@ -322,7 +466,9 @@ export const DashboardEjecutivoView: React.FC = () => {
   ]));
 
   const hasPeriodData = erpData?.meta.hasPeriodData ?? true;
+  const qualityAvailable = erpData?.meta.qualityAvailable ?? !backendEnabled;
   const activeMetric = (value: number | null | undefined) => hasPeriodData ? (value ?? 0).toLocaleString() : '--';
+  const currentMetric = (value: number | null | undefined) => (value ?? 0).toLocaleString();
   const pctMetric = (value: number | null | undefined) => hasPeriodData ? `${value ?? 0}%` : '--';
   const calidadSource = erpData?.quality ?? [];
   const prodSource = erpData?.productionHourly ?? [];
@@ -330,8 +476,8 @@ export const DashboardEjecutivoView: React.FC = () => {
   // Filter application - Quality records (date already filtered by API; apply remaining filters)
   const filteredQuality = calidadSource.filter(q => {
     if (!backendEnabled) {
-      if (fechaInicio && new Date(q.fecha) < new Date(fechaInicio)) return false;
-      if (fechaFin && new Date(q.fecha) > new Date(fechaFin)) return false;
+      if (fechaInicio && q.fecha < fechaInicio) return false;
+      if (fechaFin && q.fecha > fechaFin) return false;
     }
     if (selectedModel !== 'TODOS' && q.modelo !== selectedModel) return false;
     if (selectedTurno !== 'TODOS' && q.turno !== selectedTurno) return false;
@@ -341,48 +487,60 @@ export const DashboardEjecutivoView: React.FC = () => {
   // Filter application - Hourly production (date already filtered by API; apply remaining filters)
   const filteredProdHora = prodSource.filter(p => {
     if (!backendEnabled) {
-      if (fechaInicio && new Date(p.fecha) < new Date(fechaInicio)) return false;
-      if (fechaFin && new Date(p.fecha) > new Date(fechaFin)) return false;
+      if (fechaInicio && p.fecha < fechaInicio) return false;
+      if (fechaFin && p.fecha > fechaFin) return false;
     }
     if (selectedModel !== 'TODOS' && p.modelo !== selectedModel) return false;
     if (selectedTurno !== 'TODOS' && p.turno !== selectedTurno) return false;
     return true;
   });
+  const facturacionProdHora = filteredProdHora.filter(p => p.area === 'FACTURACION');
 
-  // Most recent date in filtered production (for hourly chart and "del día" KPI)
-  const mostRecentProdDate = filteredProdHora.reduce((max, p) => p.fecha > max ? p.fecha : max, '');
-  const todayProdHora = mostRecentProdDate
-    ? filteredProdHora.filter(p => p.fecha === mostRecentProdDate)
-    : filteredProdHora;
+  // Meta diaria fija: WIP acumulado contra 3,000 de 09:00 a 20:00; eficiencia contra 3,300 del día.
+  const selectedDateRange = enumerateDateRange(fechaInicio, fechaFin);
+  const selectedDaysCount = Math.max(1, selectedDateRange.length);
+  const expectedWipToNow = Math.max(1, expectedWipProduction(fechaInicio, fechaFin));
+  const hourlyTarget = WIP_HOURLY_TARGET;
+  const activeDashboardBatches = dashboardWipBatches.filter(b => !isDeliveredBatch(b));
+  const activeDashboardOrderIds = new Set(activeDashboardBatches.map(b => b.orderId).filter(Boolean));
 
-  // 2. 第一 KPI Ratios (8 indicators)
+  // 2. KPI Ratios (8 indicators)
   // - Pedidos activos: Status PENDIENTE or PROCESANDO
   const kpiActiveOrdersCount = erpData
-    ? erpData.active.orders
+    ? activeDashboardOrderIds.size
     : filteredOrders.filter(o => o.status === 'PROCESANDO' || o.status === 'PENDIENTE').length;
 
   // - Lotes activos: etapa Actual !== 'embarque'
   const kpiActiveBatchesCount = erpData
-    ? erpData.active.batches
+    ? activeDashboardBatches.length
     : filteredBatches.filter(b => !isDeliveredBatch(b)).length;
 
   // - Pares activos en planta: Suma totalPares de lotes activos
   const kpiActiveParesCount = erpData
-    ? erpData.active.pairs
+    ? activeDashboardBatches.reduce((sum, b) => sum + getBatchPairs(b), 0)
     : filteredBatches
       .filter(b => !isDeliveredBatch(b))
       .reduce((sum, b) => sum + getBatchPairs(b), 0);
 
-  // - Producción del día: Suma producciónReal del día más reciente en el rango
-  const kpiDailyProdCount = todayProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
+  // - Producción del período: pares facturados sobre el rango completo
+  const kpiDailyProdCount = facturacionProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
 
-  // - Porcentaje de avance global (weighted avg by pairs)
+  // - Avance WIP: promedio acumulado de escaneos por área / meta acumulada esperada del día
   const activeBatchesForProgress = filteredBatches.filter(b => !isDeliveredBatch(b));
   const totalParesForProgress = activeBatchesForProgress.reduce((sum, b) => sum + getBatchPairs(b), 0);
   const sumAvancePares = activeBatchesForProgress.reduce((sum, b) => sum + ((b.porcentajeAvance || 0) * getBatchPairs(b)), 0);
+  const scannedPairsByArea = new Map<string, number>();
+  filteredProdHora.forEach(row => {
+    const area = row.area || 'produccion';
+    scannedPairsByArea.set(area, (scannedPairsByArea.get(area) ?? 0) + row.produccionReal);
+  });
+  const accumulatedScanValues = Array.from(scannedPairsByArea.values()).filter(value => value > 0);
+  const avgAccumulatedScans = accumulatedScanValues.length > 0
+    ? accumulatedScanValues.reduce((sum, value) => sum + value, 0) / accumulatedScanValues.length
+    : 0;
   const kpiGlobalProgress = erpData
-    ? erpData.wipSummary.globalProgress
-    : totalParesForProgress > 0 ? Math.round(sumAvancePares / totalParesForProgress) : 0;
+    ? Number(((avgAccumulatedScans / expectedWipToNow) * 100).toFixed(1))
+    : (totalParesForProgress > 0 ? Math.round(sumAvancePares / totalParesForProgress) : 0);
 
   // - Pedidos vencidos abiertos: fechaCompromiso < hoy AND no entregado
   const kpiOrdersInRiskCount = erpData
@@ -394,28 +552,31 @@ export const DashboardEjecutivoView: React.FC = () => {
   const totalDefectives = filteredQuality.reduce((sum, q) => sum + (q.merma + q.segundas), 0);
   const kpiDefectivePct = totalInspected > 0 ? Number(((totalDefectives / totalInspected) * 100).toFixed(2)) : 0;
 
-  // - Cumplimiento contra meta: real / meta
-  const totalRealPrs = filteredProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
-  const totalMetaPrs = sumUniqueProductionTarget(filteredProdHora);
+  // - Cumplimiento contra meta: real total vs 3,300 pares
+  const totalRealPrs = facturacionProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
+  const totalMetaPrs = EFFICIENCY_DAILY_TARGET;
   const kpiMetaCompliance = totalMetaPrs > 0 ? Number(((totalRealPrs / totalMetaPrs) * 100).toFixed(1)) : 0;
-  const productionStdDev = getStdDev(filteredProdHora.map(p => p.produccionReal - p.metaHora));
+  const productionStdDev = getStdDev(facturacionProdHora.map(p => p.produccionReal - WIP_HOURLY_TARGET));
   const complianceStdDev = getStdDev(filteredProdHora.map(p => p.eficiencia));
   const defectStdDev = getStdDev(filteredQuality.map(q => q.porcentajeDefectivo));
   const progressStdDev = erpData ? 0 : getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
   const riskStdDev = erpData ? 0 : getStdDev(filteredOrders.map(o => (o.riesgoEntrega === 'ALTO' || o.riesgoEntrega === 'VENCIDO') ? 1 : 0));
-  const todayMetaPrs = sumUniqueProductionTarget(todayProdHora);
+  const todayMetaPrs = EFFICIENCY_DAILY_TARGET;
   const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, todayMetaPrs, productionStdDev);
-  const kpiProgressStatus = hasPeriodData ? classifyAgainstTarget(kpiGlobalProgress, 70, progressStdDev) : 'neutral';
+  const kpiProgressStatus = hasPeriodData ? classifyAgainstTarget(kpiGlobalProgress, 100, progressStdDev) : 'neutral';
   const kpiRiskStatus = hasPeriodData ? classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev) : 'neutral';
-  const kpiDefectStatus = classifyLowerIsBetter(kpiDefectivePct, 3, defectStdDev);
+  const kpiDefectStatus = qualityAvailable ? classifyLowerIsBetter(kpiDefectivePct, 3, defectStdDev) : 'neutral';
   const kpiComplianceStatus = classifyAgainstTarget(kpiMetaCompliance, 100, complianceStdDev);
 
   // Active WIP denominator
-  const totalWIPPares = erpData ? erpData.wipSummary.activePairs : filteredBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
+  const totalWIPPares = erpData
+    ? activeDashboardBatches.reduce((sum, b) => sum + getBatchPairs(b), 0)
+    : filteredBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
 
   // 3. Pipeline Stages mapping & stats
+  const stageSourceBatches = erpData ? activeDashboardBatches : filteredBatches;
   const fallbackPipelineStages = STAGES.map(st => {
-    const stageBatches = filteredBatches.filter(b => getBatchStageId(b) === st.id);
+    const stageBatches = stageSourceBatches.filter(b => getBatchStageId(b) === st.id);
     const stageLotesCount = stageBatches.length;
     const stageParesCount = stageBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
     const avgMinutes = stageLotesCount > 0 
@@ -441,24 +602,20 @@ export const DashboardEjecutivoView: React.FC = () => {
       wipPct
     };
   });
-  const pipelineStages = erpData?.stagePipeline.length
-    ? erpData.stagePipeline
-      .filter(row => selectedStage === 'TODOS' || row.stageId === selectedStage)
-      .map(row => ({
-        ...(STAGES.find(st => st.id === row.stageId) ?? {
-          id: row.stageId,
-          name: row.stageName,
-          order: 99,
-          color: '#64748b',
-          description: ''
-        }),
-        lotCount: row.batches,
-        paresCount: row.pairs,
-        avgMins: row.avgMinutes ?? 0,
-        saturation: row.saturation,
-        wipPct: row.wipPct
-      }))
-    : fallbackPipelineStages;
+  // Merge backend data with STAGES so every stage shows even with 0 data
+  const pipelineStages = STAGES
+    .filter(st => selectedStage === 'TODOS' || st.id === selectedStage)
+    .map(st => {
+      const backendRow = erpData?.stagePipeline.find(r => r.stageId === st.id);
+      const fallback = fallbackPipelineStages.find(f => f.id === st.id);
+      if (erpData && fallback && fallback.lotCount > 0) {
+        return { ...fallback, avgMins: backendRow?.avgMinutes ?? fallback.avgMins, saturation: backendRow?.saturation ?? fallback.saturation };
+      }
+      if (backendRow) {
+        return { ...st, lotCount: backendRow.batches, paresCount: backendRow.pairs, avgMins: backendRow.avgMinutes ?? 0, saturation: backendRow.saturation, wipPct: backendRow.wipPct };
+      }
+      return fallback ?? { ...st, lotCount: 0, paresCount: 0, avgMins: 0, saturation: 'OPTIMO' as const, wipPct: 0 };
+    });
 
   // 4. Panel derecho de alertas dinámicas (Critical Alerts)
   const generatedAlerts: { id: string; level: 'crítico' | 'advertencia' | 'informativo'; title: string; desc: string; target: string; time: string }[] = [];
@@ -534,19 +691,18 @@ export const DashboardEjecutivoView: React.FC = () => {
   //   inyección/banda terminan el 2026-04-20). Agregando el rango completo la
   //   gráfica responde a cualquier cambio de fecha inicio/fin.
   const hourlyChartData: Record<string, { value: number; target: number }> = {};
-  const hourlyTargetSlots = new Set<string>();
-  for (const p of filteredProdHora) {
+  for (const p of facturacionProdHora) {
     if (!hourlyChartData[p.hora]) hourlyChartData[p.hora] = { value: 0, target: 0 };
     hourlyChartData[p.hora].value += p.produccionReal;
-    const targetKey = productionTargetKey(p);
-    if (!hourlyTargetSlots.has(targetKey)) {
-      hourlyChartData[p.hora].target += p.metaHora;
-      hourlyTargetSlots.add(targetKey);
-    }
   }
-  const hasHourlyData = filteredProdHora.length > 0;
-  // Días reales con escaneos de producción dentro del rango (para el subtítulo).
-  const prodDatesInRange = Array.from(new Set(filteredProdHora.map(p => p.fecha))).sort();
+  for (let hour = PRODUCTION_DAY_START_HOUR; hour < PRODUCTION_DAY_END_HOUR; hour += 1) {
+    const label = `${String(hour).padStart(2, '0')}:00`;
+    if (!hourlyChartData[label]) hourlyChartData[label] = { value: 0, target: 0 };
+    hourlyChartData[label].target = WIP_HOURLY_TARGET * selectedDaysCount;
+  }
+  const hasHourlyData = facturacionProdHora.length > 0;
+  // Días reales con facturación dentro del rango (para el subtítulo).
+  const prodDatesInRange = Array.from(new Set(facturacionProdHora.map(p => p.fecha))).sort();
   const hourlyStdDev = getStdDev(Object.values(hourlyChartData).map(d => d.value - d.target));
   const finalHourlyData = Array.from({ length: 24 }, (_, hour) => {
     const label = `${String(hour).padStart(2, '0')}:00`;
@@ -687,12 +843,19 @@ export const DashboardEjecutivoView: React.FC = () => {
     });
   const erpRiskOrders = (erpData?.orderRisk.rows ?? [])
     .filter(o => temporalFiltersApplied || o.progress < 100)
-    .map(o => ({
+    .map(o => {
+      // Avance/producido alineado con la sábana SLA (Pipeline por Pedido): se cuenta
+      // lo que ya entró a producción (inyección en adelante), no solo facturación,
+      // para que el % y los pares faltantes coincidan entre ambos módulos.
+      const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
+      const displayProgress = o.totalPares > 0 ? Math.min(100, Math.round((producedPairs / o.totalPares) * 100)) : 0;
+      return {
       ...o,
       clientName: o.cliente,
       quantity: o.totalPares,
       modelName: o.modelo || 'Varios modelos',
-      porcentajeAvance: o.progress,
+      producedPairs,
+      porcentajeAvance: displayProgress,
       deliveryDate: o.fechaCompromiso || '',
       status: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
       estatus: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
@@ -701,7 +864,8 @@ export const DashboardEjecutivoView: React.FC = () => {
       displayRisk: o.risk,
       savedCloseRisk: o.risk,
       isClosed: o.progress >= 100
-    }))
+      };
+    })
     .sort((a, b) => {
       const riskDiff = riskRank[b.displayRisk] - riskRank[a.displayRisk];
       if (riskDiff !== 0) return riskDiff;
@@ -715,6 +879,14 @@ export const DashboardEjecutivoView: React.FC = () => {
   const displayedRiskOrders = riskOrders.slice(0, riskOrderLimit === 'ALL' ? riskOrders.length : riskOrderLimit);
   const canExpandRiskOrders = riskOrders.length > 10;
   const riskOrderLimitLabel = riskOrderLimit === 'ALL' ? 'TODOS' : riskOrderLimit;
+
+  if (backendEnabled && erpLoading && !erpData) {
+    return <ModuleLoadingState label="Dashboard Ejecutivo" />;
+  }
+
+  if (backendEnabled && erpLoadError && !erpData) {
+    return <ModuleDataErrorState label={erpLoadError} />;
+  }
 
   return (
     <div className="flex flex-col gap-6">
@@ -751,11 +923,15 @@ export const DashboardEjecutivoView: React.FC = () => {
       {/* 2. Filtros Superiores Superior Filters */}
       <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg shadow-lg space-y-3">
         <div className="flex items-center justify-between border-b border-slate-850 pb-2">
-          <span className="text-xs font-mono font-bold tracking-widest text-slate-400 uppercase flex items-center gap-1.5">
+          <button
+            onClick={() => setFiltersExpanded(v => !v)}
+            className="text-xs font-mono font-bold tracking-widest text-slate-400 uppercase flex items-center gap-1.5 hover:text-cyan-400 transition-colors"
+          >
             <Briefcase className="w-3.5 h-3.5 text-cyan-400" />
-            Parámetros de Filtración Operativa
-          </span>
-          <button 
+            Filtros
+            <span className="text-slate-600 ml-1">{filtersExpanded ? '▲' : '▼'}</span>
+          </button>
+          <button
             id="btn-exec-clear"
             onClick={handleClearFilters}
             className="text-[10px] text-slate-500 hover:text-red-400 font-mono underline transition"
@@ -764,7 +940,7 @@ export const DashboardEjecutivoView: React.FC = () => {
           </button>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
+        {filtersExpanded && <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
           {/* Fecha Inicio */}
           <div className="space-y-1">
             <label className="text-[10px] font-mono text-slate-500 uppercase block font-bold">FECHA INICIO</label>
@@ -874,7 +1050,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               <option value="3">TURNO 3</option>
             </select>
           </div>
-        </div>
+        </div>}
       </div>
 
       {/* 3. Primera Fila de KPIs (8 clean, executive cards) */}
@@ -883,7 +1059,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PEDIDOS ACTIVOS</span>
           <div className="mt-2 text-2xl font-black font-mono text-cyan-400">
-            {activeMetric(kpiActiveOrdersCount)}
+            {currentMetric(kpiActiveOrdersCount)}
           </div>
           <span className="text-[10px] text-slate-550 block mt-1 font-mono">Sin archivadas/term.</span>
         </div>
@@ -892,7 +1068,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">LOTES ACTIVOS</span>
           <div className="mt-2 text-2xl font-black font-mono text-blue-400">
-            {activeMetric(kpiActiveBatchesCount)}
+            {currentMetric(kpiActiveBatchesCount)}
           </div>
           <span className="text-[10px] text-slate-550 block mt-1 font-mono">En líneas operativas</span>
         </div>
@@ -901,32 +1077,36 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-md">
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PARES EN PLANTA</span>
           <div className="mt-2 text-xl font-black font-mono text-indigo-400">
-            {activeMetric(kpiActiveParesCount)}
+            {currentMetric(kpiActiveParesCount)}
           </div>
           <span className="text-[10px] text-slate-550 block mt-1 font-mono">Tránsito WIP Total</span>
         </div>
 
-        {/* Card 4: Producción del Día */}
+        {/* Card 4: Producción del Período */}
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md border-l-4 ${SEMAPHORE[kpiDailyStatus].border} ${SEMAPHORE[kpiDailyStatus].bg}`}>
-          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PROD. DEL DÍA</span>
+          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">
+            {selectedDaysCount > 1 ? 'PROD. DEL PERÍODO' : 'PROD. DEL DÍA'}
+          </span>
           <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
-            {kpiDailyProdCount.toLocaleString()}
+            {nonZeroNumber(kpiDailyProdCount)}
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
             Meta {todayMetaPrs.toLocaleString()} / σ {Math.round(productionStdDev)}
           </span>
         </div>
 
-        {/* Card 5: Avance Global */}
+        {/* Card 5: Avance WIP */}
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiProgressStatus].border} ${SEMAPHORE[kpiProgressStatus].bg}`}>
-          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">AVANCE WIP REAL</span>
+          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">AVANCE WIP</span>
           <div className="mt-2 flex items-baseline gap-1">
             <span className={`text-2xl font-black font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>{pctMetric(kpiGlobalProgress)}</span>
           </div>
           <div className="w-full bg-slate-950 rounded-full h-1 mt-1.5 overflow-hidden">
             <div className="h-full transition-all duration-300" style={{ width: `${hasPeriodData ? Math.min(kpiGlobalProgress, 100) : 0}%`, backgroundColor: SEMAPHORE[kpiProgressStatus].fill }} />
           </div>
-          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>Embarcado/total activos</span>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>
+            Prom. acum. vs esperado {Math.round(expectedWipToNow).toLocaleString()}
+          </span>
         </div>
 
         {/* Card 6: Pedidos vencidos abiertos */}
@@ -944,18 +1124,20 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiDefectStatus].border} ${SEMAPHORE[kpiDefectStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">Defectos Globales</span>
           <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiDefectStatus].text}`}>
-            {kpiDefectivePct}%
+            {qualityAvailable ? `${kpiDefectivePct}%` : 'N/D'}
           </div>
-          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDefectStatus].text}`}>Meta máx 3% / σ {defectStdDev.toFixed(1)}</span>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDefectStatus].text}`}>{qualityAvailable ? `Meta máx 3% / σ ${defectStdDev.toFixed(1)}` : 'Sin defectos reales en FDB'}</span>
         </div>
 
         {/* Card 8: Cumplimiento Meta */}
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiComplianceStatus].border} ${SEMAPHORE[kpiComplianceStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">EFICIENCIA META</span>
           <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>
-            {kpiMetaCompliance}%
+            {nonZeroPercent(kpiMetaCompliance)}
           </div>
-          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>Meta 100% / σ {complianceStdDev.toFixed(1)}</span>
+          <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>
+            Meta {EFFICIENCY_DAILY_TARGET.toLocaleString()} pares
+          </span>
         </div>
       </div>
 
@@ -1090,10 +1272,10 @@ export const DashboardEjecutivoView: React.FC = () => {
       </div>
 
       {/* 4. Gráficas */}
-      <div className="order-0 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div className="order-0 grid grid-cols-1 md:grid-cols-2 gap-4">
         
         {/* Chart 1: Producción por hora */}
-        <div className="md:col-span-2 xl:col-span-3 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[390px]">
+        <div className="md:col-span-2 bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[488px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Activity className="w-3.5 h-3.5" />
@@ -1108,21 +1290,21 @@ export const DashboardEjecutivoView: React.FC = () => {
             </p>
           </div>
           {!hasHourlyData ? (
-            <div className="h-[270px] mt-4 flex flex-col items-center justify-center text-center gap-1">
+            <div className="h-[338px] mt-4 flex flex-col items-center justify-center text-center gap-1">
               <Activity className="w-6 h-6 text-slate-700" />
               <p className="text-[11px] font-mono text-slate-500">Sin escaneos de producción en el rango seleccionado.</p>
               <p className="text-[9px] font-sans text-slate-600">Ajusta las fechas: ultimo escaneo FDB {erpData?.meta.dataMaxDate ?? '--'}.</p>
             </div>
           ) : (
           <div className="overflow-x-auto mt-4">
-          <div className="h-[270px] min-w-[480px] flex items-end justify-between gap-1 pt-5">
+          <div className="h-[338px] min-w-[480px] flex items-end justify-between gap-1 pt-5">
             {finalHourlyData.map((d, i) => {
               const maxVal = Math.max(...finalHourlyData.map(item => Math.max(item.value, item.target)), 1);
               const pct = (d.value / maxVal) * 100;
               const targetPct = d.target > 0 ? (d.target / maxVal) * 100 : 0;
               return (
                 <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative" title={`${d.value} pares / meta ${d.target}`}>
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-slate-950 border border-slate-800 text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-cyan-400 whitespace-nowrap">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-slate-900 whitespace-nowrap">
                     {d.value.toLocaleString()} / {d.target.toLocaleString()} prs
                   </div>
                   <div className="w-full h-full flex items-end relative">
@@ -1147,7 +1329,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 2: Pares por etapa */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Layers className="w-3.5 h-3.5" />
@@ -1155,13 +1337,13 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Color por saturación de WIP y tiempo en etapa</p>
           </div>
-          <div className="h-[208px] mt-4 flex items-end justify-between gap-1.5 pt-5">
+          <div className="h-[260px] mt-4 flex items-end justify-between gap-1.5 pt-5">
             {stageParesChartData.map((d, i) => {
               const maxVal = Math.max(...stageParesChartData.map(item => item.value), 1);
               const pct = (d.value / maxVal) * 100;
               return (
                 <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative" title={`${d.value} pares`}>
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-slate-950 border border-slate-800 text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-indigo-400 whitespace-nowrap">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-slate-900 whitespace-nowrap">
                     {d.value.toLocaleString()} prs
                   </div>
                   <div 
@@ -1176,7 +1358,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 3: Top 5 modelos */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Briefcase className="w-3.5 h-3.5" />
@@ -1204,7 +1386,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 4: Defectos (Pareto) */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-pink-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <AlertTriangle className="w-3.5 h-3.5" />
@@ -1236,7 +1418,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 5: Pedidos por estatus */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Activity className="w-3.5 h-3.5" />
@@ -1262,7 +1444,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 6: Estados de producción */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5" />
@@ -1293,7 +1475,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 7: Cumplimiento por turno */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <Clock className="w-3.5 h-3.5" />
@@ -1301,12 +1483,12 @@ export const DashboardEjecutivoView: React.FC = () => {
             </h4>
             <p className="text-[9px] text-slate-500 font-sans mt-1">Real contra meta, clasificado con desviación estándar</p>
           </div>
-          <div className="h-[208px] mt-4 flex items-end justify-between gap-4 pt-5">
+          <div className="h-[260px] mt-4 flex items-end justify-between gap-4 pt-5">
             {shiftComplianceData.map((d) => {
               const pct = Math.min(d.value, 120);
               return (
                 <div key={d.label} className="flex-1 h-full flex flex-col justify-end items-center group relative">
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-slate-950 border border-slate-800 text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition z-20 pointer-events-none text-cyan-400 whitespace-nowrap">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition z-20 pointer-events-none text-slate-900 whitespace-nowrap">
                     {d.real.toLocaleString()} / {d.target.toLocaleString()} prs
                   </div>
                   <div className="w-full rounded-t-sm transition" style={{ height: `${pct / 1.2}%`, backgroundColor: d.color }} />
@@ -1319,7 +1501,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>
 
         {/* Chart 8: Calidad por área */}
-        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[338px]">
+        <div className="bg-slate-900 border border-slate-800 p-4 rounded-lg flex flex-col justify-between shadow-lg min-h-[423px]">
           <div>
             <h4 className="text-[10px] font-black font-mono text-cyan-400 uppercase tracking-widest border-b border-slate-850 pb-1.5 flex items-center gap-1">
               <ShieldAlert className="w-3.5 h-3.5" />
@@ -1385,6 +1567,7 @@ export const DashboardEjecutivoView: React.FC = () => {
                 <th className="p-3 border-b border-slate-900">CLIENTE / OC</th>
                 <th className="p-3 border-b border-slate-900">MODELO / COLOR</th>
                 <th className="p-3 border-b border-slate-900 text-right">TOTAL PARES</th>
+                <th className="p-3 border-b border-slate-900 text-right">PARES FALTANTES</th>
                 <th className="p-3 border-b border-slate-900 text-center">AVANCE</th>
                 <th className="p-3 border-b border-slate-900">COMPROMISO</th>
                 <th className="p-3 border-b border-slate-900 text-right">DÍAS RESTANTES</th>
@@ -1395,7 +1578,13 @@ export const DashboardEjecutivoView: React.FC = () => {
             <tbody className="divide-y divide-slate-950">
               {displayedRiskOrders.map((o) => {
                 const isPassed = o.daysLeft <= 0;
-                const isUrgent = o.daysLeft > 0 && o.daysLeft <= 5;
+                const isUrgent = o.daysLeft > 0 && o.daysLeft <= semaphoreConfig.yellowDays;
+                // Faltantes must agree with the displayed avance, which is derived
+                // from producedPairs (post-injection), not facturación-only stages.
+                const completedPairs = (o as any).producedPairs != null
+                  ? Number((o as any).producedPairs)
+                  : Math.round(o.quantity * ((o.porcentajeAvance || 0) / 100));
+                const paresFaltantes = Math.max(0, o.quantity - completedPairs);
 
                 return (
                   <tr key={o.id} className="hover:bg-slate-850/40 transition-colors">
@@ -1416,6 +1605,9 @@ export const DashboardEjecutivoView: React.FC = () => {
                     <td className="p-3 text-right font-mono text-slate-200">
                       {o.quantity.toLocaleString()}
                     </td>
+                    <td className="p-3 text-right font-mono font-bold text-amber-300">
+                      {paresFaltantes.toLocaleString()}
+                    </td>
                     <td className="p-3">
                       <div className="flex flex-col items-center justify-center max-w-[100px] mx-auto">
                         <span className="text-[10px] font-mono font-bold text-slate-300">{o.porcentajeAvance}%</span>
@@ -1425,7 +1617,7 @@ export const DashboardEjecutivoView: React.FC = () => {
                       </div>
                     </td>
                     <td className="p-3 font-mono text-[11px] text-slate-400">
-                      {new Date(o.fechaCompromiso || '').toLocaleDateString('es-MX', { year: 'numeric', month: 'short', day: 'numeric' })}
+                      {formatPlantDateLabel(o.fechaCompromiso)}
                     </td>
                     <td className="p-3 text-right font-mono font-black">
                       {isPassed ? (
@@ -1468,7 +1660,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               })}
               {displayedRiskOrders.length === 0 && (
                 <tr>
-                  <td colSpan={9} className="p-6 text-center text-[11px] text-slate-500 font-mono uppercase">
+                  <td colSpan={10} className="p-6 text-center text-[11px] text-slate-500 font-mono uppercase">
                     Sin pedidos con esos filtros.
                   </td>
                 </tr>
@@ -1501,14 +1693,24 @@ export const PipelineLoteView: React.FC = () => {
   // Lotes desde el universo completo del FDB (endpoint operativo server-side),
   // no del bootstrap limitado. Fuente unica que coincide con Pipeline por Pedido.
   const [operationalData, setOperationalData] = useState<ErpOperationalResponse | null>(null);
+  const [operationalLoading, setOperationalLoading] = useState(backendEnabled);
+  const [operationalError, setOperationalError] = useState<string | null>(null);
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
-    const end = new Date().toISOString().slice(0, 10);
-    const start = new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const end = todayPlantDate();
+    const start = end;
+    setOperationalLoading(true);
+    setOperationalError(null);
     dashboardApi.erpOperativo(start, end)
       .then(data => { if (!cancelled) setOperationalData(data); })
-      .catch(err => console.warn('Pipeline por lote: ERP operativo fetch failed', err));
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Pipeline por lote: ERP operativo fetch failed', err);
+          setOperationalError('Pipeline por Lote');
+        }
+      })
+      .finally(() => { if (!cancelled) setOperationalLoading(false); });
     return () => { cancelled = true; };
   }, []);
   const loteBatches = operationalData?.lotePipeline ?? [];
@@ -1521,6 +1723,7 @@ export const PipelineLoteView: React.FC = () => {
   const [isTvModalOpen, setIsTvModalOpen] = useState(false);
   const [isEditFechaOpen, setIsEditFechaOpen] = useState(false);
   const [isReportDefectOpen, setIsReportDefectOpen] = useState(false);
+  const [showDetailModal, setShowDetailModal] = useState(false);
 
   // Filter states
   const [filtroCliente, setFiltroCliente] = useState('');
@@ -1533,6 +1736,10 @@ export const PipelineLoteView: React.FC = () => {
   const [filtroFechaCompromiso, setFiltroFechaCompromiso] = useState('');
   const [filtroResponsable, setFiltroResponsable] = useState('');
   const [filtroCodigoBarras, setFiltroCodigoBarras] = useState('');
+  const [filtroInventarioLoteDesde, setFiltroInventarioLoteDesde] = useState('');
+  const [filtroInventarioLoteHasta, setFiltroInventarioLoteHasta] = useState('');
+  const [filtroInventarioFechaDesde, setFiltroInventarioFechaDesde] = useState('');
+  const [filtroInventarioFechaHasta, setFiltroInventarioFechaHasta] = useState('');
   const [scannedLots, setScannedLots] = useState<Record<string, boolean>>({});
 
   // Local override states
@@ -1562,11 +1769,6 @@ export const PipelineLoteView: React.FC = () => {
   const loteStages = STAGES.filter(stage => stage.id !== 'estabilizacion');
   const normalizeLoteStage = (stage: StageId) => stage === 'estabilizacion' ? 'aduana' : stage;
   const getLoteStageName = (stage: StageId) => loteStages.find(s => s.id === normalizeLoteStage(stage))?.name || stage.replace('_', ' ');
-  const getPreviousLoteStageName = (stage: StageId) => {
-    const currentIdx = loteStages.findIndex(s => s.id === normalizeLoteStage(stage));
-    return currentIdx > 0 ? loteStages[currentIdx - 1].name : 'Sin zona previa';
-  };
-
   // Clear filters handler
   const handleLimpiarFiltros = () => {
     setFiltroCliente('');
@@ -1581,6 +1783,13 @@ export const PipelineLoteView: React.FC = () => {
     setFiltroCodigoBarras('');
   };
 
+  const handleLimpiarFiltrosInventario = () => {
+    setFiltroInventarioLoteDesde('');
+    setFiltroInventarioLoteHasta('');
+    setFiltroInventarioFechaDesde('');
+    setFiltroInventarioFechaHasta('');
+  };
+
   // Safe progress percentage per stage helper
   const getStageProgress = (stage: string) => {
     switch (stage) {
@@ -1589,7 +1798,8 @@ export const PipelineLoteView: React.FC = () => {
       case 'inyeccion': return 30;
       case 'aduana': return 60;
       case 'banda': return 80;
-      case 'embarque': return 100;
+      case 'embarque': return 90;
+      case 'facturacion': return 100;
       default: return 0;
     }
   };
@@ -1648,6 +1858,7 @@ export const PipelineLoteView: React.FC = () => {
 
     const matchedBatch = tenantBatches.find(b =>
       b.codigoBarras === scannedValue ||
+      b.idLote === scannedValue ||
       b.tarjetaViajera === scannedValue ||
       b.id === scannedValue
     );
@@ -1675,7 +1886,6 @@ export const PipelineLoteView: React.FC = () => {
     const clientVal = b.cliente || relOrder?.clientName || '';
     const modelVal = b.modelo || b.modelName || '';
     const opVal = b.responsableActual || b.operatorId || '';
-    const barcodeVal = b.codigoBarras || '';
     const currentStatus = b.status || 'OPTIMO';
 
     // Apply Overrides 
@@ -1699,8 +1909,33 @@ export const PipelineLoteView: React.FC = () => {
 
     if (filtroFechaCompromiso && !currentFechaCompromiso.includes(filtroFechaCompromiso)) return false;
     if (filtroResponsable && !opVal.toLowerCase().includes(filtroResponsable.toLowerCase())) return false;
-    if (filtroCodigoBarras && !barcodeVal.includes(filtroCodigoBarras)) return false;
+    if (filtroCodigoBarras) {
+      const searchId = filtroCodigoBarras.trim();
+      const searchable = [b.id, b.idLote, b.tarjetaViajera, b.codigoBarras].filter(Boolean).join(' ');
+      if (!searchable.includes(searchId)) return false;
+    }
 
+    return true;
+  });
+
+  const lotNumberForInventory = (batch: Batch): number | null => {
+    if (typeof batch.lote === 'number' && Number.isFinite(batch.lote)) return batch.lote;
+    const raw = batch.idLote || batch.id || '';
+    const matches = String(raw).match(/\d+/g);
+    if (!matches?.length) return null;
+    const value = Number(matches[matches.length - 1]);
+    return Number.isFinite(value) ? value : null;
+  };
+
+  const inventoryReportBatches = filteredBatches.filter(b => {
+    const lotNumber = lotNumberForInventory(b);
+    const desde = filtroInventarioLoteDesde ? Number(filtroInventarioLoteDesde) : null;
+    const hasta = filtroInventarioLoteHasta ? Number(filtroInventarioLoteHasta) : null;
+    const fechaAlta = (b.fechaAlta || '').slice(0, 10);
+    if (desde !== null && (!Number.isFinite(desde) || lotNumber === null || lotNumber < desde)) return false;
+    if (hasta !== null && (!Number.isFinite(hasta) || lotNumber === null || lotNumber > hasta)) return false;
+    if (filtroInventarioFechaDesde && (!fechaAlta || fechaAlta < filtroInventarioFechaDesde)) return false;
+    if (filtroInventarioFechaHasta && (!fechaAlta || fechaAlta > filtroInventarioFechaHasta)) return false;
     return true;
   });
 
@@ -1716,11 +1951,11 @@ export const PipelineLoteView: React.FC = () => {
       return isPastDueDateOnly(b.fechaCompromiso, baseDateAnchor) && !isDeliveredBatch(b);
     })
     .reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
-  const todayIso = new Date().toISOString().slice(0, 10);
-  const lotesEmbarcadosHoy = filteredBatches.filter(b => isDeliveredBatch(b) && (b.lastUpdate || b.ultimoEscaneo || '').startsWith(todayIso)).length;
+  const todayIso = dateInPlantTz(new Date());
+  const lotesFacturadosHoy = filteredBatches.filter(b => isDeliveredBatch(b) && dateInPlantTz(b.lastUpdate || b.ultimoEscaneo) === todayIso).length;
 
   // Bottleneck Stage calculation
-  const stageStatsMap = loteStages.filter(s => s.id !== 'embarque').map(st => {
+  const stageStatsMap = loteStages.filter(s => s.id !== 'embarque' && s.id !== 'facturacion').map(st => {
     const stBatches = filteredBatches.filter(b => normalizeLoteStage(getBatchStageId(b)) === st.id);
     const avgDuration = stBatches.length > 0
       ? stBatches.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0) / stBatches.length
@@ -1730,9 +1965,12 @@ export const PipelineLoteView: React.FC = () => {
   const maxStageDuration = stageStatsMap.reduce((max, cur) => cur.score > max.score ? cur : max, { id: '', name: 'Ninguno', avgDuration: 0, count: 0, score: 0 });
   const bottleneckActual = maxStageDuration.score > 0 ? maxStageDuration.name : 'Ninguno';
 
-  // Automatically select first filtered batch as default
-  const defaultSelectedBatch = filteredBatches[0] || null;
-  const selectedBatch = filteredBatches.find(b => b.id === selectedBatchId) || defaultSelectedBatch;
+  const selectedBatch = selectedBatchId ? filteredBatches.find(b => b.id === selectedBatchId) || null : null;
+
+  const handleCloseBatchPanel = () => {
+    setShowDetailModal(false);
+    setSelectedBatchId(null);
+  };
 
   // Set initial dates/observations when selected batch shifts
   useEffect(() => {
@@ -1838,6 +2076,14 @@ export const PipelineLoteView: React.FC = () => {
     return { text: 'Óptimo', bg: 'bg-emerald-900/60 border-emerald-800 text-emerald-400' };
   };
 
+  if (backendEnabled && operationalLoading && !operationalData) {
+    return <ModuleLoadingState label="Pipeline por Lote" />;
+  }
+
+  if (backendEnabled && operationalError && !operationalData) {
+    return <ModuleDataErrorState label={operationalError} />;
+  }
+
   return (
     <div className="space-y-6">
 
@@ -1872,7 +2118,7 @@ export const PipelineLoteView: React.FC = () => {
         <div className="flex items-center gap-1.5 border-b border-slate-900 pb-3">
           <Filter className="w-4 h-4 text-cyan-400" />
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider">
-            Consola de Filtrado Avanzado y Código de Barras
+            Consola de Filtrado Avanzado e ID Lote
           </h3>
         </div>
 
@@ -1880,7 +2126,7 @@ export const PipelineLoteView: React.FC = () => {
           {/* Barcode Search */}
           <div className="space-y-1 col-span-1 sm:col-span-2">
             <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-400 block">
-              Escanear / Buscar Código de Barras
+              Escanear / Buscar ID Lote
             </label>
             <div className="relative">
               <span className="absolute inset-y-0 left-0 flex items-center pl-3">
@@ -1888,7 +2134,7 @@ export const PipelineLoteView: React.FC = () => {
               </span>
               <input 
                 type="text"
-                placeholder="Escribe o escanea código (Ej: 7500123...)"
+                placeholder="Escribe o escanea ID lote"
                 value={filtroCodigoBarras}
                 onChange={(e) => handleScannerInput(e.target.value)}
                 className="w-full bg-slate-900 border border-slate-800 rounded-lg pl-9 pr-3 py-1.5 text-xs text-slate-100 font-mono focus:outline-none focus:border-cyan-500"
@@ -2097,9 +2343,9 @@ export const PipelineLoteView: React.FC = () => {
             Entregados Hoy
           </span>
           <div className="text-2xl font-black font-mono text-emerald-400">
-            {lotesEmbarcadosHoy}
+            {lotesFacturadosHoy}
           </div>
-          <span className="text-[9px] font-mono text-slate-450 block">Llegaron a embarque hoy</span>
+          <span className="text-[9px] font-mono text-slate-450 block">Llegaron a facturación hoy</span>
         </div>
 
         <div className="p-4 bg-amber-950/15 border border-amber-950/40 rounded-xl space-y-1.5 shadow-md col-span-2 sm:col-span-1">
@@ -2113,11 +2359,11 @@ export const PipelineLoteView: React.FC = () => {
         </div>
       </div>
 
-      {/* SECCIÓN PRINCIPAL: KANBAN BOARD + DETALLE LATERAL */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
-        
-        {/* KANBAN BOARD (COLUMNS 1 TO 7) */}
-        <div className="xl:col-span-3 space-y-3">
+      {/* SECCIÓN PRINCIPAL: KANBAN BOARD + DETAIL PANEL */}
+      <div className={`grid grid-cols-1 gap-6 ${showDetailModal && selectedBatch ? 'xl:grid-cols-[minmax(0,1fr)_380px]' : ''}`}>
+
+        {/* KANBAN BOARD */}
+        <div className="space-y-3">
           
           <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin snap-x">
             {loteStages.map(stage => {
@@ -2144,7 +2390,8 @@ export const PipelineLoteView: React.FC = () => {
                           stage.id === 'almacen' ? 'bg-slate-400' :
                           stage.id === 'inyeccion' ? 'bg-amber-500' :
                           stage.id === 'aduana' ? 'bg-rose-500' :
-                          stage.id === 'banda' ? 'bg-indigo-500' : 'bg-emerald-500'
+                          stage.id === 'banda' ? 'bg-indigo-500' :
+                          stage.id === 'facturacion' ? 'bg-teal-500' : 'bg-emerald-500'
                         }`}></span>
                         <h4 className="text-xs font-bold font-mono text-slate-200 uppercase tracking-wider truncate max-w-[170px]">
                           {stage.name}
@@ -2207,10 +2454,10 @@ export const PipelineLoteView: React.FC = () => {
                         return (
                           <div
                             key={b.id}
-                            onClick={() => setSelectedBatchId(b.id)}
+                            onClick={() => { setSelectedBatchId(b.id); setShowDetailModal(true); }}
                             className={`p-3 rounded-xl border transition-all duration-200 relative cursor-pointer select-none space-y-2.5 ${
-                              isSelected 
-                                ? 'bg-slate-900 border-cyan-500/80 shadow-md shadow-cyan-950/40 ring-1 ring-cyan-500/40' 
+                              isSelected
+                                ? 'bg-slate-900 border-cyan-500/80 shadow-md shadow-cyan-950/40 ring-1 ring-cyan-500/40'
                                 : 'bg-slate-900/50 border-slate-900 hover:border-slate-800 hover:bg-slate-900/70'
                             }`}
                           >
@@ -2268,10 +2515,15 @@ export const PipelineLoteView: React.FC = () => {
 
         </div>
 
-        {/* DETALLE LATERAL DERECHO (CLIENT SIDE SELECTED PANEL) */}
-        <div className="xl:col-span-1">
+        {/* DETAIL SIDE PANEL */}
+        {showDetailModal && selectedBatch && (
+          <aside className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 xl:sticky xl:top-4 self-start max-h-[calc(100vh-8rem)] overflow-y-auto">
+              <div className="flex justify-between items-center border-b border-slate-900 pb-3">
+                <span className="text-[9px] font-mono text-cyan-400 font-bold uppercase tracking-wider">Panel de Diagnóstico Lote</span>
+                <button onClick={handleCloseBatchPanel} className="text-slate-500 hover:text-slate-200 text-lg leading-none">✕</button>
+              </div>
           {selectedBatch ? (
-            <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 sticky top-6">
+            <div className="space-y-5">
               
               {/* Header Title Panel */}
               <div className="border-b border-slate-900 pb-3">
@@ -2291,7 +2543,7 @@ export const PipelineLoteView: React.FC = () => {
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-500 font-mono mt-1">
-                  Código Barras: {selectedBatch.codigoBarras || '750012300401'}
+                  ID Lote: {selectedBatch.idLote || selectedBatch.id}
                 </p>
               </div>
 
@@ -2335,12 +2587,24 @@ export const PipelineLoteView: React.FC = () => {
                         <span className="font-bold text-slate-200">{selectedBatch.color}</span>
                       </div>
                       <div>
-                        <span className="text-slate-500 block leading-none">Talla Punto Calzado:</span>
-                        <span className="font-mono text-cyan-400 font-bold">#{selectedBatch.size} MX</span>
+                        <span className="text-slate-500 block leading-none">Corrida:</span>
+                        <span className="font-mono text-cyan-400 font-bold">{selectedBatch.corrida || 'N/D'}</span>
                       </div>
                       <div>
                         <span className="text-slate-500 block leading-none">Rel. Expansión Soplado:</span>
                         <span className="font-mono text-slate-300 font-bold">{selectedBatchModelDetails?.expansionFactor ? `x${selectedBatchModelDetails.expansionFactor}` : 'Pendiente OCR'}</span>
+                      </div>
+                    </div>
+
+                    <div className="border-t border-slate-900 pt-2">
+                      <span className="text-slate-500 uppercase font-bold text-[8px] tracking-wider block mb-1">Pares reales por punto:</span>
+                      <div className="grid grid-cols-3 gap-1">
+                        {Object.entries(selectedBatch.paresPorTalla || {}).length > 0 ? Object.entries(selectedBatch.paresPorTalla || {}).map(([talla, pares]) => (
+                          <div key={talla} className="flex justify-between bg-slate-950/60 rounded px-1.5 py-1 font-mono text-[9px]">
+                            <span className="text-slate-500">P{talla}</span>
+                            <strong className="text-cyan-300">{pares}</strong>
+                          </div>
+                        )) : <span className="col-span-3 text-[9px] text-slate-600">Sin desglose FDB</span>}
                       </div>
                     </div>
 
@@ -2503,13 +2767,9 @@ export const PipelineLoteView: React.FC = () => {
               </div>
 
             </div>
-          ) : (
-            <div className="bg-slate-950 border border-slate-900 rounded-xl p-6 text-center text-slate-500">
-              <Layers className="w-8 h-8 mx-auto text-slate-700 mb-2" />
-              <p className="text-xs font-mono">Selecciona un lote del Kanban para visualizar su desglose operativo.</p>
-            </div>
-          )}
-        </div>
+          ) : null}
+          </aside>
+        )}
 
       </div>
 
@@ -2519,12 +2779,60 @@ export const PipelineLoteView: React.FC = () => {
           <div className="flex items-center gap-1.5">
             <Building className="w-4 h-4 text-cyan-400" />
             <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-widest">
-              Reporte de Inventario de Lotes en Planta ({filteredBatches.length} lotes)
+              Reporte de Inventario de Lotes en Planta ({inventoryReportBatches.length} lotes)
             </h3>
           </div>
           <span className="text-[9px] font-mono text-slate-500 bg-slate-900/60 border border-slate-800 px-2 py-1 rounded">
             Planta: {currentTenant.name}
           </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-slate-900/30 border border-slate-900 rounded-lg p-3">
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-500 block">Lote desde</label>
+            <input
+              type="number"
+              value={filtroInventarioLoteDesde}
+              onChange={(e) => setFiltroInventarioLoteDesde(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-500 block">Lote hasta</label>
+            <input
+              type="number"
+              value={filtroInventarioLoteHasta}
+              onChange={(e) => setFiltroInventarioLoteHasta(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-500 block">Fecha alta desde</label>
+            <input
+              type="date"
+              value={filtroInventarioFechaDesde}
+              onChange={(e) => setFiltroInventarioFechaDesde(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
+            />
+          </div>
+          <div className="space-y-1">
+            <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-500 block">Fecha alta hasta</label>
+            <input
+              type="date"
+              value={filtroInventarioFechaHasta}
+              onChange={(e) => setFiltroInventarioFechaHasta(e.target.value)}
+              className="w-full bg-slate-950 border border-slate-800 rounded p-1.5 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 font-mono"
+            />
+          </div>
+          <div className="flex items-end">
+            <button
+              onClick={handleLimpiarFiltrosInventario}
+              className="w-full flex justify-center items-center gap-1 px-3 py-1.5 bg-slate-950 hover:bg-slate-850 text-slate-400 hover:text-white rounded text-xs font-mono transition border border-slate-800 cursor-pointer"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+              Limpiar
+            </button>
+          </div>
         </div>
 
         <div className="overflow-x-auto">
@@ -2534,11 +2842,9 @@ export const PipelineLoteView: React.FC = () => {
                 <th className="p-3">Cliente</th>
                 <th className="p-3">OC</th>
                 <th className="p-3">Lote ID</th>
-                <th className="p-3">Tarjeta Viajera</th>
                 <th className="p-3">Modelo</th>
                 <th className="p-3">Color</th>
                 <th className="p-3 text-right">Total Pares</th>
-                <th className="p-3">Zona Previa</th>
                 <th className="p-3 bg-slate-900/20">Zona Actual</th>
                 <th className="p-3 text-right">Pares en Etapa</th>
                 <th className="p-3">Tiempo Etapa</th>
@@ -2548,14 +2854,14 @@ export const PipelineLoteView: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-900 font-mono text-[11px] text-slate-300">
-              {filteredBatches.length === 0 ? (
+              {inventoryReportBatches.length === 0 ? (
                 <tr>
-                  <td colSpan={14} className="p-8 text-center text-slate-600 bg-slate-950/50">
+                  <td colSpan={12} className="p-8 text-center text-slate-600 bg-slate-950/50">
                     Ningún registro coincide con los filtros especificados en la barra superior.
                   </td>
                 </tr>
               ) : (
-                filteredBatches.map(b => {
+                inventoryReportBatches.map(b => {
                   const relOrder = orders.find(o => o.id === b.orderId);
                   const displayOC = b.oc || relOrder?.oc || 'S/O';
                   const displayClient = b.cliente || relOrder?.clientName || 'S/C';
@@ -2581,21 +2887,19 @@ export const PipelineLoteView: React.FC = () => {
                   }
 
                   return (
-                    <tr 
-                      key={b.id} 
-                      onClick={() => setSelectedBatchId(b.id)}
+                    <tr
+                      key={b.id}
+                      onClick={() => { setSelectedBatchId(b.id); setShowDetailModal(true); }}
                       className={`hover:bg-slate-900/40 transition cursor-pointer ${
                         selectedBatch?.id === b.id ? 'bg-slate-900/20' : ''
                       }`}
                     >
                       <td className="p-3 truncate max-w-[120px] font-sans font-medium text-slate-200">{displayClient}</td>
                       <td className="p-3 text-slate-300 font-bold">{displayOC}</td>
-                      <td className="p-3 text-cyan-400 font-bold">{b.id}</td>
-                      <td className="p-3 text-slate-500">{b.tarjetaViajera || `TV-${b.id}`}</td>
+                      <td className="p-3 text-cyan-400 font-bold">{b.idLote || b.id}</td>
                       <td className="p-3 text-slate-200">{displayModel}</td>
                       <td className="p-3 text-slate-300">{b.color}</td>
                       <td className="p-3 text-right font-bold">{getBatchPairs(b).toLocaleString('es-MX')}</td>
-                      <td className="p-3 text-slate-500 uppercase font-bold text-[9px]">{getPreviousLoteStageName(batchStage)}</td>
                       <td className="p-3 bg-slate-900/20 text-slate-300 uppercase font-bold text-[9px]">{getLoteStageName(batchStage)}</td>
                       <td className="p-3 text-right font-medium">{(b.paresEnEtapa || getBatchPairs(b)).toLocaleString('es-MX')}</td>
                       <td className="p-3 text-slate-400">{formatEtapaTime(b.tiempoEnEtapaMinutos)}</td>
@@ -2770,7 +3074,7 @@ export const PipelineLoteView: React.FC = () => {
                   ))}
                 </div>
                 <span className="text-[10px] text-slate-900 font-bold tracking-widest">
-                  *{selectedBatch.codigoBarras || '750012300401'}*
+                  *{selectedBatch.idLote || selectedBatch.id}*
                 </span>
                 <span className="text-[8px] text-slate-400 uppercase tracking-tighter">ID: {selectedBatch.id} - FOLIO RECEPTOR INFRA</span>
               </div>
@@ -3090,7 +3394,7 @@ const D3OrderGauge: React.FC<{ progress: number }> = ({ progress }) => {
 };
 
 // Horizontal stage D3 bar chart
-const D3OrderTimeline: React.FC<{ stagesData: { name: string; value: number; color: string }[] }> = ({ stagesData }) => {
+  const D3OrderTimeline: React.FC<{ stagesData: { name: string; value: number; color: string }[] }> = ({ stagesData }) => {
   const containerRef = React.useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -3155,12 +3459,12 @@ const D3OrderTimeline: React.FC<{ stagesData: { name: string; value: number; col
     svg.selectAll('.tick text')
       .style('font-family', 'sans-serif')
       .style('font-size', '8px')
-      .style('fill', '#64748b');
+      .style('fill', '#475569');
 
   }, [stagesData]);
 
   return (
-    <div ref={containerRef} className="w-full bg-slate-900/40 p-1.5 border border-slate-900 rounded-lg">
+    <div ref={containerRef} className="w-full bg-white p-1.5 border border-slate-200 rounded-lg">
     </div>
   );
 };
@@ -3168,8 +3472,9 @@ const D3OrderTimeline: React.FC<{ stagesData: { name: string; value: number; col
 export const PipelinePedidoView: React.FC = () => {
   const { orders, batches, defects, currentTenant, exchangeRate, addAuditLog } = useDashboard();
 
-  // Selected Order State (Default to the very first matching)
+  // Selected Order State
   const [selectedOrderId, setSelectedOrderId] = useState<string | null>(null);
+  const [showOrderPanel, setShowOrderPanel] = useState(false);
 
   // Top Filter States
   const [filtroCliente, setFiltroCliente] = useState('');
@@ -3183,15 +3488,24 @@ export const PipelinePedidoView: React.FC = () => {
   const [filtroRiesgo, setFiltroRiesgo] = useState('');
   const [filtroEtapaDominante, setFiltroEtapaDominante] = useState('');
   const [operationalData, setOperationalData] = useState<ErpOperationalResponse | null>(null);
+  const [operationalLoading, setOperationalLoading] = useState(backendEnabled);
+  const [operationalError, setOperationalError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
-    const end = new Date();
-    const start = new Date(end.getTime() - 365 * 24 * 3600 * 1000);
-    dashboardApi.erpOperativo(start.toISOString().slice(0, 10), end.toISOString().slice(0, 10))
+    const today = todayPlantDate();
+    setOperationalLoading(true);
+    setOperationalError(null);
+    dashboardApi.erpOperativo(today, today)
       .then(data => { if (!cancelled) setOperationalData(data); })
-      .catch(err => console.warn('Pipeline pedido: ERP operativo fetch failed', err));
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Pipeline pedido: ERP operativo fetch failed', err);
+          setOperationalError('Pipeline por Pedido');
+        }
+      })
+      .finally(() => { if (!cancelled) setOperationalLoading(false); });
     return () => { cancelled = true; };
   }, []);
 
@@ -3203,7 +3517,8 @@ export const PipelinePedidoView: React.FC = () => {
     'estabilizacion': 57,
     'aduana': 71,
     'banda': 86,
-    'embarque': 100
+    'embarque': 88,
+    'facturacion': 100
   };
 
   const STAGE_NAMES: Record<string, string> = {
@@ -3213,7 +3528,8 @@ export const PipelinePedidoView: React.FC = () => {
     'estabilizacion': 'Estabilización',
     'aduana': 'Aduana',
     'banda': 'Banda',
-    'embarque': 'Embarque'
+    'embarque': 'Embarque',
+    'facturacion': 'Facturación'
   };
   const mapDeliveryRiskToSignal = (risk: string): 'VERDE' | 'AMARILLO' | 'ROJO' | 'GRIS' => {
     if (risk === 'VENCIDO' || risk === 'ALTO') return 'ROJO';
@@ -3239,7 +3555,8 @@ export const PipelinePedidoView: React.FC = () => {
       'estabilizacion': 0,
       'aduana': 0,
       'banda': 0,
-      'embarque': 0
+      'embarque': 0,
+      'facturacion': 0
     };
 
     let weightedSum = 0;
@@ -3264,7 +3581,9 @@ export const PipelinePedidoView: React.FC = () => {
       }
     });
 
-    const progress = totalPares > 0 ? Math.min(100, Math.round(weightedSum / totalPares)) : 0;
+    const completedPairs = getCompletedPairsFromStages(pairsByStage);
+    const producedPairs = getProducedPairsFromStages(pairsByStage, completedPairs);
+    const progress = totalPares > 0 ? Math.min(100, Math.round((producedPairs / totalPares) * 100)) : 0;
     const avgTimeMin = countWithTime > 0 ? Math.round(totalTimeMin / countWithTime) : 180; // default to 3 hours if none
 
     // Dominant stage calculation
@@ -3306,54 +3625,59 @@ export const PipelinePedidoView: React.FC = () => {
 
     return {
       ...o,
-      totalPares,
-      progress,
+    totalPares,
+    producedPairs,
+    progress,
       avgTimeMin,
       dominantStage,
       risk,
       pairsByStage,
       batchesCount: orderBatches.length,
-      shippedPairs: pairsByStage['embarque'] || 0,
-      inProcessPairs: orderBatches
-        .filter(b => !isDeliveredBatch(b))
-        .reduce((sum, b) => sum + getBatchPairs(b), 0)
+      shippedPairs: completedPairs,
+      inProcessPairs: Math.max(0, totalPares - completedPairs)
     };
   });
-  const erpOrdersWithMetrics = (operationalData?.orderPipeline ?? []).map(o => ({
-    id: o.id,
-    tenantId: currentTenant.id,
-    clientId: o.cliente,
-    clientName: o.cliente,
-    modelId: o.modelo || 'varios',
-    modelName: o.modelo || 'Varios modelos',
-    modelo: o.modelo || 'Varios modelos',
-    color: o.color || 'N/D',
-    quantity: o.totalPares,
-    exchangeRate,
-    totalUSD: 0,
-    totalMXN: 0,
-    createdAt: o.fechaAlta || '',
-    deliveryDate: o.fechaCompromiso || '',
-    status: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
-    discountAuthorized: false,
-    discountPercentage: 0,
-    cliente: o.cliente,
-    oc: o.oc || undefined,
-    fechaAlta: o.fechaAlta || undefined,
-    fechaCompromiso: o.fechaCompromiso || undefined,
-    totalPares: o.totalPares,
-    estatus: o.progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
-    porcentajeAvance: o.progress,
-    riesgoEntrega: o.risk,
-    progress: o.progress,
-    avgTimeMin: o.avgTimeMin ?? 0,
-    dominantStage: o.dominantStage,
-    risk: mapDeliveryRiskToSignal(o.risk),
-    pairsByStage: o.pairsByStage,
-    batchesCount: o.batchesCount,
-    shippedPairs: o.shippedPairs,
-    inProcessPairs: o.inProcessPairs
-  }));
+  const erpOrdersWithMetrics = (operationalData?.orderPipeline ?? []).map(o => {
+    const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
+    const progress = o.totalPares > 0 ? Math.min(100, Math.round((producedPairs / o.totalPares) * 100)) : 0;
+
+    return {
+      id: o.id,
+      tenantId: currentTenant.id,
+      clientId: o.cliente,
+      clientName: o.cliente,
+      modelId: o.modelo || 'varios',
+      modelName: o.modelo || 'Varios modelos',
+      modelo: o.modelo || 'Varios modelos',
+      color: o.color || 'N/D',
+      quantity: o.totalPares,
+      exchangeRate,
+      totalUSD: 0,
+      totalMXN: 0,
+      createdAt: o.fechaAlta || '',
+      deliveryDate: o.fechaCompromiso || '',
+      status: progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+      discountAuthorized: false,
+      discountPercentage: 0,
+      cliente: o.cliente,
+      oc: o.oc || undefined,
+      fechaAlta: o.fechaAlta || undefined,
+      fechaCompromiso: o.fechaCompromiso || undefined,
+      totalPares: o.totalPares,
+      producedPairs,
+      estatus: progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+      porcentajeAvance: progress,
+      riesgoEntrega: o.risk,
+      progress,
+      avgTimeMin: o.avgTimeMin ?? 0,
+      dominantStage: o.dominantStage,
+      risk: mapDeliveryRiskToSignal(o.risk),
+      pairsByStage: o.pairsByStage,
+      batchesCount: o.batchesCount,
+      shippedPairs: o.shippedPairs,
+      inProcessPairs: Math.max(0, o.totalPares - producedPairs)
+    };
+  });
   // Fuente unica: pedidos siempre desde el ERP server-side (universo completo del
   // FDB). Sin fallback al bootstrap limitado.
   const allOrders = operationalData ? erpOrdersWithMetrics : [];
@@ -3399,8 +3723,14 @@ export const PipelinePedidoView: React.FC = () => {
   const totalShippedPairs = activeOrders.reduce((sum, o) => sum + o.shippedPairs, 0);
   const totalInProcessPairs = activeOrders.reduce((sum, o) => sum + o.inProcessPairs, 0);
   
-  // Pending Backlog
-  const pendingBacklog = Math.max(0, totalCommittedPairs - totalShippedPairs);
+  const currentMonthKey = dateInPlantTz(new Date()).slice(0, 7);
+  const monthlyShippedPairs = (operationalData?.movements ?? [])
+    .filter(m => {
+      const stage = String(m.etapa || '').toUpperCase();
+      const month = dateInPlantTz(m.fechaEntrada).slice(0, 7);
+      return month === currentMonthKey && (stage.includes('FACTUR') || stage.includes('EMBAR'));
+    })
+    .reduce((sum, m) => sum + Number(m.pares || 0), 0);
 
   // Weighted Average Progress across active/filtered orders
   const avgProgress = totalCommittedPairs > 0
@@ -3417,7 +3747,15 @@ export const PipelinePedidoView: React.FC = () => {
   const overdueOpenPairs = overdueOpenOrders.reduce((sum, o) => sum + o.inProcessPairs, 0);
 
   // Selected Order
-  const activeSelectedOrder = filteredOrders.find(o => o.id === selectedOrderId) || filteredOrders[0] || null;
+  const activeSelectedOrder = selectedOrderId
+    ? filteredOrders.find(o => o.id === selectedOrderId) || null
+    : null;
+  const isOrderPanelOpen = showOrderPanel && Boolean(activeSelectedOrder);
+
+  const handleCloseOrderPanel = () => {
+    setShowOrderPanel(false);
+    setSelectedOrderId(null);
+  };
 
   // Safe time duration display formatter
   const formatTimeMinutes = (min: number) => {
@@ -3425,6 +3763,25 @@ export const PipelinePedidoView: React.FC = () => {
     const h = Math.floor(min / 60);
     const m = Math.floor(min % 60);
     return `${h}h ${String(m).padStart(2, '0')}m`;
+  };
+
+  const daysBetweenDates = (start?: string, end?: string): number | null => {
+    const startMs = dateOnlyTime(start);
+    const endMs = dateOnlyTime(end);
+    if (startMs === null || endMs === null) return null;
+    return Math.max(0, Math.round((endMs - startMs) / 86_400_000));
+  };
+
+  const elapsedProductionDays = (start?: string): number | null => {
+    const startMs = dateOnlyTime(start);
+    const todayMs = dateOnlyTime(new Date().toISOString());
+    if (startMs === null || todayMs === null) return null;
+    return Math.max(0, Math.round((todayMs - startMs) / 86_400_000));
+  };
+
+  const percentage = (part: number | null, total: number | null): number => {
+    if (part === null || total === null || total <= 0) return 0;
+    return Math.round((part / total) * 100);
   };
 
   const handleClearFilters = () => {
@@ -3450,6 +3807,7 @@ export const PipelinePedidoView: React.FC = () => {
     'Aduana': o.pairsByStage['aduana'] || 0,
     'Banda': o.pairsByStage['banda'] || 0,
     'Entrega': o.pairsByStage['embarque'] || 0,
+    'Facturación': o.pairsByStage['facturacion'] || 0,
   }));
 
   const lineChartData = (operationalData?.dailyProduction ?? []).slice(-15).map(row => ({
@@ -3457,9 +3815,9 @@ export const PipelinePedidoView: React.FC = () => {
     'Pares Producidos': row.pares
   }));
 
-  // Ranking data: Backlog
-  const backlogRanking = [...activeOrders]
-    .map(o => ({ name: o.id, value: o.inProcessPairs }))
+  // Ranking data: shipped pairs
+  const shippedRanking = [...activeOrders]
+    .map(o => ({ name: o.id, value: o.shippedPairs }))
     .sort((a, b) => b.value - a.value)
     .slice(0, 4);
 
@@ -3477,6 +3835,7 @@ export const PipelinePedidoView: React.FC = () => {
   // Generate dynamic array data of pairs per stage for selected order for D3 rendering
   const selectedStagesArray = activeSelectedOrder ? [
     { name: 'Entrega', value: activeSelectedOrder.pairsByStage['embarque'] || 0, color: '#10b981' },
+    { name: 'Facturación', value: activeSelectedOrder.pairsByStage['facturacion'] || 0, color: '#14b8a6' },
     { name: 'Banda', value: activeSelectedOrder.pairsByStage['banda'] || 0, color: '#6366f1' },
     { name: 'Aduana', value: activeSelectedOrder.pairsByStage['aduana'] || 0, color: '#f43f5e' },
     { name: 'Estabilización', value: activeSelectedOrder.pairsByStage['estabilizacion'] || 0, color: '#a855f7' },
@@ -3490,6 +3849,14 @@ export const PipelinePedidoView: React.FC = () => {
     ? tenantBatches.filter(b => b.orderId === activeSelectedOrder.id).map(b => b.id)
     : [];
   const associatedDefects = defects.filter(d => orderBatchesIds.includes(d.batchId));
+
+  if (backendEnabled && operationalLoading && !operationalData) {
+    return <ModuleLoadingState label="Pipeline por Pedido" />;
+  }
+
+  if (backendEnabled && operationalError && !operationalData) {
+    return <ModuleDataErrorState label={operationalError} />;
+  }
 
   return (
     <div className="space-y-6">
@@ -3649,24 +4016,6 @@ export const PipelinePedidoView: React.FC = () => {
             </select>
           </div>
 
-          {/* Riesgo */}
-          <div className="space-y-1">
-            <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-450 block">
-              Riesgo Estimado SLA
-            </label>
-            <select
-              value={filtroRiesgo}
-              onChange={(e) => setFiltroRiesgo(e.target.value)}
-              className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-200 focus:outline-none"
-            >
-              <option value="">-- Todos --</option>
-              <option value="VERDE">🟢 Bajo / En tiempo</option>
-              <option value="AMARILLO">🟡 Medio (Riesgo)</option>
-              <option value="ROJO">🔴 Alto / Vencido</option>
-              <option value="GRIS">⚪ Sin fecha</option>
-            </select>
-          </div>
-
         </div>
 
         <div className="flex justify-end pt-2 border-t border-slate-900">
@@ -3725,12 +4074,12 @@ export const PipelinePedidoView: React.FC = () => {
 
         <div className="p-4 bg-slate-955 border border-slate-909 rounded-xl space-y-1.5 shadow-md">
           <span className="text-[10px] font-mono font-bold text-indigo-450 uppercase tracking-widest block leading-tight">
-            Backlog Pendiente
+            Pares Embarcados Mes
           </span>
           <div className="text-2xl font-black font-mono text-indigo-400 leading-none">
-            {pendingBacklog.toLocaleString()}
+            {monthlyShippedPairs.toLocaleString()}
           </div>
-          <span className="text-[9px] font-mono text-slate-500 block">En proceso - entregados</span>
+          <span className="text-[9px] font-mono text-slate-500 block">{currentMonthKey}</span>
         </div>
 
         <div className="p-4 bg-rose-950/10 border border-rose-950/40 rounded-xl space-y-1.5 shadow-md">
@@ -3748,17 +4097,17 @@ export const PipelinePedidoView: React.FC = () => {
       </div>
 
       {/* 4. GRÁFICAS RECHARTS SECTION */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         
         {/* Grafica Stacked Bars */}
-        <div className="xl:col-span-2 bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             Distribución de Pares por Etapa (Top 5 Pedidos Activos)
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-tight">
             Desglosado de calzado cargado actualmente por cada subestación de control industrial.
           </p>
-          <div className="h-60 overflow-x-auto">
+          <div className="h-[300px] overflow-x-auto">
             {stackedChartData.length === 0 ? (
               <div className="h-full flex flex-col justify-center items-center text-slate-550">
                 <span>Sin datos de pedidos</span>
@@ -3774,8 +4123,8 @@ export const PipelinePedidoView: React.FC = () => {
                   <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '9px', fontFamily: 'monospace' }} />
                   <RechartsYAxis stroke="#64748b" style={{ fontSize: '9px', fontFamily: 'monospace' }} />
                   <RechartsTooltip 
-                    contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '8px' }}
-                    labelStyle={{ color: '#94a3b8', fontSize: '10px', fontWeight: 'bold' }}
+                    contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '8px', color: '#0f172a' }}
+                    labelStyle={{ color: '#0f172a', fontSize: '10px', fontWeight: 'bold' }}
                     itemStyle={{ fontSize: '10px' }}
                   />
                   <RechartsLegend wrapperStyle={{ fontSize: '8px', paddingTop: '10px' }} />
@@ -3786,6 +4135,7 @@ export const PipelinePedidoView: React.FC = () => {
                   <RechartsBar dataKey="Aduana" stackId="a" fill="#f43f5e" />
                   <RechartsBar dataKey="Banda" stackId="a" fill="#6366f1" />
                   <RechartsBar dataKey="Entrega" stackId="a" fill="#10b981" />
+                  <RechartsBar dataKey="Facturación" stackId="a" fill="#14b8a6" />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
               </div>
@@ -3801,7 +4151,7 @@ export const PipelinePedidoView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-tight">
             Histórico FDB de pares producidos por día.
           </p>
-          <div className="h-60 overflow-x-auto">
+          <div className="h-[300px] overflow-x-auto">
             {lineChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN DATOS FDB EN PERIODO</div>
             ) : (
@@ -3815,9 +4165,9 @@ export const PipelinePedidoView: React.FC = () => {
                 <RechartsXAxis dataKey="day" stroke="#64748b" style={{ fontSize: '9px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '9px' }} />
                 <RechartsTooltip
-                  contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '8px' }}
-                  labelStyle={{ color: '#94a3b8', fontSize: '10px' }}
-                  itemStyle={{ fontSize: '10px', color: '#22d3ee' }}
+                  contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '8px', color: '#0f172a' }}
+                  labelStyle={{ color: '#0f172a', fontSize: '10px' }}
+                  itemStyle={{ fontSize: '10px' }}
                 />
                 <RechartsLine type="monotone" dataKey="Pares Producidos" stroke="#06b6d4" strokeWidth={3} dot={{ r: 4 }} />
               </RechartsLineChart>
@@ -3834,13 +4184,13 @@ export const PipelinePedidoView: React.FC = () => {
               Rankings Críticos de Carga
             </h3>
             
-            {/* 1. Mayor Backlog */}
+            {/* 1. Mayor embarque */}
             <div className="space-y-2 mb-4">
               <span className="text-[10px] font-mono text-indigo-400 font-bold uppercase tracking-wider block">
-                🚨 Mayor Backlog de Pares Pendientes
+                Pares embarcados por pedido
               </span>
               <div className="space-y-1.5">
-                {backlogRanking.map((item, idx) => (
+                {shippedRanking.map((item, idx) => (
                   <div key={idx} className="flex justify-between items-center bg-slate-900/50 px-2 py-1 rounded border border-slate-900 text-xs">
                     <span className="font-mono text-slate-300 font-bold">{item.name}</span>
                     <span className="font-mono text-indigo-300 font-bold">{(item.value).toLocaleString()} pares</span>
@@ -3855,10 +4205,10 @@ export const PipelinePedidoView: React.FC = () => {
       </div>
 
       {/* 3. TABLA PRINCIPAL POR PEDIDO + PANEL DERECHO DE DETALLE */}
-      <div className="grid grid-cols-1 xl:grid-cols-4 gap-6">
+      <div className={`grid grid-cols-1 gap-6 ${isOrderPanelOpen ? 'xl:grid-cols-[minmax(0,1fr)_380px]' : ''}`}>
         
-        {/* Table Spreadsheet container (takes column spanning 3) */}
-        <div className="xl:col-span-3 bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl flex flex-col justify-between overflow-hidden">
+        {/* Table Spreadsheet container */}
+        <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl flex flex-col justify-between overflow-hidden">
           
           <div className="space-y-4">
             <div className="flex justify-between items-center flex-wrap gap-2">
@@ -3883,7 +4233,13 @@ export const PipelinePedidoView: React.FC = () => {
                     <th className="py-3 px-3 min-w-[110px] font-bold">Folio Pedido</th>
                     <th className="py-3 px-3 min-w-[90px] font-bold">Fecha Alta</th>
                     <th className="py-3 px-3 min-w-[100px] font-bold">Fecha Comp.</th>
+                    <th className="py-3 px-3 min-w-[85px] font-bold text-right">Días Prog.</th>
+                    <th className="py-3 px-3 min-w-[95px] font-bold text-right">% Días Prod.</th>
+                    <th className="py-3 px-3 min-w-[95px] font-bold text-right">% Progreso</th>
                     <th className="py-3 px-3 min-w-[90px] font-bold text-right">Total Pares</th>
+                    <th className="py-3 px-3 min-w-[110px] font-bold text-right">Pares Producidos</th>
+                    <th className="py-3 px-3 min-w-[110px] font-bold text-right">Pares Restantes</th>
+                    <th className="py-3 px-3 min-w-[95px] font-bold text-right">% Restante</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-blue-400 font-extrabold bg-blue-950/10">Alta</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-slate-350 font-extrabold bg-slate-900/10">Alm.</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-amber-500 font-extrabold bg-amber-950/10">Inye.</th>
@@ -3891,14 +4247,14 @@ export const PipelinePedidoView: React.FC = () => {
                     <th className="py-3 px-2 min-w-[65px] text-center text-rose-450 font-extrabold bg-rose-950/10">Adu.</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-indigo-400 font-extrabold bg-indigo-950/10">Bnd.</th>
                     <th className="py-3 px-2 min-w-[65px] text-center text-emerald-400 font-extrabold bg-emerald-950/10">Emb.</th>
+                    <th className="py-3 px-2 min-w-[75px] text-center text-teal-400 font-extrabold bg-teal-950/10">Fact.</th>
                     <th className="py-3 px-3 min-w-[95px] font-bold">Estatus</th>
-                    <th className="py-3 px-3 min-w-[105px] font-bold">Riesgo</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-900 text-[11px] font-mono">
                   {filteredOrders.length === 0 ? (
                     <tr>
-                      <td colSpan={15} className="py-12 text-center text-slate-500 text-xs">
+                      <td colSpan={21} className="py-12 text-center text-slate-500 text-xs">
                         ⚠️ No se encontraron pedidos con los criterios ingresados.
                       </td>
                     </tr>
@@ -3907,25 +4263,22 @@ export const PipelinePedidoView: React.FC = () => {
                       const isSelected = activeSelectedOrder?.id === o.id;
                       const dateAlta = o.fechaAlta?.split('T')[0] || o.createdAt?.split('T')[0] || 'N/A';
                       const dateComp = o.fechaCompromiso?.split('T')[0] || o.deliveryDate?.split('T')[0] || 'N/A';
-                      
-                      // Risk Badge Styling
-                      let riskStyle = "bg-emerald-950/40 text-emerald-400 border border-emerald-800/40";
-                      let riskText = "🟢 Bajo";
-                      if (o.risk === 'ROJO') {
-                        riskStyle = "bg-rose-950/40 text-rose-400 border border-rose-800/40";
-                        riskText = "🔴 Alto / Venc.";
-                      } else if (o.risk === 'AMARILLO') {
-                        riskStyle = "bg-amber-950/40 text-amber-500 border border-amber-850/40";
-                        riskText = "🟡 Medio";
-                      } else if (o.risk === 'GRIS') {
-                        riskStyle = "bg-slate-900/60 text-slate-400 border border-slate-800";
-                        riskText = "⚪ Sin sLA";
-                      }
+                      const programmedDays = daysBetweenDates(dateAlta, dateComp);
+                      const elapsedDays = elapsedProductionDays(dateAlta);
+                      const productionDaysPct = percentage(elapsedDays, programmedDays);
+                      const facturacionPairs = getCompletedPairsFromStages(o.pairsByStage, o.shippedPairs || 0);
+                      const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
+                      const progressPct = percentage(producedPairs, o.totalPares);
+                      const remainingPairs = Math.max(0, o.totalPares - producedPairs);
+                      const remainingPct = Math.max(0, 100 - progressPct);
 
                       return (
                         <tr 
                           key={o.id}
-                          onClick={() => setSelectedOrderId(o.id)}
+                          onClick={() => {
+                            setSelectedOrderId(o.id);
+                            setShowOrderPanel(true);
+                          }}
                           className={`hover:bg-slate-900/60 transition cursor-pointer ${isSelected ? 'bg-slate-900 border-l-4 border-l-cyan-500' : ''}`}
                         >
                           <td className="py-3 px-3 font-sans font-medium text-slate-350 truncate max-w-[150px]" title={o.cliente || o.clientName}>{o.cliente || o.clientName}</td>
@@ -3933,7 +4286,13 @@ export const PipelinePedidoView: React.FC = () => {
                           <td className="py-3 px-3 font-bold text-cyan-400 font-mono">{o.id}</td>
                           <td className="py-3 px-3 text-slate-450">{dateAlta}</td>
                           <td className="py-3 px-3 text-slate-300 font-semibold">{dateComp}</td>
+                          <td className="py-3 px-3 text-right text-slate-300">{programmedDays ?? 'N/A'}</td>
+                          <td className="py-3 px-3 text-right text-cyan-300 font-bold">{productionDaysPct}%</td>
+                          <td className="py-3 px-3 text-right text-emerald-300 font-bold">{progressPct}%</td>
                           <td className="py-3 px-3 text-right font-black text-slate-100">{o.totalPares.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right font-black text-cyan-300">{producedPairs.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right font-black text-amber-300">{remainingPairs.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right text-amber-300 font-bold">{remainingPct}%</td>
                           
                           {/* 7 Stage details mapped individually with custom background densities */}
                           <td className="py-3 px-2 text-center text-blue-300 bg-blue-950/5">{(o.pairsByStage['alta_pedido'] || 0).toLocaleString()}</td>
@@ -3943,15 +4302,11 @@ export const PipelinePedidoView: React.FC = () => {
                           <td className="py-3 px-2 text-center text-rose-300 bg-rose-950/5">{(o.pairsByStage['aduana'] || 0).toLocaleString()}</td>
                           <td className="py-3 px-2 text-center text-indigo-300 bg-indigo-950/5">{(o.pairsByStage['banda'] || 0).toLocaleString()}</td>
                           <td className="py-3 px-2 text-center text-emerald-400 bg-emerald-950/5">{(o.pairsByStage['embarque'] || 0).toLocaleString()}</td>
+                          <td className="py-3 px-2 text-center text-teal-300 bg-teal-950/5">{facturacionPairs.toLocaleString()}</td>
                           
                           <td className="py-3 px-3">
                             <span className="px-1.5 py-0.5 rounded-md uppercase font-black text-[9px] bg-slate-900 text-slate-300 border border-slate-800">
                               {o.status}
-                            </span>
-                          </td>
-                          <td className="py-3 px-3">
-                            <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold ${riskStyle}`}>
-                              {riskText}
                             </span>
                           </td>
                         </tr>
@@ -3965,21 +4320,30 @@ export const PipelinePedidoView: React.FC = () => {
           </div>
 
           <div className="pt-4 flex justify-between items-center text-xs text-slate-500 font-mono border-t border-slate-900 mt-4">
-            <span>Vista conserva riesgo por pedido y pares por etapa.</span>
+            <span>Vista conserva semáforo pendiente y pares por etapa.</span>
           </div>
 
         </div>
 
-        {/* 5. PANEL DE DETALLE LATERAL (Based on Selected Row / Default first) */}
-        <div className="xl:col-span-1">
-          {activeSelectedOrder ? (
-            <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 sticky top-6">
+        {/* 5. PANEL DE DETALLE LATERAL (Based on Selected Row) */}
+          {isOrderPanelOpen && activeSelectedOrder && (
+            <aside className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 xl:sticky xl:top-6 self-start max-h-[calc(100vh-8rem)] overflow-y-auto">
               
               {/* Detail Header */}
               <div className="border-b border-slate-900 pb-3">
-                <span className="text-[9px] font-mono text-cyan-400 font-bold uppercase tracking-widest block">
-                  Panel Diagnosticador de Pedido
-                </span>
+                <div className="flex items-start justify-between gap-3">
+                  <span className="text-[9px] font-mono text-cyan-400 font-bold uppercase tracking-widest block">
+                    Panel Diagnosticador de Pedido
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCloseOrderPanel}
+                    className="rounded-md border border-slate-800 px-2 py-1 text-[10px] font-mono text-slate-400 hover:border-cyan-500 hover:text-cyan-300"
+                    aria-label="Cerrar panel de pedido"
+                  >
+                    ✕
+                  </button>
+                </div>
                 <div className="flex justify-between items-center mt-0.5">
                   <h3 className="text-base font-bold font-mono text-slate-100 uppercase">
                     {activeSelectedOrder.id}
@@ -4021,6 +4385,26 @@ export const PipelinePedidoView: React.FC = () => {
                     <div className="flex justify-between text-slate-350">
                       <span>Límite Compromiso:</span>
                       <span className="font-mono text-slate-100 font-bold">{activeSelectedOrder.fechaCompromiso?.split('T')[0] || 'N/A'}</span>
+                    </div>
+                    <div className="flex justify-between text-slate-350"><span>Origen:</span><strong className="text-slate-200">{activeSelectedOrder.origin || 'N/D'}</strong></div>
+                    <div className="flex justify-between text-slate-350"><span>Descuento:</span><strong className="text-slate-200">{activeSelectedOrder.discountPercentage == null ? 'N/D' : `${activeSelectedOrder.discountPercentage}%`}</strong></div>
+                    <div className="flex justify-between text-slate-350"><span>Días crédito:</span><strong className="text-slate-200">{activeSelectedOrder.creditDays ?? 'N/D'}</strong></div>
+                    {activeSelectedOrder.notes && <p className="pt-1 border-t border-slate-800 text-[10px] text-slate-400 italic">{activeSelectedOrder.notes}</p>}
+                  </div>
+                </div>
+
+                <div className="space-y-1.5">
+                  <span className="text-[10px] font-mono font-bold text-slate-500 uppercase tracking-widest block">Pares por punto</span>
+                  <div className="grid grid-cols-2 gap-2 text-[9px] font-mono">
+                    <div className="bg-slate-900/40 border border-slate-900 rounded p-2">
+                      <strong className="text-cyan-400 block mb-1">Planeados</strong>
+                      {Object.entries(activeSelectedOrder.plannedPairsBySize || {}).map(([size, pairs]) => <div key={size} className="flex justify-between"><span>P{size}</span><span>{pairs}</span></div>)}
+                      {Object.keys(activeSelectedOrder.plannedPairsBySize || {}).length === 0 && <span className="text-slate-600">Sin datos</span>}
+                    </div>
+                    <div className="bg-slate-900/40 border border-slate-900 rounded p-2">
+                      <strong className="text-emerald-400 block mb-1">Facturados</strong>
+                      {Object.entries(activeSelectedOrder.shippedPairsBySize || {}).map(([size, pairs]) => <div key={size} className="flex justify-between"><span>P{size}</span><span>{pairs}</span></div>)}
+                      {Object.keys(activeSelectedOrder.shippedPairsBySize || {}).length === 0 && <span className="text-slate-600">Sin datos</span>}
                     </div>
                   </div>
                 </div>
@@ -4074,39 +4458,10 @@ export const PipelinePedidoView: React.FC = () => {
                   )}
                 </div>
 
-                {/* 6. Riesgo estimado de entrega */}
-                <div className="pt-2 border-t border-slate-900">
-                  <div className={`p-3 rounded-lg border flex items-start gap-2 text-xs ${
-                    activeSelectedOrder.risk === 'ROJO' ? 'bg-rose-950/20 border-rose-800/50 text-rose-300' :
-                    activeSelectedOrder.risk === 'AMARILLO' ? 'bg-amber-950/20 border-amber-800/50 text-amber-300' : 'bg-emerald-950/20 border-emerald-800/50 text-emerald-300'
-                  }`}>
-                    <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
-                    <div className="space-y-1">
-                      <strong className="font-black uppercase tracking-wider block font-sans">
-                        Rango de Riesgo: {
-                          activeSelectedOrder.risk === 'ROJO' ? 'Fuerte Demora / Expirado' :
-                          activeSelectedOrder.risk === 'AMARILLO' ? 'Mediana Desviación' : 'Rango Óptimo de Entrega'
-                        }
-                      </strong>
-                      <p className="text-[10px] font-sans leading-normal text-slate-400">
-                        {activeSelectedOrder.risk === 'ROJO' ? 'Se requiere re-planificación urgente, desvío de máquina inyectora EVA o incremento manual de volumen de operarios.' :
-                         activeSelectedOrder.risk === 'AMARILLO' ? 'Existen pocas mermas pero la velocidad actual de la banda es reducida. Continuar monitorizando amortiguador.' : 'El pedido fluye en tiempo adecuado bajo las políticas de SLA pactadas con el distribuidor comercial.'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
               </div>
 
-            </div>
-          ) : (
-            <div className="bg-slate-950 border border-slate-900 rounded-xl p-8 shadow-2xl space-y-3 text-center text-slate-500">
-              <Layers className="w-8 h-8 mx-auto text-slate-700 animate-pulse" />
-              <span className="text-[10px] font-mono text-slate-600 uppercase tracking-widest block">Consola Vacía</span>
-              <p className="text-xs">Selecciona un folio del listado principal para auditar sus lotes y curvas dD3.</p>
-            </div>
+            </aside>
           )}
-        </div>
 
       </div>
 
@@ -4124,6 +4479,8 @@ interface HourlyProductionLog {
   turno: 'MAÑANA' | 'TARDE' | 'NOCHE';
   area: 'almacen' | 'inyeccion' | 'aduana' | 'banda' | 'embarque' | 'entregas' | 'salidas_tercera';
   tarjetaViajera: string;
+  pedido?: string;
+  lote?: string;
   responsable: string;
   modeloName: string;
   color: string;
@@ -4154,7 +4511,7 @@ export const ProduccionAreaView: React.FC = () => {
 
   // 2. Vista histórica timescale selector
   // 'tiempo_real' | 'dia' | 'semana' | 'mes' | 'rango'
-  const [timeframe, setTimeframe] = useState<'tiempo_real' | 'dia' | 'semana' | 'mes' | 'rango'>('rango');
+  const [timeframe, setTimeframe] = useState<'tiempo_real' | 'dia' | 'semana' | 'mes' | 'rango'>('dia');
 
   // 3. Filters States
   const [filtroTurno, setFiltroTurno] = useState<string>('');
@@ -4164,10 +4521,12 @@ export const ProduccionAreaView: React.FC = () => {
   const [filtroMaquina, setFiltroMaquina] = useState<string>('');
   const [filtroBanda, setFiltroBanda] = useState<string>('');
   
-  const [selectedFecha, setSelectedFecha] = useState<string>(() => new Date().toISOString().slice(0, 10));
-  const [rangoInicio, setRangoInicio] = useState<string>(() => new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
-  const [rangoFin, setRangoFin] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [selectedFecha, setSelectedFecha] = useState<string>(() => todayPlantDate());
+  const [rangoInicio, setRangoInicio] = useState<string>(() => todayPlantDate());
+  const [rangoFin, setRangoFin] = useState<string>(() => todayPlantDate());
   const [operationalData, setOperationalData] = useState<ErpOperationalResponse | null>(null);
+  const [operationalLoading, setOperationalLoading] = useState(backendEnabled);
+  const [operationalError, setOperationalError] = useState<string | null>(null);
 
   const getProductionQueryRange = (): [string, string] => {
     if (timeframe === 'rango') return [rangoInicio, rangoFin];
@@ -4183,9 +4542,27 @@ export const ProduccionAreaView: React.FC = () => {
     if (!backendEnabled) return;
     const [start, end] = getProductionQueryRange();
     let cancelled = false;
+    setOperationalLoading(true);
+    setOperationalError(null);
     dashboardApi.erpOperativo(start, end)
-      .then(data => { if (!cancelled) setOperationalData(data); })
-      .catch(err => console.warn('Produccion por area: ERP operativo fetch failed', err));
+      .then(data => {
+        if (cancelled) return;
+        const fallbackDate = data.meta.dataMaxDate;
+        if (data.productionHourly.length === 0 && fallbackDate && timeframe !== 'rango' && selectedFecha !== fallbackDate) {
+          setSelectedFecha(fallbackDate);
+          setRangoInicio(fallbackDate);
+          setRangoFin(fallbackDate);
+          return;
+        }
+        setOperationalData(data);
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Produccion por area: ERP operativo fetch failed', err);
+          setOperationalError('Produccion por Area');
+        }
+      })
+      .finally(() => { if (!cancelled) setOperationalLoading(false); });
     return () => { cancelled = true; };
   }, [timeframe, selectedFecha, rangoInicio, rangoFin]);
 
@@ -4247,7 +4624,7 @@ export const ProduccionAreaView: React.FC = () => {
 
   const qualityByProductionKey = new Map<string, { reprocesos: number; segundas: number }>();
   for (const q of operationalData?.quality ?? []) {
-    const key = `${q.fecha}|${q.modelo}|${areaKeyFromErp(q.area)}`;
+    const key = `${q.fecha}|${q.lote}|${areaKeyFromErp(q.area)}`;
     const current = qualityByProductionKey.get(key) ?? { reprocesos: 0, segundas: 0 };
     current.reprocesos += q.reproceso;
     current.segundas += q.segundas;
@@ -4256,7 +4633,8 @@ export const ProduccionAreaView: React.FC = () => {
 
   const fdbProductionLogs: HourlyProductionLog[] = (operationalData?.productionHourly ?? []).map((row, index) => {
     const area = areaKeyFromErp(row.area);
-    const q = qualityByProductionKey.get(`${row.fecha}|${row.modelo}|${area}`) ?? { reprocesos: 0, segundas: 0 };
+    const lote = row.lote || row.tarjetaViajera || 'S/Lote';
+    const q = qualityByProductionKey.get(`${row.fecha}|${lote}|${area}`) ?? { reprocesos: 0, segundas: 0 };
     return {
       id: row.id || `fdb_${row.fecha}_${row.hora}_${area}_${index}`,
       tenantId: currentTenant.id,
@@ -4265,6 +4643,8 @@ export const ProduccionAreaView: React.FC = () => {
       turno: turnoFromErp(row.turno),
       area,
       tarjetaViajera: row.tarjetaViajera || 'FDB-AGG',
+      pedido: row.pedido || 'S/Pedido',
+      lote,
       responsable: row.responsable || 'FDB',
       modeloName: row.modelo,
       color: row.color,
@@ -4291,7 +4671,7 @@ export const ProduccionAreaView: React.FC = () => {
 
       const dateStr = log.fecha;
       if (timeframe === 'tiempo_real') {
-        return dateStr === new Date().toISOString().slice(0, 10);
+        return dateStr === todayPlantDate();
       } else if (timeframe === 'dia') {
         return dateStr === selectedFecha;
       } else if (timeframe === 'semana') {
@@ -4346,7 +4726,8 @@ export const ProduccionAreaView: React.FC = () => {
 
   const controlLogsMap = new Map<string, HourlyProductionLog>();
   configuredFilteredLogs.forEach(log => {
-    const key = `${log.fecha}|${log.hora}|${log.turno}|${log.area}`;
+    const loteAgrupado = log.lote || log.tarjetaViajera || 'S/Lote';
+    const key = `${log.fecha}|${log.hora}|${log.turno}|${log.area}|${loteAgrupado}`;
     const current = controlLogsMap.get(key);
     if (current) {
       current.produccionReal += log.produccionReal;
@@ -4357,16 +4738,16 @@ export const ProduccionAreaView: React.FC = () => {
     controlLogsMap.set(key, {
       ...log,
       id: `fdb_hour_${key}`,
-      tarjetaViajera: 'FDB-HORA',
-      responsable: 'FDB',
-      modeloName: 'Consolidado',
-      color: 'Todos'
+      lote: loteAgrupado,
+      pedido: log.pedido || 'S/Pedido',
+      responsable: log.responsable || 'FDB'
     });
   });
   const groupedHourlyLogs = Array.from(controlLogsMap.values()).sort((a, b) =>
     a.fecha.localeCompare(b.fecha) ||
     a.hora.localeCompare(b.hora) ||
-    a.area.localeCompare(b.area)
+    a.area.localeCompare(b.area) ||
+    (a.lote || '').localeCompare(b.lote || '')
   );
 
   // Calculate top KPIs
@@ -4433,6 +4814,8 @@ export const ProduccionAreaView: React.FC = () => {
       turno: formTurno,
       area: formArea,
       tarjetaViajera: formTarjetaViajera,
+      pedido: formTarjetaViajera || 'Manual',
+      lote: formTarjetaViajera || 'Manual',
       responsable: formResponsable,
       modeloName: formModelo,
       color: formColor,
@@ -4465,9 +4848,9 @@ export const ProduccionAreaView: React.FC = () => {
     setFiltroColor('');
     setFiltroMaquina('');
     setFiltroBanda('');
-    setSelectedFecha(new Date().toISOString().slice(0, 10));
-    setRangoInicio(new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
-    setRangoFin(new Date().toISOString().slice(0, 10));
+    setSelectedFecha(todayPlantDate());
+    setRangoInicio(todayPlantDate());
+    setRangoFin(todayPlantDate());
   };
 
   // --- RECHARTS DATA WRAPPERS ---
@@ -4536,6 +4919,14 @@ export const ProduccionAreaView: React.FC = () => {
     shift: shiftName,
     'Eficiencia %': data.target > 0 ? Math.round((data.real / data.target) * 100) : 0
   }));
+
+  if (backendEnabled && operationalLoading && !operationalData) {
+    return <ModuleLoadingState label="Produccion por Area" />;
+  }
+
+  if (backendEnabled && operationalError && !operationalData) {
+    return <ModuleDataErrorState label={operationalError} />;
+  }
 
   return (
     <div className="space-y-6">
@@ -4611,7 +5002,7 @@ export const ProduccionAreaView: React.FC = () => {
           {timeframe === 'tiempo_real' && (
             <div className="flex items-center gap-2 text-xs text-indigo-400 font-bold bg-indigo-950/20 px-3 py-1.5 rounded-lg border border-indigo-900/40 font-mono animate-pulse">
               <span className="w-1.5 h-1.5 rounded-full bg-indigo-500"></span>
-              LIVE FEED • MONITOREO EN CURSO (HOY: {new Date().toISOString().slice(0, 10)})
+              LIVE FEED • MONITOREO EN CURSO (HOY: {todayPlantDate()})
             </div>
           )}
 
@@ -4870,7 +5261,7 @@ export const ProduccionAreaView: React.FC = () => {
             Reprocesos
           </span>
           <div className="text-lg font-bold font-mono text-rose-400">
-            {totalReprocesos.toLocaleString()}
+            {nonZeroNumber(totalReprocesos)}
           </div>
           <span className="text-[9px] font-mono text-red-500 block">Pares a repasar</span>
         </div>
@@ -4880,7 +5271,7 @@ export const ProduccionAreaView: React.FC = () => {
             Salidas / 2das
           </span>
           <div className="text-lg font-bold font-mono text-amber-400">
-            {totalSegundas.toLocaleString()}
+            {nonZeroNumber(totalSegundas)}
           </div>
           <span className="text-[9px] font-mono text-amber-550 block">Menor especificación</span>
         </div>
@@ -4888,7 +5279,7 @@ export const ProduccionAreaView: React.FC = () => {
       </div>
 
       {/* 4. GRAFICAS RECHARTS COMPLETO (6 GRÁFICAS REQUERIDAS) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
 
         {/* Gráfica 1: Producción por Hora */}
         <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl">
@@ -4898,7 +5289,7 @@ export const ProduccionAreaView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Eficiencia instantánea del calzado comparada con la capacidad nominal.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             {prodHourChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN DATOS OPERATIVOS</div>
             ) : (
@@ -4908,7 +5299,7 @@ export const ProduccionAreaView: React.FC = () => {
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                   <RechartsXAxis dataKey="hour" stroke="#64748b" style={{ fontSize: '8px' }} />
                   <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                  <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '4px', fontSize: '10px' }} />
+                  <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '10px', color: '#0f172a' }} />
                   <RechartsLegend wrapperStyle={{ fontSize: '8px', paddingTop: '5px' }} />
                   <RechartsBar dataKey="Producción" fill="#a855f7" name="Real" />
                   <RechartsBar dataKey="Meta" fill="#3b82f6" name="Meta Target" />
@@ -4927,7 +5318,7 @@ export const ProduccionAreaView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Análisis de las pendientes de manufactura y desfases en volumen.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             {prodAccumulatedChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN DATOS OPERATIVOS</div>
             ) : (
@@ -4937,7 +5328,7 @@ export const ProduccionAreaView: React.FC = () => {
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                   <RechartsXAxis dataKey="hour" stroke="#64748b" style={{ fontSize: '8px' }} />
                   <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                  <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '4px', fontSize: '10px' }} />
+                  <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '10px', color: '#0f172a' }} />
                   <RechartsLegend wrapperStyle={{ fontSize: '8px', paddingTop: '5px' }} />
                   <RechartsLine type="monotone" dataKey="Real Acumulado" stroke="#10b981" strokeWidth={3} dot={{ r: 2 }} />
                   <RechartsLine type="monotone" dataKey="Meta Acumulada" stroke="#f59e0b" strokeWidth={2} strokeDasharray="4 4" dot={{ r: 1 }} />
@@ -4956,21 +5347,21 @@ export const ProduccionAreaView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Carga de manufactura real consolidada por subestación técnica.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={prodByAreaChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '4px', fontSize: '10px' }} />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '10px', color: '#0f172a' }} />
                 <RechartsBar dataKey="Pares" fill="#e11d48">
                   {prodByAreaChartData.map((entry, index) => {
                     // Match area keys
                     const keys = Object.keys(AREA_NAMES);
                     const specificKey = keys[index] || 'almacen';
                     const color = AREA_COLORS[specificKey] || '#e11d48';
-                    return <RechartsBar key={`cell-${index}`} fill={color} />;
+                    return <RechartsCell key={`cell-${entry.name}`} fill={color} />;
                   })}
                 </RechartsBar>
               </RechartsBarChart>
@@ -4987,7 +5378,7 @@ export const ProduccionAreaView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Distribución por molde registrada en FDB/OCR.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             {prodByModelChartData.length === 0 ? (
               <div className="h-full flex items-center justify-center text-[10px] text-slate-600 font-mono">SIN REGISTROS</div>
             ) : (
@@ -4997,7 +5388,7 @@ export const ProduccionAreaView: React.FC = () => {
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                   <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '8px' }} />
                   <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                  <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '4px', fontSize: '10px' }} />
+                  <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '10px', color: '#0f172a' }} />
                   <RechartsBar dataKey="Pares" fill="#f59e0b" radius={[4, 4, 0, 0]} />
                 </RechartsBarChart>
               </RechartsResponsiveContainer>
@@ -5014,18 +5405,18 @@ export const ProduccionAreaView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 font-sans leading-none">
             Análisis de rendimiento entre Mañana, Tarde y Noche.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[360px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={efficiencyByShiftChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="shift" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis domain={[0, 100]} stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', borderRadius: '4px', fontSize: '10px' }} />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '4px', fontSize: '10px', color: '#0f172a' }} />
                 <RechartsBar dataKey="Eficiencia %" fill="#06b6d4" radius={[4, 4, 0, 0]}>
                   {efficiencyByShiftChartData.map((entry, index) => {
                     const colorsList = ['#38bdf8', '#818cf8', '#c084fc'];
-                    return <RechartsBar key={`cell-${index}`} fill={colorsList[index % colorsList.length]} />;
+                    return <RechartsCell key={`cell-${entry.shift}`} fill={colorsList[index % colorsList.length]} />;
                   })}
                 </RechartsBar>
               </RechartsBarChart>
@@ -5047,7 +5438,7 @@ export const ProduccionAreaView: React.FC = () => {
             </h3>
           </div>
           <span className="text-[10px] font-mono text-slate-500 uppercase font-bold">
-            Mostrando {groupedHourlyLogs.length} cortes consolidados por área/hora
+            Mostrando {groupedHourlyLogs.length} cortes consolidados por área/hora/lote
           </span>
         </div>
 
@@ -5057,7 +5448,8 @@ export const ProduccionAreaView: React.FC = () => {
             <thead>
               <tr className="bg-slate-900 border-b border-slate-800 text-[10px] font-mono text-slate-400 uppercase tracking-wider leading-none">
                 <th className="py-3 px-3 font-bold">Fecha</th>
-                <th className="py-3 px-3 font-bold">Origen</th>
+                <th className="py-3 px-3 font-bold">Pedido</th>
+                <th className="py-3 px-3 font-bold">Lote agrupado</th>
                 <th className="py-3 px-3 font-bold">Hora segment</th>
                 <th className="py-3 px-3 font-bold">Turno</th>
                 <th className="py-3 px-3 font-bold">Estación/Área</th>
@@ -5074,7 +5466,7 @@ export const ProduccionAreaView: React.FC = () => {
             <tbody className="divide-y divide-slate-900 text-[11px] font-mono">
               {groupedHourlyLogs.length === 0 ? (
                 <tr>
-                  <td colSpan={13} className="py-12 text-center text-slate-500 text-xs">
+                  <td colSpan={14} className="py-12 text-center text-slate-500 text-xs">
                     ⚠️ No se encontraron registros de producción para esta área en los plazos indicados.
                   </td>
                 </tr>
@@ -5097,7 +5489,8 @@ export const ProduccionAreaView: React.FC = () => {
                   return (
                     <tr key={log.id} className="hover:bg-slate-900/40 transition">
                       <td className="py-3 px-3 text-slate-450">{log.fecha}</td>
-                      <td className="py-3 px-3 text-cyan-400 font-bold">{log.tarjetaViajera || 'TV-S/R'}</td>
+                      <td className="py-3 px-3 text-cyan-400 font-bold">{log.pedido || 'S/Pedido'}</td>
+                      <td className="py-3 px-3 text-slate-300 font-bold">{log.lote || 'S/Lote'}</td>
                       <td className="py-3 px-3 font-bold text-cyan-400">{log.hora}</td>
                       <td className="py-3 px-3 text-slate-300 font-semibold">{log.turno}</td>
                       <td className="py-3 px-3 font-bold">
@@ -5224,9 +5617,9 @@ export const ProduccionAreaView: React.FC = () => {
                   </select>
                 </div>
 
-                {/* Responsable */}
+                {/* Pedido */}
                 <div className="col-span-2 space-y-1">
-                  <label className="text-[10px] font-mono uppercase font-bold text-slate-400 block">Tarjeta Viajera</label>
+                  <label className="text-[10px] font-mono uppercase font-bold text-slate-400 block">Pedido</label>
                   <input
                     type="text"
                     required
@@ -5403,10 +5796,23 @@ export const ProduccionAreaView: React.FC = () => {
 
 type ModelPerformanceLog = ModelPerformanceRow;
 
+const baseModelName = (value: string): string => {
+  const model = value.trim();
+  if (!model) return 'S/Modelo';
+  if (/^s\/modelo$/i.test(model)) return 'S/Modelo';
+
+  const base = model.split(/\s+/)[0];
+  return base.charAt(0).toUpperCase() + base.slice(1).toLowerCase();
+};
+
 export const ModelosProductosView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
 
   const [performanceLogs, setPerformanceLogs] = useState<ModelPerformanceLog[]>([]);
+  const [modelCatalog, setModelCatalog] = useState<Array<Record<string, unknown>>>([]);
+  const [qualityAvailable, setQualityAvailable] = useState(false);
+  const [performanceLoading, setPerformanceLoading] = useState(backendEnabled);
+  const [performanceError, setPerformanceError] = useState<string | null>(null);
 
   // Track selected model for detail view (Master-Detail)
   const [selectedProductModel, setSelectedProductModel] = useState<string>('');
@@ -5419,9 +5825,9 @@ export const ModelosProductosView: React.FC = () => {
   const [filtroModelo, setFiltroModelo] = useState<string>('');
   const [filtroColor, setFiltroColor] = useState<string>('');
   const [filtroCliente, setFiltroCliente] = useState<string>('');
-  const [filtroFecha, setFiltroFecha] = useState<string>('');
-  const [filtroRangoInicio, setFiltroRangoInicio] = useState<string>(() => new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
-  const [filtroRangoFin, setFiltroRangoFin] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [filtroFecha, setFiltroFecha] = useState<string>(() => todayPlantDate());
+  const [filtroRangoInicio, setFiltroRangoInicio] = useState<string>(() => todayPlantDate());
+  const [filtroRangoFin, setFiltroRangoFin] = useState<string>(() => todayPlantDate());
   const [filtroEtapa, setFiltroEtapa] = useState<string>('');
   const [filtroArea, setFiltroArea] = useState<string>('');
   const [filtroEstatus, setFiltroEstatus] = useState<string>('');
@@ -5435,9 +5841,26 @@ export const ModelosProductosView: React.FC = () => {
     let cancelled = false;
     const start = filtroFecha || filtroRangoInicio;
     const end = filtroFecha || filtroRangoFin;
+    setPerformanceLoading(true);
+    setPerformanceError(null);
     dashboardApi.erpOperativo(start, end)
-      .then(data => { if (!cancelled) setPerformanceLogs(data.models); })
-      .catch(err => console.warn('Modelos: ERP operativo fetch failed', err));
+      .then(data => {
+        if (!cancelled) {
+          setPerformanceLogs(data.models.map(row => ({
+            ...row,
+            modeloName: baseModelName(row.modeloName)
+          })));
+          setModelCatalog(data.catalogs.models);
+          setQualityAvailable(data.meta.qualityAvailable);
+        }
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Modelos: ERP operativo fetch failed', err);
+          setPerformanceError('Modelos y Productos');
+        }
+      })
+      .finally(() => { if (!cancelled) setPerformanceLoading(false); });
     return () => { cancelled = true; };
   }, [currentTenant.id, filtroFecha, filtroRangoInicio, filtroRangoFin]);
 
@@ -5476,6 +5899,7 @@ export const ModelosProductosView: React.FC = () => {
     defectuosos: number;
     segundas: number;
     reprocesos: number;
+    pedidos: number;
     leadTimeSum: number;
     leadTimeWeight: number;
     timeInySum: number;
@@ -5487,6 +5911,7 @@ export const ModelosProductosView: React.FC = () => {
     count: number;
     entregasCumplidas: number;
     entregasTotal: number;
+    paresPorTalla: Record<string, number>;
   }> = {};
 
   filteredRecords.forEach(l => {
@@ -5498,6 +5923,7 @@ export const ModelosProductosView: React.FC = () => {
         defectuosos: 0,
         segundas: 0,
         reprocesos: 0,
+        pedidos: 0,
         leadTimeSum: 0,
         leadTimeWeight: 0,
         timeInySum: 0,
@@ -5509,6 +5935,7 @@ export const ModelosProductosView: React.FC = () => {
         count: 0,
         entregasCumplidas: 0,
         entregasTotal: 0
+        ,paresPorTalla: {}
       };
     }
     const ms = modelSummaries[l.modeloName];
@@ -5518,6 +5945,7 @@ export const ModelosProductosView: React.FC = () => {
     ms.defectuosos += l.paresDefectuosos;
     ms.segundas += l.paresSegundas;
     ms.reprocesos += l.paresReprocesos;
+    ms.pedidos += l.pedidos ?? l.lotes ?? 0;
     if (l.leadTimeHours > 0) {
       ms.leadTimeSum += l.leadTimeHours * weight;
       ms.leadTimeWeight += weight;
@@ -5537,10 +5965,14 @@ export const ModelosProductosView: React.FC = () => {
     ms.count += 1;
     ms.entregasCumplidas += l.entregasCumplidas || 0;
     ms.entregasTotal += l.entregasTotal || 0;
+    Object.entries(l.paresPorTalla || {}).forEach(([talla, pares]) => {
+      ms.paresPorTalla[talla] = (ms.paresPorTalla[talla] || 0) + Number(pares || 0);
+    });
   });
 
   const summariesList = Object.values(modelSummaries);
   const avgLeadTime = (m: typeof summariesList[number]) => m.leadTimeWeight > 0 ? m.leadTimeSum / m.leadTimeWeight : 0;
+  const avgLeadTimeDays = (m: typeof summariesList[number]) => avgLeadTime(m) / 24;
   const avgInyTime = (m: typeof summariesList[number]) => m.timeInyWeight > 0 ? m.timeInySum / m.timeInyWeight : 0;
   const avgEstTime = (m: typeof summariesList[number]) => m.timeEstWeight > 0 ? m.timeEstSum / m.timeEstWeight : 0;
   const avgBndTime = (m: typeof summariesList[number]) => m.timeBndWeight > 0 ? m.timeBndSum / m.timeBndWeight : 0;
@@ -5549,6 +5981,9 @@ export const ModelosProductosView: React.FC = () => {
 
   // KPI calculations
   const totalModelosActivos = summariesList.length;
+  const totalPedidosModelo = summariesList.reduce((sum, m) => sum + (m.pedidos || m.lotes || 0), 0);
+  const pctParesSegunda = totalPares > 0 ? Number(((totalSegundas / totalPares) * 100).toFixed(1)) : 0;
+  const hasModeloFilter = Boolean(filtroModelo);
 
   // 1. Modelo Más Producido
   const sortedByVol = [...summariesList].sort((a, b) => b.producido - a.producido);
@@ -5616,16 +6051,18 @@ export const ModelosProductosView: React.FC = () => {
       })[0];
     const dlRate = defectLeader.producido > 0 ? (defectLeader.defectuosos / defectLeader.producido) * 100 : 0;
     const dlShare = totalDefectos > 0 ? Math.round((defectLeader.defectuosos / totalDefectos) * 100) : 0;
-    const calidadText = dlRate > 0
+    const calidadText = !qualityAvailable
+      ? 'Calidad no disponible en FDB: los movimientos actuales solo contienen calidad 1.'
+      : dlRate > 0
       ? `${defectLeader.name} presenta la mayor tasa de defecto (${dlRate.toFixed(1)}%) con ${defectLeader.defectuosos.toLocaleString()} pares afectados — ${dlShare}% de la merma total (${totalDefectos.toLocaleString()} pares). Priorizar inspección en banda/terminado.`
       : `Sin defectos registrados en el corte filtrado: ${totalPares.toLocaleString()} pares producidos limpios en ${summariesList.length} modelo(s).`;
 
     // 2. Lead times: modelo con mayor tiempo de estabilización promedio
     const stbLeader = summariesList.slice().sort((a, b) => avgEstTime(b) - avgEstTime(a))[0];
     const stbAvg = Math.round(avgEstTime(stbLeader));
-    const ltAvg = avgLeadTime(stbLeader).toFixed(1);
+    const ltAvg = avgLeadTimeDays(stbLeader).toFixed(1);
     const compStb = modelCompliance(stbLeader);
-    const leadText = `${stbLeader.name} acumula el mayor tiempo de estabilización promedio (${stbAvg} min) y un lead time de ${ltAvg} h por corrida` +
+    const leadText = `${stbLeader.name} acumula el mayor tiempo de estabilización promedio (${stbAvg} min) y un lead time de ${ltAvg} dias por corrida` +
       (compStb >= 80 ? `, aunque mantiene buen cumplimiento (${compStb}%). Revisar capacidad del túnel de estabilización.` : ` con cumplimiento de ${compStb}%. Cuello de botella probable en estabilización.`);
 
     // 3. Volumen y cumplimiento: líder de volumen + rezagado en entregas
@@ -5672,24 +6109,58 @@ export const ModelosProductosView: React.FC = () => {
     { tag: 'Variabilidad / Volumen', tone: 'indigo' as const, text: 'Se identificará el líder de volumen y el rezago en cumplimiento.' }
   ];
 
+  if (backendEnabled && performanceLoading && performanceLogs.length === 0) {
+    return <ModuleLoadingState label="Modelos y Productos" />;
+  }
+
+  if (backendEnabled && performanceError && performanceLogs.length === 0) {
+    return <ModuleDataErrorState label={performanceError} />;
+  }
+
   // RECHARTS CHART MAPPINGS (7 GRAPHICS CONFIGURED BEUTIFULLY)
-  
   // Chart 1: Ranking de Modelos por Pares Producidos
   const rankingModelosData = sortedByVol.map(m => ({
-    name: m.name,
+    name: baseModelName(m.name),
     'Pares': m.producido
   }));
 
   // Chart 2: Tendencia de Producción por Modelo (Past 10 date checkpoints)
-  const daysSorted = Array.from(new Set(filteredRecords.map(l => l.fecha))).sort().slice(-10) as string[];
-  const tendenciaModelosData = daysSorted.map(dateStr => {
-    const dayRecords = filteredRecords.filter(l => l.fecha === dateStr);
-    const result: Record<string, any> = { date: dateStr.split('-').slice(1).join('/') };
-    dayRecords.forEach(l => {
-      result[l.modeloName] = (result[l.modeloName] || 0) + l.paresProducidos;
-    });
-    return result;
+  const parseDate = (value: string) => new Date(`${value}T00:00:00`);
+  const formatDateKey = (date: Date) => date.toISOString().slice(0, 10);
+  const uniqueDatesSorted = Array.from(new Set(filteredRecords.map(l => l.fecha))).sort() as string[];
+  const firstTrendDate = uniqueDatesSorted[0];
+  const lastTrendDate = uniqueDatesSorted[uniqueDatesSorted.length - 1];
+  const trendDays = firstTrendDate && lastTrendDate
+    ? Math.max(1, Math.round((parseDate(lastTrendDate).getTime() - parseDate(firstTrendDate).getTime()) / 86400000) + 1)
+    : 0;
+  const trendGranularity: 'dia' | 'semana' | 'mes' = trendDays > 180 ? 'mes' : trendDays > 45 ? 'semana' : 'dia';
+  const trendBucket = (dateStr: string) => {
+    const date = parseDate(dateStr);
+    if (trendGranularity === 'mes') return dateStr.slice(0, 7);
+    if (trendGranularity === 'semana') {
+      const day = date.getDay() || 7;
+      date.setDate(date.getDate() - day + 1);
+      return formatDateKey(date);
+    }
+    return dateStr;
+  };
+  const trendLabel = (bucket: string) => {
+    if (trendGranularity === 'mes') return bucket;
+    if (trendGranularity === 'semana') return `Sem ${bucket.slice(5).replace('-', '/')}`;
+    return bucket.split('-').slice(1).join('/');
+  };
+  const tendenciaBuckets = new Map<string, Record<string, any>>();
+  filteredRecords.forEach(l => {
+    const bucket = trendBucket(l.fecha);
+    const current = tendenciaBuckets.get(bucket) ?? { date: trendLabel(bucket) };
+    const key = baseModelName(l.modeloName);
+    current[key] = (current[key] || 0) + l.paresProducidos;
+    tendenciaBuckets.set(bucket, current);
   });
+  const tendenciaModelosData = Array.from(tendenciaBuckets.entries())
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([, row]) => row);
+  const uniqueShortModels = Array.from(new Set(filteredRecords.map(l => baseModelName(l.modeloName)))).filter((m): m is string => Boolean(m));
 
   // Chart 3: Pareto de Defectos por Modelo (Volumes and Percentage yield)
   let accumulatedDefectPct = 0;
@@ -5699,7 +6170,7 @@ export const ModelosProductosView: React.FC = () => {
     const currentPct = Math.round((m.defectuosos / totalDefectsSum) * 100);
     accumulatedDefectPct += currentPct;
     return {
-      name: m.name,
+      name: baseModelName(m.name),
       'Defectos': m.defectuosos,
       'Pareto %': Math.min(100, accumulatedDefectPct)
     };
@@ -5707,21 +6178,21 @@ export const ModelosProductosView: React.FC = () => {
 
   // Chart 4: Lead time promedio por modelo
   const leadTimeChartData = summariesList.map(m => ({
-    name: m.name,
-    'Lead Time Hrs': Number(avgLeadTime(m).toFixed(1))
-  })).sort((a, b) => b['Lead Time Hrs'] - a['Lead Time Hrs']);
+    name: baseModelName(m.name),
+    'Lead Time Días': Number(avgLeadTimeDays(m).toFixed(1))
+  })).sort((a, b) => b['Lead Time Días'] - a['Lead Time Días']);
 
   // Chart 5: Productividad por modelo (Average volume produced per run)
   const productividadModelData = summariesList.map(m => ({
-    name: m.name,
+    name: baseModelName(m.name),
     'Prod. Promedio Batch': m.lotes > 0 ? Math.round(m.producido / m.lotes) : 0
   })).sort((a, b) => b['Prod. Promedio Batch'] - a['Prod. Promedio Batch']);
 
-  // Chart 6: Cumplimiento de entrega por modelo (%)
+  // Chart 6: Pares a segunda por modelo (%)
   const cumplimientoModelData = summariesList.map(m => ({
-    name: m.name,
-    'Cumplimiento %': modelCompliance(m)
-  })).sort((a, b) => b['Cumplimiento %'] - a['Cumplimiento %']);
+    name: baseModelName(m.name),
+    'Pares a segunda %': m.producido > 0 ? Number(((m.segundas / m.producido) * 100).toFixed(1)) : 0
+  })).sort((a, b) => b['Pares a segunda %'] - a['Pares a segunda %']);
 
   // Chart 7: Producción por Color
   const colorMap: Record<string, number> = {};
@@ -5742,6 +6213,7 @@ export const ModelosProductosView: React.FC = () => {
     defectuosos: 0,
     segundas: 0,
     reprocesos: 0,
+    pedidos: 0,
     leadTimeSum: 0,
     leadTimeWeight: 0,
     timeInySum: 0,
@@ -5753,6 +6225,7 @@ export const ModelosProductosView: React.FC = () => {
     count: 0,
     entregasCumplidas: 0,
     entregasTotal: 0
+    ,paresPorTalla: {}
   };
 
   const selectedModelDefectPct = selectedModelStats.producido > 0 ? Number(((selectedModelStats.defectuosos / selectedModelStats.producido) * 100).toFixed(2)) : 0;
@@ -5763,20 +6236,20 @@ export const ModelosProductosView: React.FC = () => {
   const selectedModelClientes = Array.from(new Set(selectedModelLogs.map(l => l.cliente)));
   
   // Tallas distribution based on selected model
-  const tallasDistribution = selectedModelStats.producido > 0 ? [
-    { tallas: '22-23 (Damas)', pares: Math.round(selectedModelStats.producido * 0.15) },
-    { tallas: '24-25 (Mediano)', pares: Math.round(selectedModelStats.producido * 0.40) },
-    { tallas: '26-27 (Grande)', pares: Math.round(selectedModelStats.producido * 0.35) },
-    { tallas: '28-29 (Familiar)', pares: Math.round(selectedModelStats.producido * 0.10) }
-  ] : [];
+  const tallasDistribution = Object.entries(selectedModelStats.paresPorTalla || {})
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([talla, pares]) => ({ tallas: `Punto ${talla}`, pares }));
+  const selectedModelCatalog = modelCatalog.find(model =>
+    baseModelName(String(model.name || model.nombre || model.codigo || '')) === selectedProductModel
+  );
 
   const handleClearFiltersAll = () => {
     setFiltroModelo('');
     setFiltroColor('');
     setFiltroCliente('');
-    setFiltroFecha('');
-    setFiltroRangoInicio(new Date(Date.now() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10));
-    setFiltroRangoFin(new Date().toISOString().slice(0, 10));
+    setFiltroFecha(todayPlantDate());
+    setFiltroRangoInicio(todayPlantDate());
+    setFiltroRangoFin(todayPlantDate());
     setFiltroEtapa('');
     setFiltroArea('');
     setFiltroEstatus('');
@@ -5949,64 +6422,68 @@ export const ModelosProductosView: React.FC = () => {
           <span className="text-[9px] font-mono text-slate-550 block">Muestra consolidada</span>
         </div>
 
-        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Modelo Líder Vol.
-          </span>
-          <div className="text-base font-bold font-sans text-slate-100 truncate">
-            {modeloMasProducido}
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Mayor volumen</span>
-        </div>
+        {!hasModeloFilter && (
+          <>
+            <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
+              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
+                Modelo Líder Vol.
+              </span>
+              <div className="text-base font-bold font-sans text-slate-100 truncate">
+                {modeloMasProducido}
+              </div>
+              <span className="text-[9px] font-mono text-slate-550 block">Mayor volumen</span>
+            </div>
+
+            <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
+              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
+                Mayor Eficiencia
+              </span>
+              <div className="text-base font-bold font-sans text-green-400 truncate">
+                {qualityAvailable ? modeloMayorEficiencia : 'N/D'}
+              </div>
+              <span className="text-[9px] font-mono text-slate-550 block">Menor mermas de lote</span>
+            </div>
+
+            <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
+              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
+                Mayor Defectivo
+              </span>
+              <div className="text-base font-bold font-sans text-red-400 truncate">
+                {qualityAvailable ? modeloMayorDefectivo : 'N/D'}
+              </div>
+              <span className="text-[9px] font-mono text-slate-550 block">Tasa de rechazo crítica</span>
+            </div>
+
+            <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
+              <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
+                Mejor Cumplimiento
+              </span>
+              <div className="text-base font-bold font-sans text-indigo-400 truncate">
+                {modeloMejorCumplimiento}
+              </div>
+              <span className="text-[9px] font-mono text-slate-550 block">Entregas a tiempo</span>
+            </div>
+          </>
+        )}
 
         <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Mayor Eficiencia
-          </span>
-          <div className="text-base font-bold font-sans text-green-400 truncate">
-            {modeloMayorEficiencia}
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Menor mermas de lote</span>
-        </div>
-
-        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Mayor Defectivo
-          </span>
-          <div className="text-base font-bold font-sans text-red-400 truncate">
-            {modeloMayorDefectivo}
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Tasa de rechazo crítica</span>
-        </div>
-
-        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Mejor Cumplimiento
-          </span>
-          <div className="text-base font-bold font-sans text-indigo-400 truncate">
-            {modeloMejorCumplimiento}
-          </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Entregas a tiempo</span>
-        </div>
-
-        <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
-          <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Cumplimiento Prom.
+            Cumplimiento Pedido
           </span>
           <div className="text-lg font-bold font-mono text-indigo-400">
-            {cumplimientoPromedioPedido}%
+            {qualityAvailable ? `${pctParesSegunda}%` : 'N/D'}
           </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Por pedido</span>
+          <span className="text-[9px] font-mono text-slate-550 block">Pares a segunda</span>
         </div>
 
         <div className="p-3 bg-slate-950 border border-slate-900 rounded-lg space-y-1 shadow-lg">
           <span className="text-[10px] font-mono font-bold text-slate-500 uppercase block tracking-wider leading-none">
-            Modelos Activos
+            {hasModeloFilter ? 'Pedidos Modelo' : 'Modelos Activos'}
           </span>
           <div className="text-lg font-bold font-mono text-slate-205 text-slate-200">
-            {totalModelosActivos}
+            {hasModeloFilter ? totalPedidosModelo.toLocaleString() : totalModelosActivos.toLocaleString()}
           </div>
-          <span className="text-[9px] font-mono text-slate-550 block">Moldes en corrida</span>
+          <span className="text-[9px] font-mono text-slate-550 block">{hasModeloFilter ? 'Pedidos con ese modelo' : 'Moldes en corrida'}</span>
         </div>
 
       </div>
@@ -6056,24 +6533,24 @@ export const ModelosProductosView: React.FC = () => {
       </div>
 
       {/* 3. GRÁFIQUES DE RENDIMIENTO (7 TOTAL PANELS) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
 
         {/* Gráfica 1: Ranking por Pares */}
-        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden lg:col-span-2">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🥇 Ranking de Modelos por Pares
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Volumen consolidado de inyecciones exitosas.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={rankingModelosData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', color: '#0f172a' }} />
                 <RechartsBar dataKey="Pares" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
@@ -6084,20 +6561,20 @@ export const ModelosProductosView: React.FC = () => {
         {/* Gráfica 2: Tendencia de Producción */}
         <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
-            📈 Tendencia por Modelo (Pares/Día)
+            📈 Tendencia por Modelo (Pares/{trendGranularity === 'mes' ? 'Mes' : trendGranularity === 'semana' ? 'Semana' : 'Día'})
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
-            Análisis de las ultimas corridas diarias.
+            Agrupación automática según amplitud del periodo.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsLineChart data={tendenciaModelosData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="date" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
-                {uniqueModels.map((model, idx) => (
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', color: '#0f172a' }} />
+                {uniqueShortModels.map((model, idx) => (
                   <RechartsLine key={model} type="monotone" dataKey={model} stroke={['#10b981', '#3b82f6', '#f59e0b', '#a855f7'][idx % 4]} strokeWidth={2} dot={{ r: 1 }} />
                 ))}
               </RechartsLineChart>
@@ -6114,14 +6591,14 @@ export const ModelosProductosView: React.FC = () => {
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Volumen absoluto de merma y % acumulado.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={paretoDefectosData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', color: '#0f172a' }} />
                 <RechartsBar dataKey="Defectos" fill="#ef4444" radius={[4, 4, 0, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
@@ -6130,22 +6607,22 @@ export const ModelosProductosView: React.FC = () => {
         </div>
 
         {/* Gráfica 4: Lead Time promedio */}
-        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden lg:col-span-2">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
-            ⏳ Lead Time Promedio (Horas)
+            ⏳ Lead Time Promedio (Días)
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Tiempo de ciclo desde almacén hasta embarque.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={leadTimeChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '7px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
-                <RechartsBar dataKey="Lead Time Hrs" fill="#a855f7" radius={[4, 4, 0, 0]} />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', color: '#0f172a' }} />
+                <RechartsBar dataKey="Lead Time Días" fill="#a855f7" radius={[4, 4, 0, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
             </div>
@@ -6155,20 +6632,20 @@ export const ModelosProductosView: React.FC = () => {
         {/* Gráfica 6: Cumplimiento de Entrega */}
         <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
-            📦 Cumplimiento de entrega (%)
+            📦 Pares a segunda por modelo (%)
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
-            Porcentaje de pedidos cerrados a tiempo real.
+            Porcentaje de pares clasificados como segunda.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[420px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={cumplimientoModelData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis dataKey="name" stroke="#64748b" style={{ fontSize: '7px' }} />
                 <RechartsYAxis stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
-                <RechartsBar dataKey="Cumplimiento %" fill="#06b6d4" />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', color: '#0f172a' }} />
+                <RechartsBar dataKey="Pares a segunda %" fill="#06b6d4" />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
             </div>
@@ -6176,21 +6653,21 @@ export const ModelosProductosView: React.FC = () => {
         </div>
 
         {/* Gráfica 7: Producción por Color */}
-        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl xl:col-span-2 overflow-hidden">
+        <div className="bg-slate-950 border border-slate-900 rounded-lg p-3 shadow-xl overflow-hidden">
           <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider mb-2">
             🎨 Volumen de Producción por Color Pigmento
           </h3>
           <p className="text-[10px] text-slate-500 mb-4 leading-none">
             Análisis de distribución de tintas y materias primas EVA.
           </p>
-          <div className="h-56 overflow-x-auto">
+          <div className="h-[280px] overflow-x-auto">
             <div className="w-full min-w-[560px] h-full">
             <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
               <RechartsBarChart data={produccionColorData} layout="vertical" margin={{ top: 5, right: 5, left: -10, bottom: 5 }}>
                 <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1e293b" />
                 <RechartsXAxis type="number" stroke="#64748b" style={{ fontSize: '8px' }} />
                 <RechartsYAxis dataKey="name" type="category" stroke="#64748b" style={{ fontSize: '8px' }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '10px' }} />
+                <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', color: '#0f172a' }} />
                 <RechartsBar dataKey="Pares" fill="#8b5cf6" radius={[0, 4, 4, 0]} />
               </RechartsBarChart>
             </RechartsResponsiveContainer>
@@ -6256,7 +6733,7 @@ export const ModelosProductosView: React.FC = () => {
                       </td>
                       <td className="py-3.5 px-3 text-right text-slate-300 font-mono font-semibold">{m.producido.toLocaleString()}</td>
                       <td className="py-3.5 px-3 text-right text-slate-400 font-mono">{part}%</td>
-                      <td className="py-3.5 px-3 text-right text-slate-300 font-mono">{avgLeadTime(m).toFixed(1)} hrs</td>
+                      <td className="py-3.5 px-3 text-right text-slate-300 font-mono">{avgLeadTimeDays(m).toFixed(1)} d</td>
                       <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{Math.round(avgInyTime(m)).toLocaleString()}m</td>
                       <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{Math.round(avgEstTime(m)).toLocaleString()}m</td>
                       <td className="py-3.5 px-3 text-right text-slate-450 font-mono">{Math.round(avgBndTime(m)).toLocaleString()}m</td>
@@ -6306,15 +6783,24 @@ export const ModelosProductosView: React.FC = () => {
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-850">
                 <span className="text-[10px] font-mono text-red-500 uppercase block">Porcentaje Defecto</span>
                 <span className="text-sm font-bold font-mono text-red-400">
-                  {selectedModelDefectPct}%
+                  {qualityAvailable ? `${selectedModelDefectPct}%` : 'N/D'}
                 </span>
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-850">
                 <span className="text-[10px] font-mono text-indigo-400 uppercase block">Lead Time Promedio</span>
                 <span className="text-sm font-bold font-mono text-slate-200">
-                  {avgLeadTime(selectedModelStats).toFixed(1)} hrs
+                  {avgLeadTimeDays(selectedModelStats).toFixed(1)} d
                 </span>
               </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2 bg-slate-950 p-3.5 rounded-lg border border-slate-850 text-[10px]">
+              <div><span className="text-slate-500 block">Línea</span><strong className="text-slate-200">{String(selectedModelCatalog?.line_name || selectedModelCatalog?.linea || '—')}</strong></div>
+              <div><span className="text-slate-500 block">Categoría</span><strong className="text-slate-200">{String(selectedModelCatalog?.categoria || '—')}</strong></div>
+              <div><span className="text-slate-500 block">Tipo producto</span><strong className="text-slate-200">{String(selectedModelCatalog?.tipo_producto || '—')}</strong></div>
+              <div><span className="text-slate-500 block">Flujo</span><strong className="text-slate-200">{String(selectedModelCatalog?.flujo || '—')}</strong></div>
+              <div><span className="text-slate-500 block">Costo ERP</span><strong className="text-cyan-300">{selectedModelCatalog?.costo == null ? '—' : `$${Number(selectedModelCatalog.costo).toLocaleString('es-MX')}`}</strong></div>
+              <div><span className="text-slate-500 block">Días proceso</span><strong className="text-slate-200">{String(selectedModelCatalog?.dias_proceso || '—')}</strong></div>
             </div>
 
             {/* Timings per Station Progress Bars */}
@@ -6387,7 +6873,7 @@ export const ModelosProductosView: React.FC = () => {
             {/* Tallas Más Producidas Distribution */}
             <div className="space-y-2 bg-slate-950 p-3.5 rounded-lg border border-slate-850">
               <span className="text-[10px] font-mono text-slate-400 font-bold uppercase tracking-wider block">
-                📐 Distribución Estimada por Tallas:
+                📐 Distribución Real por Puntos:
               </span>
               <div className="space-y-1">
                 {tallasDistribution.map((t, idx) => (
@@ -6396,6 +6882,7 @@ export const ModelosProductosView: React.FC = () => {
                     <span className="text-slate-200 font-mono font-bold">{t.pares.toLocaleString()} pars</span>
                   </div>
                 ))}
+                {tallasDistribution.length === 0 && <span className="text-[10px] text-slate-600">Sin desglose FDB</span>}
               </div>
             </div>
 
@@ -6406,7 +6893,7 @@ export const ModelosProductosView: React.FC = () => {
               </span>
               <p className="text-[11.5px] italic text-slate-300 leading-relaxed font-sans font-medium">
                 {selectedProductModel && (
-                  <span>Modelo <strong>{selectedProductModel}</strong>: defectivo <strong>{selectedModelDefectPct}%</strong>, cumplimiento <strong>{selectedModelCompliance}%</strong>. Recomendación pendiente de análisis AI real.</span>
+                  <span>Modelo <strong>{selectedProductModel}</strong>: defectivo <strong>{qualityAvailable ? `${selectedModelDefectPct}%` : 'N/D'}</strong>, cumplimiento <strong>{selectedModelCompliance}%</strong>. Recomendación pendiente de análisis AI real.</span>
                 )}
               </p>
             </div>
@@ -6472,9 +6959,9 @@ export const CalidadView: React.FC = () => {
   const [newDefecto, setNewDefecto] = useState('');
 
   // Distinct filter states
-  const [filtroFecha, setFiltroFecha] = useState('');
-  const [filtroRangoInicio, setFiltroRangoInicio] = useState('2026-05-10');
-  const [filtroRangoFin, setFiltroRangoFin] = useState('2026-05-25');
+  const [filtroFecha, setFiltroFecha] = useState(() => todayPlantDate());
+  const [filtroRangoInicio, setFiltroRangoInicio] = useState(() => todayPlantDate());
+  const [filtroRangoFin, setFiltroRangoFin] = useState(() => todayPlantDate());
   const [filtroArea, setFiltroArea] = useState('');
   const [filtroTurno, setFiltroTurno] = useState('');
   const [filtroInspector, setFiltroInspector] = useState('');
@@ -6577,9 +7064,9 @@ export const CalidadView: React.FC = () => {
 
   // CLEAR ALL FILTER HANDLER
   const handleClearFilters = () => {
-    setFiltroFecha('');
-    setFiltroRangoInicio('2026-05-10');
-    setFiltroRangoFin('2026-05-25');
+    setFiltroFecha(todayPlantDate());
+    setFiltroRangoInicio(todayPlantDate());
+    setFiltroRangoFin(todayPlantDate());
     setFiltroArea('');
     setFiltroTurno('');
     setFiltroInspector('');
@@ -7189,7 +7676,7 @@ export const CalidadView: React.FC = () => {
 
         {/* Tab 1: Pareto & Áreas */}
         {chartTab === 'pareto-areas' && (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Pareto de Defectos */}
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
@@ -7198,14 +7685,14 @@ export const CalidadView: React.FC = () => {
                 <span className="text-[9px] bg-slate-950 text-pink-400 px-1 py-0.5 rounded leading-none">Voz General</span>
               </h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Representación ordenada de incidencias y % acumulado.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={paretoChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '7px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Fallas" fill="#ec4899" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7217,14 +7704,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">📐 Defectos por Área</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Distribución de mermas e incidencias por zona operativa.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={areaChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectivos" fill="#ef4444" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7236,14 +7723,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">👟 Defectos por Modelo</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Volumen absoluto de calzado defectuoso por molde.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={modelChartData.slice(0, 6)} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '7px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectivos" fill="#06b6d4" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7255,14 +7742,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">🎨 Defectos por Color</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Anomalías presentadas por pigmentación pigmentación.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={colorChartData.slice(0, 6)} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectivos" fill="#a855f7" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7275,20 +7762,20 @@ export const CalidadView: React.FC = () => {
 
         {/* Tab 2: Dispositivos & Tallas */}
         {chartTab === 'device-specs' && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Defectos por máquina */}
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">⚙️ Defectos por Máquina Inyectora</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Registro de desviaciones mecánicas en platos enfriadores.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={machineChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectivos" fill="#f59e0b" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7300,14 +7787,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">〰️ Defectos por Banda de Detalle</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Mermas de rebabas y deslices de lijas por estación.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={bandChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectivos" fill="#ec4899" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7319,14 +7806,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">📏 Defectos por Talla Comercial</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Comportamiento contractivo de EVA según el tamaño de horma.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={tallaChartData.slice(0, 10)} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectivos" fill="#14b8a6" radius={[3, 3, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -7339,20 +7826,20 @@ export const CalidadView: React.FC = () => {
 
         {/* Tab 3: Calidad & Tendencias */}
         {chartTab === 'trends-rates' && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Primeras vs segundas */}
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">⚖️ Primeras vs Segundas por Modelo</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Contraste directo de volumen comercial de Primer Grado vs Cosméticas.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={primeVsSecChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '7px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Primeras" fill="#10b981" />
                     <RechartsBar dataKey="Segundas" fill="#f59e0b" />
                   </RechartsBarChart>
@@ -7365,14 +7852,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md font-sans">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">📈 Tendencia de % Defectivo Diario</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight font-sans">Comportamiento diario de tasa de rechazo general.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsLineChart data={dailyTrendChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="date" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsLine type="monotone" dataKey="% Defectivo" stroke="#ef4444" strokeWidth={2.5} dot={{ r: 2.5 }} />
                   </RechartsLineChart>
                 </RechartsResponsiveContainer>
@@ -7384,14 +7871,14 @@ export const CalidadView: React.FC = () => {
             <div className="p-4 bg-slate-900 border border-slate-850 rounded-xl shadow-md">
               <h4 className="text-xs font-extrabold font-mono text-slate-350 uppercase mb-1">🧪 Reprocesos y Mermas</h4>
               <p className="text-[9px] text-slate-550 mb-3 leading-tight">Análisis de scrap definitivo (Merma) vs calzado recuperable.</p>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={weeklyRepMermChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#101a2b" />
                     <RechartsXAxis dataKey="date" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '7px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: '#020617', border: '1px solid #1e293b', fontSize: '9px' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '9px', color: '#0f172a' }} />
                     <RechartsBar dataKey="Reproceso" fill="#6366f1" stackId="stack" />
                     <RechartsBar dataKey="Merma" fill="#f43f5e" stackId="stack" />
                   </RechartsBarChart>
@@ -7806,7 +8293,7 @@ export const InyeccionView: React.FC = () => {
   const leaderOptions = activeResponsables;
 
   // Distinct filter states
-  const [filtroFecha, setFiltroFecha] = useState('');
+  const [filtroFecha, setFiltroFecha] = useState(() => todayPlantDate());
   const [filtroTurno, setFiltroTurno] = useState('');
   const [filtroMaquina, setFiltroMaquina] = useState('');
   const [filtroMolde, setFiltroMolde] = useState('');
@@ -7845,7 +8332,7 @@ export const InyeccionView: React.FC = () => {
   });
 
   const handleClearFilters = () => {
-    setFiltroFecha('');
+    setFiltroFecha(todayPlantDate());
     setFiltroTurno('');
     setFiltroMaquina('');
     setFiltroMolde('');
@@ -8470,14 +8957,14 @@ export const InyeccionView: React.FC = () => {
                 ⏱️ Producción por Hora en Inyección
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Distribución proporcional de vulcanizado EVA en 24 horas.</p>
-              <div className="h-56 overflow-x-auto">
+              <div className="h-[280px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsLineChart data={prodHourlyData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="hour" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsLine type="monotone" dataKey="Pares" stroke="#e11d48" strokeWidth={2.5} dot={{ fill: '#f59e0b' }} />
                   </RechartsLineChart>
                 </RechartsResponsiveContainer>
@@ -8491,14 +8978,14 @@ export const InyeccionView: React.FC = () => {
                 ⚙️ Producción por Máquina Prensa
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Volumen inspeccionado por celda termoplástica en el periodo.</p>
-              <div className="h-56 overflow-x-auto">
+              <div className="h-[280px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={machineProdChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Pares" fill="#f59e0b" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -8511,7 +8998,7 @@ export const InyeccionView: React.FC = () => {
 
         {/* Tab content 2: Defects & Pareto */}
         {chartTab === 'def' && (
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             
             {/* Chart 3: Defectos por máquina */}
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
@@ -8519,14 +9006,14 @@ export const InyeccionView: React.FC = () => {
                 ⚠️ Defectos por Máquina Prensa
               </h4>
               <p className="text-[9px] text-slate-550 mb-3 block truncate">Distribución absoluta de anormalidades físicas registradas.</p>
-              <div className="h-52 overflow-x-auto">
+              <div className="h-[260px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={machineDefChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectos" fill="#ef4444" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -8540,14 +9027,14 @@ export const InyeccionView: React.FC = () => {
                 📉 Pareto de Defectos de Inyección
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Voz del cliente: Priorización 80/20 de pérdidas de inyección.</p>
-              <div className="h-52 overflow-x-auto">
+              <div className="h-[260px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={paretoDefectChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '7px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Pares" fill="#e11d48" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -8561,14 +9048,14 @@ export const InyeccionView: React.FC = () => {
                 ⚖️ Primeras vs Segundas por Modelo
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Balance de grado comercial A vs B para modelos dominantes.</p>
-              <div className="h-52 overflow-x-auto">
+              <div className="h-[260px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={modelComparisonsChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsLegend style={{ fontSize: '8px' }} />
                     <RechartsBar dataKey="Primeras" fill="#10b981" radius={[3, 3, 0, 0]} />
                     <RechartsBar dataKey="Segundas" fill="#6366f1" radius={[3, 3, 0, 0]} />
@@ -8591,14 +9078,14 @@ export const InyeccionView: React.FC = () => {
                 📊 Eficiencia por Turno de Trabajo
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Porcentaje de primeras sobre volumen total procesado.</p>
-              <div className="h-56 font-mono overflow-x-auto">
+              <div className="h-[280px] font-mono overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={shiftEffChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '9px' }} />
                     <RechartsYAxis domain={[75, 100]} stroke="#5b6c80" style={{ fontSize: '9px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Eficiencia" fill="#3b82f6" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -8612,14 +9099,14 @@ export const InyeccionView: React.FC = () => {
                 👟 Defectos por Talla de Calzado
               </h4>
               <p className="text-[9px] text-slate-550 mb-3">Concentración de mermas e incidencias por tamaño de molde.</p>
-              <div className="h-56 font-mono overflow-x-auto">
+              <div className="h-[280px] font-mono overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={tallaDefChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Hundimientos" fill="#d97706" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -9188,7 +9675,7 @@ export const BandaView: React.FC = () => {
   const leaderOptions = activeResponsables;
 
   // Distinct filter states
-  const [filtroFecha, setFiltroFecha] = useState('');
+  const [filtroFecha, setFiltroFecha] = useState(() => todayPlantDate());
   const [filtroTurno, setFiltroTurno] = useState('');
   const [filtroBanda, setFiltroBanda] = useState('');
   const [filtroInspector, setFiltroInspector] = useState('');
@@ -9225,7 +9712,7 @@ export const BandaView: React.FC = () => {
   });
 
   const handleClearFilters = () => {
-    setFiltroFecha('');
+    setFiltroFecha(todayPlantDate());
     setFiltroTurno('');
     setFiltroBanda('');
     setFiltroInspector('');
@@ -9706,14 +10193,14 @@ export const BandaView: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⏱️ Producción por hora en banda</h4>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsLineChart data={prodHourlyData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="hour" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsLine type="monotone" dataKey="Pares" stroke="#6366f1" strokeWidth={2} dot={{ fill: '#818cf8' }} />
                   </RechartsLineChart>
                 </RechartsResponsiveContainer>
@@ -9723,14 +10210,14 @@ export const BandaView: React.FC = () => {
 
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚙️ Producción por banda</h4>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={bandaProdChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Pares" fill="#818cf8" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -9744,14 +10231,14 @@ export const BandaView: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚠️ Defectos por banda</h4>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={bandaDefChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Defectos" fill="#f43f5e" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -9761,14 +10248,14 @@ export const BandaView: React.FC = () => {
 
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">📈 Pareto de defectos en banda</h4>
-              <div className="h-44 overflow-x-auto">
+              <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                   <RechartsBarChart data={paretoDefectChartData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                     <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                     <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '7px' }} />
                     <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                    <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                    <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                     <RechartsBar dataKey="Pares" fill="#ec4899" radius={[4, 4, 0, 0]} />
                   </RechartsBarChart>
                 </RechartsResponsiveContainer>
@@ -9783,14 +10270,14 @@ export const BandaView: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚖️ Primeras vs segundas por modelo</h4>
-                <div className="h-44 overflow-x-auto">
+                <div className="h-[220px] overflow-x-auto">
                   <div className="w-full min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                     <RechartsBarChart data={modelComparisonsChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                       <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                       <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                      <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                      <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                       <RechartsLegend wrapperStyle={{ fontSize: '9px' }} />
                       <RechartsBar dataKey="Primeras" fill="#10b981" radius={[2, 2, 0, 0]} />
                       <RechartsBar dataKey="Segundas" fill="#6366f1" radius={[2, 2, 0, 0]} />
@@ -9802,14 +10289,14 @@ export const BandaView: React.FC = () => {
 
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">🧵 Defectos por modelo</h4>
-                <div className="h-44 overflow-x-auto">
+                <div className="h-[220px] overflow-x-auto">
                   <div className="w-full min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                     <RechartsBarChart data={modelDefectChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                       <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                       <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                      <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                      <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                       <RechartsBar dataKey="Defectos" fill="#f43f5e" radius={[4, 4, 0, 0]} />
                     </RechartsBarChart>
                   </RechartsResponsiveContainer>
@@ -9821,14 +10308,14 @@ export const BandaView: React.FC = () => {
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">🎨 Defectos por color</h4>
-                <div className="h-44 overflow-x-auto">
+                <div className="h-[220px] overflow-x-auto">
                   <div className="w-full min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                     <RechartsBarChart data={colorDefectChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                       <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                       <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                      <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                      <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                       <RechartsBar dataKey="Defectos" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
                     </RechartsBarChart>
                   </RechartsResponsiveContainer>
@@ -9838,14 +10325,14 @@ export const BandaView: React.FC = () => {
 
               <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
                 <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">📈 Tendencia de % defectivo</h4>
-                <div className="h-44 overflow-x-auto">
+                <div className="h-[220px] overflow-x-auto">
                   <div className="w-full min-w-[300px] h-full">
                   <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                     <RechartsLineChart data={trendChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
                       <RechartsCartesianGrid strokeDasharray="3 3" stroke="#1c2436" />
                       <RechartsXAxis dataKey="name" stroke="#5b6c80" style={{ fontSize: '8px' }} />
                       <RechartsYAxis stroke="#5b6c80" style={{ fontSize: '8px' }} />
-                      <RechartsTooltip contentStyle={{ backgroundColor: 'rgba(2, 6, 23, 0.9)', borderColor: '#1e293b' }} />
+                      <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                       <RechartsLine type="monotone" dataKey="% Defectivo" stroke="#f43f5e" strokeWidth={2} dot={{ fill: '#3b82f6' }} />
                     </RechartsLineChart>
                   </RechartsResponsiveContainer>
@@ -10167,7 +10654,7 @@ export const AduanaLiberacionView: React.FC = () => {
   const [formValidationMsg, setFormValidationMsg] = useState<string | null>(null);
 
   // Filters State
-  const [filtroFecha, setFiltroFecha] = useState('');
+  const [filtroFecha, setFiltroFecha] = useState(() => todayPlantDate());
   const [filtroCliente, setFiltroCliente] = useState('');
   const [filtroOC, setFiltroOC] = useState('');
   const [filtroLote, setFiltroLote] = useState('');
@@ -10209,7 +10696,7 @@ export const AduanaLiberacionView: React.FC = () => {
   });
 
   const clearFilters = () => {
-    setFiltroFecha('');
+    setFiltroFecha(todayPlantDate());
     setFiltroCliente('');
     setFiltroOC('');
     setFiltroLote('');
@@ -11188,7 +11675,7 @@ export const EmbarqueView: React.FC = () => {
   }, [currentTenant.id]);
 
   // Filters state
-  const [filtroFecha, setFiltroFecha] = useState('');
+  const [filtroFecha, setFiltroFecha] = useState(() => todayPlantDate());
   const [filtroCliente, setFiltroCliente] = useState('');
   const [filtroOC, setFiltroOC] = useState('');
   const [filtroPedido, setFiltroPedido] = useState('');
@@ -11196,7 +11683,7 @@ export const EmbarqueView: React.FC = () => {
   const [filtroModelo, setFiltroModelo] = useState('');
   const [filtroColor, setFiltroColor] = useState('');
   const [filtroEstatus, setFiltroEstatus] = useState('');
-  const [filtroFechaCompromiso, setFiltroFechaCompromiso] = useState('');
+  const [filtroFechaCompromiso, setFiltroFechaCompromiso] = useState(() => todayPlantDate());
   const [filtroResponsable, setFiltroResponsable] = useState('');
 
   // Extract filter source candidates
@@ -11223,7 +11710,7 @@ export const EmbarqueView: React.FC = () => {
   const selectedRecord = records.find(r => r.id === selectedPedidoId) || records[0];
 
   const clearFilters = () => {
-    setFiltroFecha('');
+    setFiltroFecha(todayPlantDate());
     setFiltroCliente('');
     setFiltroOC('');
     setFiltroPedido('');
@@ -11231,7 +11718,7 @@ export const EmbarqueView: React.FC = () => {
     setFiltroModelo('');
     setFiltroColor('');
     setFiltroEstatus('');
-    setFiltroFechaCompromiso('');
+    setFiltroFechaCompromiso(todayPlantDate());
     setFiltroResponsable('');
   };
 
@@ -11847,12 +12334,12 @@ export const EmbarqueView: React.FC = () => {
           <p className="text-[10px] text-slate-550">Compendio gráfico de OTIF, backlog y volúmenes embarcados.</p>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           
           {/* Graffic 1: Embarques por día */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">1. Pares Embarcados por Día</span>
-            <div className="h-44 w-full overflow-x-auto">
+            <div className="h-[220px] w-full overflow-x-auto">
               <div className="w-full min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                 <RechartsLineChart data={embarquesDiaChartData} margin={{ top: 5, right: 10, left: -25, bottom: 5 }}>
@@ -11870,7 +12357,7 @@ export const EmbarqueView: React.FC = () => {
           {/* Graffic 2: Pedidos completos vs parciales */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">2. Pedidos Completos vs Parciales</span>
-            <div className="h-44 w-full overflow-x-auto">
+            <div className="h-[220px] w-full overflow-x-auto">
               <div className="w-full min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                 <RechartsBarChart data={completosVsParcialesData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
@@ -11888,7 +12375,7 @@ export const EmbarqueView: React.FC = () => {
           {/* Graffic 3: Cumplimiento por cliente */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">3. Cumplimiento OTIF por Cliente</span>
-            <div className="h-44 w-full overflow-x-auto">
+            <div className="h-[220px] w-full overflow-x-auto">
               <div className="w-full min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                 <RechartsBarChart data={cumplimientoClienteData} layout="vertical" margin={{ top: 5, right: 10, left: -15, bottom: 5 }}>
@@ -11906,7 +12393,7 @@ export const EmbarqueView: React.FC = () => {
           {/* Graffic 4: Pares embarcados por modelo */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">4. Pares Embarcados por Modelo</span>
-            <div className="h-44 w-full overflow-x-auto">
+            <div className="h-[220px] w-full overflow-x-auto">
               <div className="w-full min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                 <RechartsBarChart data={paresEmbarcadosModeloData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
@@ -11924,7 +12411,7 @@ export const EmbarqueView: React.FC = () => {
           {/* Graffic 5: Backlog pendiente de embarque */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
             <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">5. Backlog Pendiente por Cliente</span>
-            <div className="h-44 w-full overflow-x-auto">
+            <div className="h-[220px] w-full overflow-x-auto">
               <div className="w-full min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
                 <RechartsBarChart data={backlogPendienteClienteData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
@@ -11971,12 +12458,15 @@ export const ReportesHistoricosView: React.FC = () => {
   // Producción por hora y movimientos reales (BixApp FDB → backend).
   const [erpProduccion, setErpProduccion] = useState<EjecutivoData['produccion']>([]);
   const [erpMovimientos, setErpMovimientos] = useState<MovimientoRow[]>([]);
+  const [erpLoading, setErpLoading] = useState(backendEnabled);
+  const [erpError, setErpError] = useState<string | null>(null);
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
-    const hoy = new Date();
-    const fechaFin = hoy.toISOString().slice(0, 10);
-    const fechaInicio = new Date(hoy.getTime() - 365 * 24 * 3600 * 1000).toISOString().slice(0, 10);
+    const fechaFin = todayPlantDate();
+    const fechaInicio = fechaFin;
+    setErpLoading(true);
+    setErpError(null);
     dashboardApi.erpOperativo(fechaInicio, fechaFin)
       .then(data => {
         if (!cancelled) {
@@ -11984,7 +12474,13 @@ export const ReportesHistoricosView: React.FC = () => {
           setErpMovimientos(data.movements.slice(0, 50));
         }
       })
-      .catch(err => console.warn('Reportes: ERP operativo fetch failed', err));
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Reportes: ERP operativo fetch failed', err);
+          setErpError('Reportes Historicos');
+        }
+      })
+      .finally(() => { if (!cancelled) setErpLoading(false); });
     return () => { cancelled = true; };
   }, []);
   const prodHoraSource = erpProduccion;
@@ -12010,6 +12506,14 @@ export const ReportesHistoricosView: React.FC = () => {
       </span>
     );
   };
+
+  if (backendEnabled && erpLoading && erpProduccion.length === 0 && erpMovimientos.length === 0) {
+    return <ModuleLoadingState label="Reportes Historicos" />;
+  }
+
+  if (backendEnabled && erpError && erpProduccion.length === 0 && erpMovimientos.length === 0) {
+    return <ModuleDataErrorState label={erpError} />;
+  }
 
   return (
     <div className="space-y-6">
@@ -12154,7 +12658,7 @@ export const ReportesHistoricosView: React.FC = () => {
                   <th className="p-3">Fecha Entrada</th>
                   <th className="p-3">Fecha Salida</th>
                   <th className="p-3 text-right">Pares</th>
-                  <th className="p-3">Operario Escaneo</th>
+                  <th className="p-3">Origen de Escaneo</th>
                   <th className="p-3 text-right">Duración Mins</th>
                   <th className="p-3 text-right">Estado</th>
                 </tr>
@@ -12199,15 +12703,24 @@ export const ReportesHistoricosView: React.FC = () => {
 export const CatalogosView: React.FC = () => {
   const { orders, currentTenant } = useDashboard();
   const [catalogs, setCatalogs] = useState<ErpOperationalResponse['catalogs'] | null>(null);
+  const [catalogsLoading, setCatalogsLoading] = useState(backendEnabled);
+  const [catalogsError, setCatalogsError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
-    const end = new Date();
-    const start = new Date(end.getTime() - 365 * 24 * 3600 * 1000);
-    dashboardApi.erpOperativo(start.toISOString().slice(0, 10), end.toISOString().slice(0, 10))
+    const today = todayPlantDate();
+    setCatalogsLoading(true);
+    setCatalogsError(null);
+    dashboardApi.erpOperativo(today, today)
       .then(data => { if (!cancelled) setCatalogs(data.catalogs); })
-      .catch(err => console.warn('Catalogos: ERP operativo fetch failed', err));
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Catalogos: ERP operativo fetch failed', err);
+          setCatalogsError('Catalogos');
+        }
+      })
+      .finally(() => { if (!cancelled) setCatalogsLoading(false); });
     return () => { cancelled = true; };
   }, []);
 
@@ -12234,23 +12747,31 @@ export const CatalogosView: React.FC = () => {
       id: String(c.id || c.codigo || c.name || c.nombre),
       name: String(c.name || c.nombre || c.codigo || 'S/Cliente'),
       rfc: String(c.rfc || '—'),
-      contactEmail: '—',
-      contactPhone: '—',
+      contactEmail: String(c.internet || '—'),
+      contactPhone: String(c.telefono || '—'),
+      address: [c.direccion, c.ciudad, c.estado].filter(Boolean).join(', ') || '—',
+      creditDays: c.dias_credito == null ? '—' : String(c.dias_credito),
       priority: String(c.clasif || 'MEDIA')
     }))
     : clientsFromOrders;
   const clientColumns = [
     { header: 'RFC Fiscal', accessorKey: 'rfc', cell: (c: any) => <span className="font-mono">{c.rfc}</span> },
     { header: 'Razón Social', accessorKey: 'name', cell: (c: any) => <strong className="text-slate-250">{c.name}</strong> },
-    { header: 'Email Contacto', accessorKey: 'contactEmail' },
+    { header: 'Internet/Contacto', accessorKey: 'contactEmail' },
     { header: 'Teléfono', accessorKey: 'contactPhone', cell: (c: any) => <span className="font-mono">{c.contactPhone}</span> },
+    { header: 'Dirección', accessorKey: 'address' },
+    { header: 'Días Crédito', accessorKey: 'creditDays' },
     { header: 'Prioridad Comercial', accessorKey: 'priority', cell: (c: any) => <StatusBadge status={c.priority} type="priority" /> }
   ];
   const modelCatalog = (catalogs?.models ?? []).map(m => ({
     id: String(m.id || m.codigo || m.name || m.nombre),
     codigo: String(m.codigo || m.id || ''),
     name: String(m.name || m.nombre || 'S/Modelo'),
-    linea: String(m.linea || '—'),
+    linea: String(m.line_name || m.linea || '—'),
+    categoria: String(m.categoria || '—'),
+    tipoProducto: String(m.tipo_producto || '—'),
+    costo: m.costo == null ? '—' : Number(m.costo).toLocaleString('es-MX', { style: 'currency', currency: 'MXN' }),
+    diasProceso: m.dias_proceso == null ? '—' : String(m.dias_proceso),
     vigente: m.vigente === false ? 'NO' : 'SI'
   }));
   const deptCatalog = (catalogs?.departments ?? []).map(d => ({
@@ -12264,6 +12785,10 @@ export const CatalogosView: React.FC = () => {
     { header: 'Código', accessorKey: 'codigo', cell: (m: any) => <span className="font-mono">{m.codigo}</span> },
     { header: 'Modelo', accessorKey: 'name', cell: (m: any) => <strong className="text-slate-250">{m.name}</strong> },
     { header: 'Línea', accessorKey: 'linea' },
+    { header: 'Categoría', accessorKey: 'categoria' },
+    { header: 'Tipo', accessorKey: 'tipoProducto' },
+    { header: 'Costo ERP', accessorKey: 'costo' },
+    { header: 'Días Proceso', accessorKey: 'diasProceso' },
     { header: 'Vigente', accessorKey: 'vigente' }
   ];
   const deptColumns = [
@@ -12272,6 +12797,14 @@ export const CatalogosView: React.FC = () => {
     { header: 'Etapa Dashboard', accessorKey: 'stage' },
     { header: 'Orden', accessorKey: 'orden' }
   ];
+
+  if (backendEnabled && catalogsLoading && !catalogs) {
+    return <ModuleLoadingState label="Catalogos" />;
+  }
+
+  if (backendEnabled && catalogsError && !catalogs) {
+    return <ModuleDataErrorState label={catalogsError} />;
+  }
 
   return (
     <div className="space-y-6">
@@ -12323,7 +12856,11 @@ export const ConfiguracionView: React.FC = () => {
     addProductionGoal,
     updateProductionGoal,
     getEffectivePermissions,
-    can
+    can,
+    dailyProdTarget,
+    setDailyProdTarget,
+    semaphoreConfig,
+    setSemaphoreConfig
   } = useDashboard();
 
   const roles: Role[] = ['DIRECTOR_GENERAL', 'LIDER_ADMINISTRACION', 'LIDER_INYECCION', 'SUPERVISOR_CALIDAD'];
@@ -12337,7 +12874,7 @@ export const ConfiguracionView: React.FC = () => {
     { id: 'salidas_tercera', label: 'Salidas de tercera' }
   ];
   const activeUsers = users.filter(user => user.active);
-  const [activeTab, setActiveTab] = useState<'usuarios' | 'permisos' | 'metas' | 'turnos'>('usuarios');
+  const [activeTab, setActiveTab] = useState<'usuarios' | 'permisos' | 'metas' | 'turnos' | 'general'>('usuarios');
 
   const [editingUserId, setEditingUserId] = useState<string | null>(null);
   const [selectedPermissionUserId, setSelectedPermissionUserId] = useState<string>('');
@@ -12353,6 +12890,7 @@ export const ConfiguracionView: React.FC = () => {
   const [turnEnd, setTurnEnd] = useState('14:59');
   const [turnActive, setTurnActive] = useState(true);
   const [turnResponsable, setTurnResponsable] = useState('');
+  const [turnAreaId, setTurnAreaId] = useState<ProductionAreaId | ''>('');
 
   const [editingGoalId, setEditingGoalId] = useState<string | null>(null);
   const [goalArea, setGoalArea] = useState<ProductionAreaId>('inyeccion');
@@ -12424,6 +12962,7 @@ export const ConfiguracionView: React.FC = () => {
     setTurnEnd(turn.endTime);
     setTurnActive(turn.active);
     setTurnResponsable(turn.responsableUserId || activeUsers[0]?.id || '');
+    setTurnAreaId((turn.areaId as ProductionAreaId | undefined) || '');
     setActiveTab('turnos');
   };
 
@@ -12435,11 +12974,12 @@ export const ConfiguracionView: React.FC = () => {
     setTurnEnd('14:59');
     setTurnActive(true);
     setTurnResponsable(activeUsers[0]?.id || '');
+    setTurnAreaId('');
   };
 
   const handleSaveTurn = (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = { code: turnCode.trim(), name: turnName.trim(), startTime: turnStart, endTime: turnEnd, active: turnActive, responsableUserId: turnResponsable };
+    const payload = { code: turnCode.trim(), name: turnName.trim(), startTime: turnStart, endTime: turnEnd, active: turnActive, responsableUserId: turnResponsable, areaId: turnAreaId || undefined };
     if (editingTurnId) updateTurn(editingTurnId, payload);
     else addTurn(payload);
     resetTurnForm();
@@ -12505,6 +13045,7 @@ export const ConfiguracionView: React.FC = () => {
         <button onClick={() => setActiveTab('permisos')} className={tabClass('permisos')}>Permisos</button>
         <button onClick={() => setActiveTab('metas')} className={tabClass('metas')}>Metas</button>
         <button onClick={() => setActiveTab('turnos')} className={tabClass('turnos')}>Turnos</button>
+        <button onClick={() => setActiveTab('general')} className={tabClass('general')}>General</button>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -12669,6 +13210,10 @@ export const ConfiguracionView: React.FC = () => {
               <input type="time" value={turnStart} onChange={(e) => setTurnStart(e.target.value)} disabled={!can('configuracion.manage_turns')} className="bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" />
               <input type="time" value={turnEnd} onChange={(e) => setTurnEnd(e.target.value)} disabled={!can('configuracion.manage_turns')} className="bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100" />
             </div>
+            <select value={turnAreaId} onChange={(e) => setTurnAreaId(e.target.value as ProductionAreaId | '')} disabled={!can('configuracion.manage_turns')} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
+              <option value="">Todas las áreas (global)</option>
+              {areaOptions.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}
+            </select>
             <select value={turnResponsable} onChange={(e) => setTurnResponsable(e.target.value)} disabled={!can('configuracion.manage_turns')} className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100">
               {activeUsers.map(user => <option key={user.id} value={user.id}>{user.username}</option>)}
             </select>
@@ -12679,12 +13224,13 @@ export const ConfiguracionView: React.FC = () => {
           <div className="xl:col-span-2 bg-slate-900 border border-slate-800 rounded-lg overflow-x-auto">
             <table className="w-full text-xs">
               <thead className="bg-slate-950 text-slate-500 font-mono uppercase text-[10px]">
-                <tr><th className="p-3 text-left">Turno</th><th className="p-3 text-left">Horario</th><th className="p-3 text-left">Responsable</th><th className="p-3 text-left">Estado</th><th className="p-3 text-right">Acción</th></tr>
+                <tr><th className="p-3 text-left">Turno</th><th className="p-3 text-left">Área</th><th className="p-3 text-left">Horario</th><th className="p-3 text-left">Responsable</th><th className="p-3 text-left">Estado</th><th className="p-3 text-right">Acción</th></tr>
               </thead>
               <tbody className="divide-y divide-slate-850">
                 {turns.map(turn => (
                   <tr key={turn.id}>
                     <td className="p-3 text-slate-100 font-bold">{turn.name} <span className="text-slate-500 font-mono">({turn.code})</span></td>
+                    <td className="p-3 text-slate-400 font-mono text-[10px]">{turn.areaId ? areaLabel(turn.areaId as ProductionAreaId) : <span className="text-slate-600">Global</span>}</td>
                     <td className="p-3 text-slate-400 font-mono">{turn.startTime} - {turn.endTime}</td>
                     <td className="p-3 text-slate-400">{userName(turn.responsableUserId)}</td>
                     <td className="p-3">{turn.active ? <span className="text-emerald-400">ACTIVO</span> : <span className="text-rose-400">INACTIVO</span>}</td>
@@ -12740,6 +13286,79 @@ export const ConfiguracionView: React.FC = () => {
               </tbody>
             </table>
           </div>
+        </div>
+      )}
+
+      {activeTab === 'general' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+
+          {/* Meta diaria */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-4">
+            <h4 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase border-b border-slate-850 pb-2">
+              Meta Diaria de Producción
+            </h4>
+            <div className="space-y-2">
+              <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-500 block">
+                Pares por día (meta global)
+              </label>
+              <input
+                type="number"
+                min={1}
+                value={dailyProdTarget}
+                onChange={(e) => setDailyProdTarget(Math.max(1, Number(e.target.value)))}
+                className="w-full bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100 font-mono"
+              />
+              <p className="text-[10px] text-slate-500">
+                Meta/hora calculada automáticamente según horas de turno activo. Actualmente: <strong className="text-cyan-400">{dailyProdTarget.toLocaleString()} pares/día</strong>.
+              </p>
+            </div>
+          </div>
+
+          {/* Semáforo configurable */}
+          <div className="bg-slate-900 border border-slate-800 rounded-lg p-5 space-y-4">
+            <h4 className="text-xs font-black tracking-widest font-mono text-cyan-400 uppercase border-b border-slate-850 pb-2">
+              Semáforo de Riesgo — Días a Entrega
+            </h4>
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span className="w-3 h-3 rounded-full bg-emerald-500 flex-shrink-0"></span>
+                <label className="text-[10px] uppercase font-mono tracking-wider text-slate-400 w-28 flex-shrink-0">Verde (días ≥)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={semaphoreConfig.greenDays}
+                  onChange={(e) => setSemaphoreConfig({ ...semaphoreConfig, greenDays: Math.max(1, Number(e.target.value)) })}
+                  className="w-24 bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100 font-mono"
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="w-3 h-3 rounded-full bg-amber-500 flex-shrink-0"></span>
+                <label className="text-[10px] uppercase font-mono tracking-wider text-slate-400 w-28 flex-shrink-0">Amarillo (días ≥)</label>
+                <input
+                  type="number"
+                  min={1}
+                  value={semaphoreConfig.yellowDays}
+                  onChange={(e) => setSemaphoreConfig({ ...semaphoreConfig, yellowDays: Math.max(1, Number(e.target.value)) })}
+                  className="w-24 bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100 font-mono"
+                />
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="w-3 h-3 rounded-full bg-rose-500 flex-shrink-0"></span>
+                <label className="text-[10px] uppercase font-mono tracking-wider text-slate-400 w-28 flex-shrink-0">Rojo (días ≤)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={semaphoreConfig.redDays}
+                  onChange={(e) => setSemaphoreConfig({ ...semaphoreConfig, redDays: Math.max(0, Number(e.target.value)) })}
+                  className="w-24 bg-slate-950 border border-slate-800 rounded p-2 text-xs text-slate-100 font-mono"
+                />
+              </div>
+              <p className="text-[10px] text-slate-500 pt-1">
+                Los cambios se guardan automáticamente y aplican en el Dashboard Ejecutivo.
+              </p>
+            </div>
+          </div>
+
         </div>
       )}
 

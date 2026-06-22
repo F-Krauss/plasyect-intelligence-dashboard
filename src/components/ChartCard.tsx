@@ -65,7 +65,7 @@ export const ChartCard: React.FC<ChartCardProps> = ({
                   onMouseEnter={() => setHoverIndex(idx)}
                   onMouseLeave={() => setHoverIndex(null)}
                 >
-                  <div className="text-[10px] font-mono text-white opacity-0 group-hover:opacity-100 transition-opacity bg-slate-900 px-2 py-1 rounded mb-1 absolute top-0 z-10">
+                  <div className="text-[10px] font-mono text-slate-900 opacity-0 group-hover:opacity-100 transition-opacity bg-white border border-slate-200 shadow-sm px-2 py-1 rounded mb-1 absolute top-0 z-10">
                     {item.value.toLocaleString()} {yAxisLabel}
                   </div>
                   <div 
@@ -172,12 +172,14 @@ export const ChartCard: React.FC<ChartCardProps> = ({
                       width="90" 
                       height="20" 
                       rx="3" 
-                      fill="#1e293b" 
+                      fill="#ffffff" 
+                      stroke="#cbd5e1"
+                      strokeWidth="1"
                     />
                     <text 
                       x={p.x} 
                       y={p.y - 15} 
-                      fill="#ffffff" 
+                      fill="#0f172a" 
                       fontSize="9" 
                       fontFamily="monospace" 
                       textAnchor="middle"
