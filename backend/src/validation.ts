@@ -36,3 +36,11 @@ export const dateRangeQuerySchema = z.object({
 export const movimientosQuerySchema = dateRangeQuerySchema.extend({
   limit: z.coerce.number().int().min(1).max(500).default(50)
 });
+
+export const aiChatBodySchema = z.object({
+  message: z.string().min(1).max(2000),
+  history: z.array(z.object({
+    role: z.enum(['user', 'assistant']),
+    content: z.string().min(1).max(4000)
+  })).max(20).default([])
+});

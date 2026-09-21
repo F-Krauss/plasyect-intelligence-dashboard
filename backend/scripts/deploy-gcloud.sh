@@ -88,6 +88,14 @@ elif gcloud secrets describe SUPABASE_URL --project="$PROJECT_ID" >/dev/null 2>&
   SET_SECRETS="${SET_SECRETS},SUPABASE_URL=SUPABASE_URL:latest,SUPABASE_SERVICE_ROLE_KEY=SUPABASE_SERVICE_ROLE_KEY:latest"
 fi
 
+# Asistente IA: si viene en el entorno se rota; si ya existe, se monta en Cloud Run.
+if [[ -n "${GEMINI_API_KEY:-}" ]]; then
+  require_secret GEMINI_API_KEY
+  SET_SECRETS="${SET_SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
+elif gcloud secrets describe GEMINI_API_KEY --project="$PROJECT_ID" >/dev/null 2>&1; then
+  SET_SECRETS="${SET_SECRETS},GEMINI_API_KEY=GEMINI_API_KEY:latest"
+fi
+
 gcloud run deploy "$SERVICE" \
   --source=. \
   --region="$REGION" \

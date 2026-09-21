@@ -364,7 +364,16 @@ export class PgRepository implements DashboardRepository {
       const sinceIso = new Date(Date.now() - config.BIGZAP_ACTIVE_DAYS * 86_400_000).toISOString();
       const tarjetas = await this.pool.query<TarjetaViajeraRow>(
         `select * from public.tarjetas_viajeras
-         where cancelado = false and (status_depto <> '50' or ultimo_escaneo >= $1)
+         where cancelado = false
+           and exists (
+             select 1
+             from public.bigzap_lotes_pedidos lp
+             join public.bigzap_programacion_renglones pr
+               on pr.pedido = lp.pedido and pr.renglon = lp.renglon
+             where lp.programa = tarjetas_viajeras.programa
+               and lp.lote = tarjetas_viajeras.lote
+           )
+           and (status_depto <> '50' or ultimo_escaneo >= $1)
          order by ultimo_escaneo desc nulls last
          limit $2`,
         [sinceIso, config.BIGZAP_BATCH_LIMIT]

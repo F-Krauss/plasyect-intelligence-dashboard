@@ -29,7 +29,7 @@ const sampleRow: TarjetaViajeraRow = {
   cliente_codigo: '00005',
   cliente_nombre: 'ZAMISKA',
   pedido_oc: 'OC-9912',
-  pedido_fecha_salida: '2026-04-22'
+  pedido_fecha_salida: '2099-04-22'
 };
 
 describe('mapTarjetaToBatch', () => {
@@ -58,6 +58,15 @@ describe('mapTarjetaToBatch', () => {
     ) as Record<string, unknown>;
     expect(batch.stage).toBe('facturacion');
     expect(batch.estatus).toBe('ENTREGADO');
+  });
+
+  it('marks open tarjetas with past commitment dates as critical', () => {
+    const batch = mapTarjetaToBatch(
+      { ...sampleRow, pedido_fecha_salida: '2000-01-01', status_depto: '40', stage_id: 'embarque' },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
+    expect(batch.status).toBe('CRITICO');
+    expect(batch.estatus).toBe('CRITICO');
   });
 
   it('falls back to color code when color name is missing', () => {

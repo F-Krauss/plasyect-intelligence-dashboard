@@ -170,8 +170,8 @@ export interface ErpOperationalResponse {
   stagePipeline: StagePipelineRow[];
   orderRisk: OrderRiskSummary;
   orderPipeline: OrderPipelineRow[];
-  // Lotes activos + vencidos + embarcados hoy desde el universo completo del FDB
-  // (sin el cap del bootstrap). Fuente unica del Pipeline por Lote.
+  // Lotes activos del piso, desde el mismo snapshot de status_depto que stagePipeline.
+  // Fuente unica para que Pipeline por Lote cuadre con los agregados del Ejecutivo.
   lotePipeline: Batch[];
 }
 
@@ -298,8 +298,23 @@ export const dashboardApi = {
   erpMovimientos: (fechaInicio: string, fechaFin: string, limit = 50) => {
     const qs = new URLSearchParams({ fechaInicio, fechaFin, limit: String(limit) });
     return request<MovimientoRow[]>(`/api/erp/movimientos?${qs}`);
-  }
+  },
+
+  // Asistente IA: chat sobre el estado de planta (respuestas ancladas a datos del sistema)
+  aiChat: (message: string, history: AiChatHistoryMessage[]) =>
+    post<AiChatResponse>('/api/ai/chat', { message, history })
 };
+
+export interface AiChatHistoryMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
+export interface AiChatResponse {
+  reply: string;
+  generatedAt: string;
+  dataDate: string | null;
+}
 
 export function sendApiMutation(task: Promise<unknown>): void {
   task.catch((error) => {

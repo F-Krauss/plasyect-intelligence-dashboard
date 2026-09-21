@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { config } from './config.js';
 import { withFirebird, fbDate, fbNumber, fbString, type FbQuery, type FbRow } from './firebird.js';
 import { log } from './log.js';
-import { getSyncState, recordSyncRun, setSyncState, upsertJson, type JsonRow } from './pg.js';
+import { getSyncState, recordSyncRun, replaceJson, setSyncState, upsertJson, type JsonRow } from './pg.js';
 
 const IN_CHUNK = 500;
 
@@ -15,6 +15,14 @@ const LOTCAB_COLS = `LC_PROG, LC_LOTE, LC_ESTILO, LC_PIECOL, LC_COMBINA, LC_CORR
   LC_PTO01, LC_PTO02, LC_PTO03, LC_PTO04, LC_PTO05, LC_PTO06, LC_PTO07, LC_PTO08, LC_PTO09, LC_PTO10,
   LC_PTO11, LC_PTO12, LC_PTO13, LC_PTO14, LC_PTO15, LC_PTO16, LC_PTO17, LC_PTO18, LC_PTO19, LC_PTO20,
   LC_PTO21, LC_PTO22, LC_PTO23, LC_PTO24, LC_PTO25, LC_PTO26, LC_PTO27, LC_PTO28, LC_PTO29, LC_PTO30`;
+
+// Producto terminado (PTLOTCAB/PTLOTDET): espejo de LOTCAB/LOTDET para lotes ya terminados.
+const PTLOTCAB_COLS = `LC_PROG, LC_LOTE, LC_ESTILO, LC_PIECOL, LC_COMBINA, LC_CORRIDA, LC_FECPT,
+  LC_OBSERVA, LC_PARLOT, LC_STATUS, LC_CALIDAD, LC_DISPO, LC_PREDIR, LC_ALMACEN, LC_PASILLO, LC_TARIMA,
+  ${sizeColumns('LC_PTO')}`;
+
+const PTLOTDET_COLS = `LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES, LD_CALIDAD,
+  LD_DISPO, LD_ORIGEN, LD_MODELO, ${sizeColumns('LD_PTO')}`;
 
 function minusDays(isoDate: string, days: number): string {
   const d = new Date(`${isoDate}T00:00:00Z`);
@@ -75,10 +83,13 @@ interface Extraction {
   combinaciones: FbRow[];
   clientes: FbRow[];
   pedidos: FbRow[];
+  programacion: FbRow[];
   avance: FbRow[];
   lotcab: FbRow[];
   lotdet: FbRow[];
   ptmov: FbRow[];
+  ptlotcab: FbRow[];
+  ptlotdet: FbRow[];
   observaciones: FbRow[];
 }
 
@@ -100,7 +111,9 @@ async function fetchLotesPorPares(query: FbQuery, sql: (lotes: string) => string
   return rows;
 }
 
-async function extract(watermarks: { avance: string | null; lotcab: string | null; ptmov: string | null }): Promise<Extraction> {
+async function extract(
+  watermarks: { avance: string | null; ptmov: string | null; ptlotcab: string | null }
+): Promise<Extraction> {
   return withFirebird(async (query) => {
     const depa = await query('SELECT DP_CODDEP, DP_DESCRIP FROM DEPA');
     const subdepto = await query('SELECT SD_CODIGO, SD_DESCRIP, SD_DEPPAD, SD_PLANTA FROM SUBDEPTO');
@@ -122,6 +135,15 @@ async function extract(watermarks: { avance: string | null; lotcab: string | nul
               PE_ORIGEN, PE_PORDES, PE_DIACRE, PE_OBSERV
        FROM PEDIDOS`
     );
+    // Espejo completo: sin filtro de negocio. El backend decide que renglones cuentan
+    // (p.ej. Alta de Pedido = SUM(pares_aprogramados) WHERE > 0). Filtrar aqui ya tiro el
+    // backlog antes (RE_PARPRO>0 dejaba fuera renglones con RE_PARAPRO>0 y RE_PARPRO=0).
+    const programacion = await query(
+      `SELECT RE_FOLPED, RE_NUMREN, RE_CODEST, RE_PIECOL, RE_COMBINA, RE_CORRIDA,
+              RE_FECENT, RE_FECSAL, RE_FECCAN, RE_FETEPRO, RE_PARREN, RE_PARPRO,
+              RE_PARAPRO, RE_CODCTE, RE_PEDCTE, RE_LIBERADO, RE_STATUS
+       FROM RENGLON`
+    );
 
     const avance = watermarks.avance
       ? await query(
@@ -131,44 +153,15 @@ async function extract(watermarks: { avance: string | null; lotcab: string | nul
         )
       : await query('SELECT AV_PROGRAMA, AV_LOTE, AV_DEPTO, AV_FECHA, AV_HORA, AV_GENPOR, AV_SUBDEPTO FROM AVANCE');
 
-    let lotcab: FbRow[];
-    if (watermarks.lotcab) {
-      const since = dateParam(minusDays(watermarks.lotcab, config.overlapDays));
-      lotcab = await query(`SELECT ${LOTCAB_COLS} FROM LOTCAB WHERE LC_FECPRO >= ? OR LC_FECCAN >= ?`, [since, since]);
-      const presentes = new Set(lotcab.map((r) => `${r.LC_PROG}|${r.LC_LOTE}`));
-      const faltantes = new Map<string, { prog: number; lote: number }>();
-      for (const row of avance) {
-        const prog = fbNumber(row.AV_PROGRAMA);
-        const lote = fbNumber(row.AV_LOTE);
-        if (prog === null || lote === null) continue;
-        const key = `${prog}|${lote}`;
-        if (!presentes.has(key) && !faltantes.has(key)) faltantes.set(key, { prog, lote });
-      }
-      if (faltantes.size > 0) {
-        lotcab.push(
-          ...(await fetchLotesPorPares(
-            query,
-            (l) => `SELECT ${LOTCAB_COLS} FROM LOTCAB WHERE LC_PROG = ? AND LC_LOTE IN (${l})`,
-            [...faltantes.values()]
-          ))
-        );
-      }
-    } else {
-      lotcab = await query(`SELECT ${LOTCAB_COLS} FROM LOTCAB`);
-    }
+    // Espejo completo de LOTCAB/LOTDET. Antes era incremental (por LC_FECPRO + escaneos +
+    // refresh de abiertos), lo que dejaba filas viejas congeladas: un lote que salia de
+    // LOTCAB (graduaba a producto terminado, o lo purgaban) seguia en bigzap_lotes con su
+    // ultimo status de piso e inflaba el WIP. Con SELECT completo + replaceJson la tabla es
+    // un espejo 1:1 de LOTCAB en cada ciclo, sin reconcile manual. ~38k filas: barato.
+    const lotcab = await query(`SELECT ${LOTCAB_COLS} FROM LOTCAB`);
 
-    const lotdet = watermarks.lotcab
-      ? await fetchLotesPorPares(
-          query,
-          (l) => `SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES,
-                         ${sizeColumns('LD_PTO')}
-                  FROM LOTDET WHERE LD_PROG = ? AND LD_LOTE IN (${l})`,
-          lotcab
-            .map((r) => ({ prog: fbNumber(r.LC_PROG), lote: fbNumber(r.LC_LOTE) }))
-            .filter((p): p is { prog: number; lote: number } => p.prog !== null && p.lote !== null)
-        )
-      : await query(`SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES,
-                            ${sizeColumns('LD_PTO')} FROM LOTDET`);
+    const lotdet = await query(`SELECT LD_PROG, LD_LOTE, LD_PEDIDO, LD_REN, LD_CODCTE, LD_CORRIDA, LD_PARES,
+                                       ${sizeColumns('LD_PTO')} FROM LOTDET`);
 
     const ptmov = watermarks.ptmov
       ? await query(
@@ -184,30 +177,29 @@ async function extract(watermarks: { avance: string | null; lotcab: string | nul
                   ${sizeColumns('PT_PTO')} FROM PTMOV`
         );
 
-    let observaciones: FbRow[];
-    if (!watermarks.lotcab) {
-      observaciones = await query('SELECT OL_PROGRAMA, OL_LOTE, OL_OBSERVA FROM OBSLOT');
+    // Producto terminado. Cabecera incremental por LC_FECPT; detalle por las llaves
+    // (prog, lote) de la cabecera extraida (igual que LOTCAB/LOTDET).
+    let ptlotcab: FbRow[];
+    if (watermarks.ptlotcab) {
+      const since = dateParam(minusDays(watermarks.ptlotcab, config.overlapDays));
+      ptlotcab = await query(`SELECT ${PTLOTCAB_COLS} FROM PTLOTCAB WHERE LC_FECPT >= ?`, [since]);
     } else {
-      const active = await query(
-        `SELECT o.OL_PROGRAMA, o.OL_LOTE, o.OL_OBSERVA
-         FROM OBSLOT o
-         JOIN LOTCAB l ON l.LC_PROG = o.OL_PROGRAMA AND l.LC_LOTE = o.OL_LOTE
-         WHERE l.LC_STATUS IN ('15', '25', '30') AND l.LC_CANCELA <> 'CA'`
-      );
-      const touched = await fetchLotesPorPares(
-        query,
-        (l) => `SELECT OL_PROGRAMA, OL_LOTE, OL_OBSERVA FROM OBSLOT
-                WHERE OL_PROGRAMA = ? AND OL_LOTE IN (${l})`,
-        lotcab
-          .map((r) => ({ prog: fbNumber(r.LC_PROG), lote: fbNumber(r.LC_LOTE) }))
-          .filter((p): p is { prog: number; lote: number } => p.prog !== null && p.lote !== null)
-      );
-      const byLote = new Map<string, FbRow>();
-      for (const row of [...active, ...touched]) byLote.set(`${row.OL_PROGRAMA}|${row.OL_LOTE}`, row);
-      observaciones = [...byLote.values()];
+      ptlotcab = await query(`SELECT ${PTLOTCAB_COLS} FROM PTLOTCAB`);
     }
 
-    return { depa, subdepto, estilos, lineas, combinaciones, clientes, pedidos, avance, lotcab, lotdet, ptmov, observaciones };
+    const ptlotdet = watermarks.ptlotcab
+      ? await fetchLotesPorPares(
+          query,
+          (l) => `SELECT ${PTLOTDET_COLS} FROM PTLOTDET WHERE LD_PROG = ? AND LD_LOTE IN (${l})`,
+          ptlotcab
+            .map((r) => ({ prog: fbNumber(r.LC_PROG), lote: fbNumber(r.LC_LOTE) }))
+            .filter((p): p is { prog: number; lote: number } => p.prog !== null && p.lote !== null)
+        )
+      : await query(`SELECT ${PTLOTDET_COLS} FROM PTLOTDET`);
+
+    const observaciones = await query('SELECT OL_PROGRAMA, OL_LOTE, OL_OBSERVA FROM OBSLOT');
+
+    return { depa, subdepto, estilos, lineas, combinaciones, clientes, pedidos, programacion, avance, lotcab, lotdet, ptmov, ptlotcab, ptlotdet, observaciones };
   });
 }
 
@@ -334,7 +326,7 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       .filter((r) => r.codigo)
   );
 
-  counts.lotes = await upsertJson(
+  counts.lotes = await replaceJson(
     'public.bigzap_lotes',
     [
       { name: 'programa', type: 'int' },
@@ -356,7 +348,6 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'etiqueta_impresa', type: 'boolean' },
       { name: 'pares_por_talla', type: 'jsonb' }
     ],
-    'programa, lote',
     data.lotcab
       .map((r) => ({
         programa: fbNumber(r.LC_PROG),
@@ -454,7 +445,51 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       .filter((r) => r.folio !== null)
   );
 
-  counts.lotes_pedidos = await upsertJson(
+  counts.programacion = await replaceJson(
+    'public.bigzap_programacion_renglones',
+    [
+      { name: 'pedido', type: 'int' },
+      { name: 'renglon', type: 'int' },
+      { name: 'entrega', type: 'date' },
+      { name: 'fecha_salida', type: 'date' },
+      { name: 'fecha_cancelacion', type: 'date' },
+      { name: 'fecha_programacion', type: 'date' },
+      { name: 'estilo', type: 'text' },
+      { name: 'piecol', type: 'text' },
+      { name: 'combina', type: 'text' },
+      { name: 'corrida', type: 'text' },
+      { name: 'cliente', type: 'text' },
+      { name: 'pedido_cliente', type: 'text' },
+      { name: 'pares_renglon', type: 'int' },
+      { name: 'pares_programar', type: 'int' },
+      { name: 'pares_aprogramados', type: 'int' },
+      { name: 'liberado', type: 'boolean' },
+      { name: 'status', type: 'text' }
+    ],
+    data.programacion
+      .map((r) => ({
+        pedido: fbNumber(r.RE_FOLPED),
+        renglon: fbNumber(r.RE_NUMREN),
+        entrega: fbDate(r.RE_FECENT),
+        fecha_salida: fbDate(r.RE_FECSAL),
+        fecha_cancelacion: fbDate(r.RE_FECCAN),
+        fecha_programacion: fbDate(r.RE_FETEPRO),
+        estilo: fbString(r.RE_CODEST),
+        piecol: fbString(r.RE_PIECOL),
+        combina: fbString(r.RE_COMBINA),
+        corrida: fbString(r.RE_CORRIDA),
+        cliente: fbString(r.RE_CODCTE),
+        pedido_cliente: fbString(r.RE_PEDCTE),
+        pares_renglon: fbNumber(r.RE_PARREN),
+        pares_programar: fbNumber(r.RE_PARPRO),
+        pares_aprogramados: fbNumber(r.RE_PARAPRO),
+        liberado: fbString(r.RE_LIBERADO) === 'S',
+        status: fbString(r.RE_STATUS)
+      }))
+      .filter((r) => r.pedido !== null && r.renglon !== null)
+  );
+
+  counts.lotes_pedidos = await replaceJson(
     'public.bigzap_lotes_pedidos',
     [
       { name: 'programa', type: 'int' },
@@ -466,7 +501,6 @@ async function load(data: Extraction): Promise<Record<string, number>> {
       { name: 'pares', type: 'int' },
       { name: 'pares_por_talla', type: 'jsonb' }
     ],
-    'programa, lote, pedido, renglon',
     data.lotdet
       .map((r) => ({
         programa: fbNumber(r.LD_PROG),
@@ -515,14 +549,93 @@ async function load(data: Extraction): Promise<Record<string, number>> {
     })
   );
 
-  counts.observaciones_lote = await upsertJson(
+  counts.pt_lotes = await upsertJson(
+    'public.bigzap_pt_lotes',
+    [
+      { name: 'programa', type: 'int' },
+      { name: 'lote', type: 'int' },
+      { name: 'estilo', type: 'text' },
+      { name: 'piecol', type: 'text' },
+      { name: 'combina', type: 'text' },
+      { name: 'corrida', type: 'text' },
+      { name: 'fecha_pt', type: 'date' },
+      { name: 'observacion', type: 'text' },
+      { name: 'pares', type: 'int' },
+      { name: 'status', type: 'text' },
+      { name: 'calidad', type: 'int' },
+      { name: 'disponible', type: 'text' },
+      { name: 'precio_dir', type: 'numeric' },
+      { name: 'almacen', type: 'text' },
+      { name: 'pasillo', type: 'text' },
+      { name: 'tarima', type: 'text' },
+      { name: 'pares_por_talla', type: 'jsonb' }
+    ],
+    'programa, lote',
+    data.ptlotcab
+      .map((r) => ({
+        programa: fbNumber(r.LC_PROG),
+        lote: fbNumber(r.LC_LOTE),
+        estilo: fbString(r.LC_ESTILO),
+        piecol: fbString(r.LC_PIECOL),
+        combina: fbString(r.LC_COMBINA),
+        corrida: fbString(r.LC_CORRIDA),
+        fecha_pt: fbDate(r.LC_FECPT),
+        observacion: fbString(r.LC_OBSERVA),
+        pares: fbNumber(r.LC_PARLOT),
+        status: fbString(r.LC_STATUS),
+        calidad: fbNumber(r.LC_CALIDAD),
+        disponible: fbString(r.LC_DISPO),
+        precio_dir: fbNumber(r.LC_PREDIR),
+        almacen: fbString(r.LC_ALMACEN),
+        pasillo: fbString(r.LC_PASILLO),
+        tarima: fbString(r.LC_TARIMA),
+        pares_por_talla: paresPorTalla(r, 'LC_PTO')
+      }))
+      .filter((r) => r.programa !== null && r.lote !== null)
+  );
+
+  counts.pt_lotes_detalle = await upsertJson(
+    'public.bigzap_pt_lotes_detalle',
+    [
+      { name: 'programa', type: 'int' },
+      { name: 'lote', type: 'int' },
+      { name: 'pedido', type: 'int' },
+      { name: 'renglon', type: 'int' },
+      { name: 'cliente', type: 'text' },
+      { name: 'corrida', type: 'text' },
+      { name: 'pares', type: 'int' },
+      { name: 'calidad', type: 'int' },
+      { name: 'disponible', type: 'text' },
+      { name: 'origen', type: 'text' },
+      { name: 'modelo', type: 'text' },
+      { name: 'pares_por_talla', type: 'jsonb' }
+    ],
+    'programa, lote, pedido, renglon',
+    data.ptlotdet
+      .map((r) => ({
+        programa: fbNumber(r.LD_PROG),
+        lote: fbNumber(r.LD_LOTE),
+        pedido: fbNumber(r.LD_PEDIDO),
+        renglon: fbNumber(r.LD_REN),
+        cliente: fbString(r.LD_CODCTE),
+        corrida: fbString(r.LD_CORRIDA),
+        pares: fbNumber(r.LD_PARES),
+        calidad: fbNumber(r.LD_CALIDAD),
+        disponible: fbString(r.LD_DISPO),
+        origen: fbString(r.LD_ORIGEN),
+        modelo: fbString(r.LD_MODELO),
+        pares_por_talla: paresPorTalla(r, 'LD_PTO')
+      }))
+      .filter((r) => r.programa !== null && r.lote !== null && r.pedido !== null && r.renglon !== null)
+  );
+
+  counts.observaciones_lote = await replaceJson(
     'public.bigzap_lote_observaciones',
     [
       { name: 'programa', type: 'int' },
       { name: 'lote', type: 'int' },
       { name: 'observacion', type: 'text' }
     ],
-    'programa, lote',
     data.observaciones
       .map((r) => ({
         programa: fbNumber(r.OL_PROGRAMA),
@@ -545,10 +658,12 @@ export async function runSyncCycle(full: boolean): Promise<CycleResult> {
   const startedAt = new Date();
   try {
     const state = await getSyncState();
+    // LOTCAB/LOTDET/RENGLON/OBSLOT se espejean completos cada ciclo (replaceJson), no usan
+    // watermark. Solo los logs append-only (AVANCE, PTMOV, PTLOTCAB) son incrementales.
     const watermarks = {
       avance: full ? null : state.get('avance') ?? null,
-      lotcab: full ? null : state.get('lotcab') ?? null,
-      ptmov: full ? null : state.get('ptmov') ?? null
+      ptmov: full ? null : state.get('ptmov') ?? null,
+      ptlotcab: full ? null : state.get('ptlotcab') ?? null
     };
     const mode = watermarks.avance ? 'incremental' : 'completo';
 
@@ -557,22 +672,19 @@ export async function runSyncCycle(full: boolean): Promise<CycleResult> {
 
     let wmAvance: string | null = null;
     for (const r of data.avance) wmAvance = maxDate(wmAvance, fbDate(r.AV_FECHA));
-    let wmLotcab: string | null = null;
-    for (const r of data.lotcab) {
-      wmLotcab = maxDate(wmLotcab, fbDate(r.LC_FECPRO));
-      wmLotcab = maxDate(wmLotcab, fbDate(r.LC_FECCAN));
-    }
     let wmPtmov: string | null = null;
     for (const r of data.ptmov) wmPtmov = maxDate(wmPtmov, fbDate(r.PT_FECMOV));
+    let wmPtlotcab: string | null = null;
+    for (const r of data.ptlotcab) wmPtlotcab = maxDate(wmPtlotcab, fbDate(r.LC_FECPT));
 
     const next = {
       avance: maxDate(watermarks.avance, wmAvance),
-      lotcab: maxDate(watermarks.lotcab, wmLotcab),
-      ptmov: maxDate(watermarks.ptmov, wmPtmov)
+      ptmov: maxDate(watermarks.ptmov, wmPtmov),
+      ptlotcab: maxDate(watermarks.ptlotcab, wmPtlotcab)
     };
     if (next.avance) await setSyncState('avance', next.avance);
-    if (next.lotcab) await setSyncState('lotcab', next.lotcab);
     if (next.ptmov) await setSyncState('ptmov', next.ptmov);
+    if (next.ptlotcab) await setSyncState('ptlotcab', next.ptlotcab);
 
     const durationMs = Date.now() - startedAt.getTime();
     await recordSyncRun({ status: 'ok', startedAt, payload: { mode, durationMs, counts } });

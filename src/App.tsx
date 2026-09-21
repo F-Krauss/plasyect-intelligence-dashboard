@@ -24,6 +24,7 @@ import {
   CatalogosView,
   ConfiguracionView 
 } from './views/ViewRegistry';
+import { AsistenteIAWidget } from './components/AsistenteIAWidget';
 import { motion, AnimatePresence } from 'motion/react';
 import { PermissionKey } from './types';
 
@@ -235,6 +236,7 @@ function DashboardLayout() {
 
       </div>
 
+      {can('dashboard.view') && <AsistenteIAWidget />}
     </div>
   );
 }

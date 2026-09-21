@@ -27,7 +27,10 @@ const configSchema = z.object({
   // Zona horaria de la planta. escaneado_at se guarda como timestamptz (UTC);
   // hora del dia / turno / fecha de los tableros deben calcularse en esta TZ,
   // no en UTC. Debe coincidir con PLANT_TZ del sync-service.
-  PLANT_TZ: z.string().default('America/Mexico_City')
+  PLANT_TZ: z.string().default('America/Mexico_City'),
+  // Asistente IA (chat): sin GEMINI_API_KEY el endpoint /api/ai/chat responde 503.
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default('gemini-2.5-flash')
 });
 
 export const config = configSchema.parse(process.env);

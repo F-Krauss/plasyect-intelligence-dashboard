@@ -117,12 +117,13 @@ export function mapTarjetaToBatch(row: TarjetaViajeraRow, tenantId: TenantId): B
   const stage = resolveStage(row);
   const entregado = stage === 'facturacion' || row.status_depto === '50';
   const cancelado = row.cancelado === true;
-  const status: string = cancelado ? 'ARCHIVADO' : entregado ? 'ENTREGADO' : 'OPTIMO';
   const pares = row.pares ?? 0;
   const modelName = row.estilo_nombre || row.estilo || 'S/Modelo';
   const clienteNombre = row.cliente_nombre || row.cliente_codigo || 'S/Cliente';
   const orderId = row.pedido_folio != null ? `PED-${row.pedido_folio}` : `LOTE-${row.tarjeta}`;
   const fechaCompromiso = row.pedido_fecha_salida;
+  const overdue = deliveryRisk(fechaCompromiso, entregado) === 'VENCIDO';
+  const status: string = cancelado ? 'ARCHIVADO' : entregado ? 'ENTREGADO' : overdue ? 'CRITICO' : 'OPTIMO';
 
   return {
     id: row.tarjeta,

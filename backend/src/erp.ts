@@ -64,6 +64,19 @@ export interface EjecutivoData {
   calidad: CalidadRow[];
 }
 
+function dailyProductionFrom(rows: HourlyProductionRow[]): DailyProductionRow[] {
+  const dailyMap = new Map<string, { pares: number; tarjetas: number }>();
+  for (const row of rows) {
+    const current = dailyMap.get(row.fecha) ?? { pares: 0, tarjetas: 0 };
+    current.pares += row.produccionReal;
+    current.tarjetas += 1;
+    dailyMap.set(row.fecha, current);
+  }
+  return Array.from(dailyMap.entries())
+    .map(([fecha, data]) => ({ fecha, ...data }))
+    .sort((a, b) => a.fecha.localeCompare(b.fecha));
+}
+
 export interface DailyProductionRow {
   fecha: string;
   pares: number;
@@ -185,9 +198,8 @@ export interface ErpOperationalResponse {
   stagePipeline: StagePipelineRow[];
   orderRisk: OrderRiskSummary;
   orderPipeline: OrderPipelineRow[];
-  // Lotes activos + vencidos + embarcados hoy, universo completo de tarjetas_viajeras
-  // (sin el cap del bootstrap), mapeados con la misma logica canonica. Fuente unica
-  // para que Pipeline por Lote coincida con Pipeline por Pedido.
+  // Lotes activos del piso, desde el mismo snapshot de status_depto que stagePipeline.
+  // Fuente unica para que Pipeline por Lote cuadre con los agregados del Ejecutivo.
   lotePipeline: Batch[];
 }
 
@@ -398,12 +410,13 @@ function daysLeftFromDate(value: unknown, today = new Date()): number | null {
   return Math.ceil((due.getTime() - base.getTime()) / 86_400_000);
 }
 
-function isCurrentPlantWipRow(row: ErpRecord, now = new Date()): boolean {
+const PLANT_FLOOR_STATUSES = new Set(['15', '20', '25', '30', '35', '39', '40']);
+const OPERATIONAL_ORDER_STATUSES = new Set(['01', ...PLANT_FLOOR_STATUSES]);
+
+function isCurrentOperationalOrderRow(row: ErpRecord): boolean {
   const status = String(row.status_depto ?? '');
-  if (status === '50') return false;
-  const lastScan = toIsoOrNull(row.ultimo_escaneo);
-  if (!lastScan) return false;
-  return now.getTime() - new Date(lastScan).getTime() <= config.BIGZAP_PLANT_ACTIVE_DAYS * 86_400_000;
+  if (!OPERATIONAL_ORDER_STATUSES.has(status)) return false;
+  return row.cancelado !== true;
 }
 
 function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
@@ -412,16 +425,16 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
   orderPipeline: OrderPipelineRow[];
   orderRisk: OrderRiskSummary;
 } {
-  const active = tarjetas.filter((row) => row.cancelado !== true && isCurrentPlantWipRow(row));
+  const active = tarjetas.filter((row) => isCurrentOperationalOrderRow(row));
   const stageMap = new Map<string, { batches: number; pairs: number; minutesTotal: number; minutesCount: number }>();
   for (const row of active) {
     const stageId = stageIdFromDepto(row.status_depto, row.stage_id);
     const current = stageMap.get(stageId) ?? { batches: 0, pairs: 0, minutesTotal: 0, minutesCount: 0 };
     current.batches += 1;
     current.pairs += Number(row.pares ?? 0);
-    const lastScan = toIsoOrNull(row.ultimo_escaneo);
-    if (lastScan) {
-      current.minutesTotal += Math.max(0, Math.round((Date.now() - new Date(lastScan).getTime()) / 60000));
+    const ageAnchor = toIsoOrNull(row.ultimo_escaneo) || toIsoOrNull(row.fecha_programacion);
+    if (ageAnchor) {
+      current.minutesTotal += Math.max(0, Math.round((Date.now() - new Date(ageAnchor).getTime()) / 60000));
       current.minutesCount += 1;
     }
     stageMap.set(stageId, current);
@@ -441,16 +454,16 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
         wipPct: activePairs > 0 ? Number(((row.pairs / activePairs) * 100).toFixed(1)) : 0,
         saturation: saturationFor(row.batches, avgMinutes)
       };
-    })
-    .filter((row) => row.batches > 0 || row.pairs > 0);
+    });
 
   const orderMap = new Map<string, OrderPipelineRow & { weighted: number; timeTotal: number; timeCount: number }>();
   for (const row of active) {
-    if (row.cancelado === true || row.pedido_folio == null) continue;
+    if (row.pedido_folio == null) continue;
     const id = `PED-${String(row.pedido_folio)}`;
     const stageId = stageIdFromDepto(row.status_depto, row.stage_id);
     const pairs = Number(row.pares ?? 0);
-    const delivered = String(row.status_depto ?? '') === '50' || stageId === 'facturacion';
+    const produced = stageId === 'embarque' || stageId === 'facturacion';
+    const shipped = stageId === 'facturacion';
     const current = orderMap.get(id) ?? {
       id,
       cliente: String(row.cliente_nombre ?? row.cliente_codigo ?? 'S/Cliente'),
@@ -482,15 +495,15 @@ function buildOperationalSummariesFromTarjetas(tarjetas: ErpRecord[]): {
     };
 
     current.totalPares += pairs;
-    current.producedPairs += delivered ? pairs : 0;
-    current.shippedPairs += delivered ? pairs : 0;
-    current.inProcessPairs += delivered ? 0 : pairs;
+    current.producedPairs += produced ? pairs : 0;
+    current.shippedPairs += shipped ? pairs : 0;
+    current.inProcessPairs += shipped ? 0 : pairs;
     current.weighted += pairs * (STAGE_WEIGHTS[stageId] ?? 14);
     current.pairsByStage[stageId] = (current.pairsByStage[stageId] ?? 0) + pairs;
     current.batchesCount += 1;
-    const lastScan = toIsoOrNull(row.ultimo_escaneo);
-    if (lastScan) {
-      current.timeTotal += Math.max(0, Math.round((Date.now() - new Date(lastScan).getTime()) / 60000));
+    const ageAnchor = toIsoOrNull(row.ultimo_escaneo) || toIsoOrNull(row.fecha_programacion);
+    if (ageAnchor) {
+      current.timeTotal += Math.max(0, Math.round((Date.now() - new Date(ageAnchor).getTime()) / 60000));
       current.timeCount += 1;
     }
     orderMap.set(id, current);
@@ -608,80 +621,47 @@ class PgErpService implements ErpService {
              ('25', 'ADUANA', 3::numeric, 500),
              ('30', 'BANDA', 4::numeric, 620),
              ('35', 'BANDA', 4::numeric, 620),
-             ('39', 'SALIDAS DE TERCERA', 4.5::numeric, 500),
+             ('39', 'BANDA', 4::numeric, 620),
              ('40', 'EMBARQUE', 5::numeric, 500),
              ('50', 'FACTURACION', 6::numeric, 500)
            ) as s(depto, area, orden, meta_hora)
          ),
-         area_def as (
-           select distinct area, orden, meta_hora from stage_def
+         relevant_lots as (
+           select distinct programa, lote
+           from public.bigzap_avance
+           where escaneado_at is not null
+             and escaneado_at >= ($1::date - interval '3 days') at time zone $3
+             and escaneado_at <  ($2::date + interval '4 days') at time zone $3
          ),
-         scans as (
+         -- PRODUCCION (throughput) por etapa, distinta del WIP (pares EN la etapa).
+         -- Modelo de "salida": un depto PRODUCE el lote cuando lo entrega al siguiente.
+         -- Cada fila de AVANCE guarda en GEN_POR el depto de ORIGEN (de donde venia el
+         -- lote), por eso la produccion de un depto = los escaneos cuyo GEN_POR = ese
+         -- depto, fechados en ESE escaneo (el momento del traspaso/salida). Una fila por
+         -- (lote, area), tomando el ultimo escaneo para deduplicar (20/25 = Aduana,
+         -- 30/35 = Banda). Un lote que sigue EN un depto (sin salir) todavia NO cuenta
+         -- como producido por el; solo cuenta al escanearse hacia el siguiente depto.
+         production_scans as (
            select
              a.programa,
              a.lote,
-             a.depto,
              sd.area,
              sd.orden,
              sd.meta_hora,
              a.escaneado_at,
-             lead(sd.orden) over (partition by a.programa, a.lote order by a.escaneado_at) as next_orden,
-             lead(a.escaneado_at) over (partition by a.programa, a.lote order by a.escaneado_at) as next_scan_at
+             row_number() over (
+               partition by a.programa, a.lote, sd.area
+               order by a.escaneado_at desc
+             ) as rn
            from public.bigzap_avance a
-           join stage_def sd on sd.depto = a.depto
+           join relevant_lots rl on rl.programa = a.programa and rl.lote = a.lote
+           join stage_def sd on sd.depto = a.gen_por
            where a.escaneado_at is not null
          ),
-         exact_completed as (
-           select
-             s.programa,
-             s.lote,
-             s.area,
-             s.orden,
-             s.meta_hora,
-             case when s.depto = '50' then s.escaneado_at else s.next_scan_at end as event_at
-           from scans s
-           where (s.next_scan_at is not null and s.next_orden > s.orden)
-              or s.depto = '50'
-         ),
-         current_lotes as (
-           select
-             l.programa,
-             l.lote,
-             l.pares,
-             l.estilo,
-             l.piecol,
-             l.combina,
-             l.fecha_programacion,
-             l.status_depto,
-             sd.orden as current_orden,
-             tv.ultimo_escaneo
-           from public.bigzap_lotes l
-           left join stage_def sd on sd.depto = l.status_depto
-           left join public.tarjetas_viajeras tv on tv.programa = l.programa and tv.lote = l.lote
-           where l.cancelado = false
-         ),
-         inferred_completed as (
-           select
-             cl.programa,
-             cl.lote,
-             ad.area,
-             ad.orden,
-             ad.meta_hora,
-             coalesce(cl.ultimo_escaneo, cl.fecha_programacion::timestamp at time zone $3) as event_at
-           from current_lotes cl
-           join area_def ad on cl.current_orden > ad.orden and ad.area <> 'SALIDAS DE TERCERA'
-           where not exists (
-             select 1
-             from exact_completed ec
-             where ec.programa = cl.programa
-               and ec.lote = cl.lote
-               and ec.area = ad.area
-           )
-         ),
          completed as (
-           select * from exact_completed
-           union all
-           select * from inferred_completed
+           select programa, lote, area, orden, meta_hora, escaneado_at as event_at
+           from production_scans
+           where rn = 1
          ),
          completed_local as (
            -- event_at es timestamptz (UTC). Lo bajamos a hora de pared de la
@@ -844,7 +824,7 @@ class PgErpService implements ErpService {
   }
 
   async getOperational(fechaInicio: string, fechaFin: string): Promise<ErpOperationalResponse> {
-    const [ejecutivo, movements, sync, metaRows, activeRows, dailyRows, modelRows, clientsRows, catalogModelsRows, deptRows, lineRows, combinationRows, stageRows, orderRows, loteRows] = await Promise.all([
+    const [ejecutivo, movements, sync, metaRows, activeRows, modelRows, clientsRows, catalogModelsRows, deptRows, lineRows, combinationRows, stageRows, orderRows, loteRows] = await Promise.all([
       this.getEjecutivoDashboard(fechaInicio, fechaFin),
       this.getMovimientos(fechaInicio, fechaFin, 500),
       this.getSyncStatus(),
@@ -868,33 +848,69 @@ class PgErpService implements ErpService {
         [fechaInicio, fechaFin]
       ),
       this.pool.query<ErpRecord>(
-        `with current_plant as (
-           select *
-           from public.tarjetas_viajeras
-           where cancelado = false
-             and coalesce(status_depto, '') <> '50'
-             and ultimo_escaneo is not null
-             and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
+        // WIP "Pares en Proceso" = snapshot de LOTCAB.LC_STATUS para lotes con actividad
+        // reciente (mismo gate de BIGZAP_PLANT_ACTIVE_DAYS que stagePipeline/lotePipeline
+        // mas abajo). LOTCAB no borra lotes que ya salieron de piso (graduaron a PT o se
+        // facturaron): sin este gate, lotes "congelados" en status 40 desde hace meses/años
+        // inflaban este total muy por encima de lo que stagePipeline reporta por etapa.
+        `with last_scans as (
+           select programa, lote, max(escaneado_at) as ultimo_escaneo
+           from public.bigzap_avance
+           where escaneado_at is not null
+           group by programa, lote
+         ),
+         current_plant as (
+           select l.programa, l.lote, l.pares,
+             lp.pedido as pedido_folio
+           from public.bigzap_lotes l
+           left join last_scans ls on ls.programa = l.programa and ls.lote = l.lote
+           left join lateral (
+             select lp.pedido
+             from public.bigzap_lotes_pedidos lp
+             join public.bigzap_programacion_renglones pr
+               on pr.pedido = lp.pedido and pr.renglon = lp.renglon
+             where lp.programa = l.programa and lp.lote = l.lote
+             order by lp.pedido, lp.renglon limit 1
+           ) lp on true
+           where l.cancelado = false
+             and coalesce(l.status_depto, '') in ('15','20','25','30','35','39','40')
+             and lp.pedido is not null
+             and coalesce(ls.ultimo_escaneo, l.fecha_programacion::timestamp at time zone $1)
+                 >= (now() at time zone $1) - ($2::int * interval '1 day')
+         ),
+         backlog_orders as (
+           select distinct pedido as pedido_folio
+           from public.bigzap_programacion_renglones
+           where coalesce(pares_aprogramados, 0) > 0
+             and pedido is not null
+         ),
+         programming_orders as (
+           -- Las tarjetas creadas por explosión viven en 01 hasta que el lote
+           -- entra al piso. Son pedidos vigentes, aunque todavía no sean WIP.
+           select distinct lp.pedido as pedido_folio
+           from public.bigzap_lotes_pedidos lp
+           join public.bigzap_lotes l on l.programa = lp.programa and l.lote = lp.lote
+           join public.bigzap_programacion_renglones pr
+             on pr.pedido = lp.pedido and pr.renglon = lp.renglon
+           where lp.pedido is not null
+             and l.cancelado = false
+             and coalesce(l.status_depto, '') = '01'
          )
          select
-           (count(distinct pedido_folio) filter (where pedido_folio is not null))::int as orders,
+           (
+             select count(distinct pedido_folio)::int
+             from (
+               select pedido_folio from current_plant where pedido_folio is not null
+               union all
+               select pedido_folio from backlog_orders
+               union all
+               select pedido_folio from programming_orders
+             ) active_orders
+           ) as orders,
            count(*)::int as batches,
            coalesce(sum(coalesce(pares, 0)), 0)::int as pairs
          from current_plant`,
         [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
-      ),
-      this.pool.query<ErpRecord>(
-        `select a.fecha::text as fecha,
-                coalesce(sum(l.pares), 0)::int as pares,
-                count(*)::int as tarjetas
-         from public.bigzap_avance a
-         left join public.bigzap_lotes l on l.programa = a.programa and l.lote = a.lote
-         where a.fecha between $1::date and $2::date
-           and a.depto = '15'
-           and a.escaneado_at is not null
-         group by a.fecha
-         order by a.fecha`,
-        [fechaInicio, fechaFin]
       ),
       this.pool.query<ErpRecord>(
         `with lot_dim as (
@@ -1136,11 +1152,80 @@ class PgErpService implements ErpService {
         `select codigo as id, codigo, nombre as name from public.bigzap_combinaciones order by codigo`
       ),
       this.pool.query<ErpRecord>(
-        `with active as (
+        `with stage_defs(stage_id, sort_order) as (
+           values
+             ('alta_pedido', 1),
+             ('almacen', 2),
+             ('inyeccion', 3),
+             ('estabilizacion', 4),
+             ('aduana', 5),
+             ('banda', 6),
+             ('embarque', 7),
+             ('facturacion', 8)
+         ),
+         last_scans as (
+           select programa, lote, max(escaneado_at) as ultimo_escaneo
+           from public.bigzap_avance
+           where escaneado_at is not null
+           group by programa, lote
+         ),
+         -- El universo de lotes tiene que ser EXACTAMENTE el mismo que el de la sabana de
+         -- pedidos (segunda query de este Promise.all): misma dedup por generacion y misma
+         -- visibilidad por pedido. Antes esta query aplicaba el gate de recencia lote por
+         -- lote mientras la sabana lo aplica por pedido, y las dos vistas se contradecian:
+         -- Inyeccion mostraba 1,040 pares en el pipeline vs 1,910 en la sabana (35 lotes
+         -- con ultimo escaneo a 83 dias, colgados de pedidos que si estaban activos).
+         ranked_lotes as (
+           select
+             lp.pedido,
+             lp.renglon,
+             lp.programa,
+             lp.lote,
+             lp.pares,
+             l.fecha_programacion,
+             l.status_depto,
+             l.cancelado,
+             dense_rank() over (
+               partition by lp.pedido, lp.renglon
+               order by l.fecha_programacion desc nulls last, l.synced_at desc, lp.programa desc
+             ) as generation_rank
+           from public.bigzap_lotes_pedidos lp
+           join public.bigzap_lotes l on l.programa = lp.programa and l.lote = lp.lote
+           join public.bigzap_programacion_renglones pr
+             on pr.pedido = lp.pedido and pr.renglon = lp.renglon
+           where lp.pedido is not null
+         ),
+         current_lotes_source as (
+           select *
+           from ranked_lotes
+           where generation_rank = 1
+             and cancelado = false
+         ),
+         -- El gate de recencia protege sólo al piso productivo. Las tarjetas creadas
+         -- por explosión permanecen legítimamente en Programación (01), incluso sin
+         -- un escaneo posterior, hasta que se transfieran a producción.
+         plant_visible_orders as (
+           select distinct lp.pedido
+           from current_lotes_source lp
+           left join last_scans ls on ls.programa = lp.programa and ls.lote = lp.lote
+           where lp.pedido is not null
+             and (
+               coalesce(lp.status_depto, '') = '01'
+               or (
+                 coalesce(lp.status_depto, '') in ('15','20','25','30','35','39','40')
+                 and (ls.ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
+               )
+               or (
+                 coalesce(lp.status_depto, '') = '50'
+                 and (ls.ultimo_escaneo at time zone $1)::date = (now() at time zone $1)::date
+               )
+             )
+         ),
+         active as (
            select
              coalesce(
-               nullif(stage_id, ''),
-               case coalesce(status_depto, '')
+               nullif(ds.stage_id, ''),
+               case coalesce(lp.status_depto, '')
                  when '01' then 'alta_pedido'
                  when '10' then 'almacen'
                  when '15' then 'inyeccion'
@@ -1154,61 +1239,137 @@ class PgErpService implements ErpService {
                  else 'alta_pedido'
                end
              ) as stage_id,
-             coalesce(pares, 0)::numeric as pares,
-             ultimo_escaneo
-           from public.tarjetas_viajeras
-           where cancelado = false
-             and coalesce(status_depto, '') <> '50'
-             and ultimo_escaneo is not null
-             and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
+             coalesce(lp.pares, 0)::numeric as pares,
+             coalesce(ls.ultimo_escaneo, lp.fecha_programacion::timestamp at time zone $1) as age_anchor
+           from plant_visible_orders vo
+           join current_lotes_source lp on lp.pedido = vo.pedido
+           left join last_scans ls on ls.programa = lp.programa and ls.lote = lp.lote
+           left join public.bigzap_departamentos ds on ds.codigo = lp.status_depto
+           where coalesce(lp.status_depto, '') in ('01','15','20','25','30','35','39','40')
+           union all
+           select
+             -- "Alta de Pedido" = pantalla "Programación de la Producción" de BixApp.
+             -- "Pares X Prog" = backlog de renglones listos para crear lote pero aún sin
+             -- iniciar = SUM(pares_aprogramados) (RE_PARAPRO), sin filtro de fecha. (RE_PARPRO
+             -- son pares todavía NO liberados a programación; RE_PARAPRO los ya liberados
+             -- pendientes de volverse lote.) Verificado contra BixApp: 20,700.
+             'alta_pedido' as stage_id,
+             coalesce(pares_aprogramados, 0)::numeric as pares,
+             fecha_programacion::timestamp at time zone $1 as age_anchor
+           from public.bigzap_programacion_renglones
+           where coalesce(pares_aprogramados, 0) > 0
          ),
          grouped as (
            select
              stage_id,
              count(*)::int as batches,
              coalesce(sum(pares), 0)::int as pairs,
-             round(avg(greatest(0, extract(epoch from (now() - ultimo_escaneo)) / 60.0)) filter (where ultimo_escaneo is not null))::int as avg_minutes
+             round(avg(greatest(0, extract(epoch from (now() - age_anchor)) / 60.0)) filter (where age_anchor is not null))::int as avg_minutes
            from active
            group by stage_id
          ),
          total as (
-           select coalesce(sum(pares), 0)::numeric as total_pairs from active
+           -- "Pares en Proceso" del piso (= BixApp Planta Productiva, p.ej. 9,846). Alta de
+           -- Pedido es backlog pre-producción y NO entra al denominador del WIP%, para que
+           -- los % del piso cuadren con el total mostrado y no se diluyan.
+           select coalesce(sum(pares), 0)::numeric as total_pairs from active where stage_id <> 'alta_pedido'
          )
          select
-           stage_id,
-           batches,
-           pairs,
-           avg_minutes,
-           case when total.total_pairs > 0 then round((pairs::numeric / total.total_pairs) * 100, 1)::float else 0 end as wip_pct
-         from grouped, total
-         order by case stage_id
-           when 'alta_pedido' then 1
-           when 'almacen' then 2
-           when 'inyeccion' then 3
-           when 'estabilizacion' then 4
-           when 'aduana' then 5
-           when 'banda' then 6
-           when 'embarque' then 7
-           when 'facturacion' then 8
-           else 99
-         end`
+           sd.stage_id,
+           coalesce(g.batches, 0)::int as batches,
+           coalesce(g.pairs, 0)::int as pairs,
+           g.avg_minutes,
+           case when sd.stage_id = 'alta_pedido' then 0::float
+                when total.total_pairs > 0 then round((coalesce(g.pairs, 0)::numeric / total.total_pairs) * 100, 1)::float
+                else 0 end as wip_pct
+        from stage_defs sd
+        cross join total
+        left join grouped g on g.stage_id = sd.stage_id
+         order by sd.sort_order`
         ,
         [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       ),
       this.pool.query<ErpRecord>(
-        `with lotes as (
+        `with last_scans as (
+           select programa, lote, max(escaneado_at) as ultimo_escaneo
+           from public.bigzap_avance
+           where escaneado_at is not null
+           group by programa, lote
+         ),
+         ranked_lotes as (
            select
-             'PED-' || pedido_folio::text as id,
-             pedido_folio,
-             coalesce(cliente_nombre, cliente_codigo, 'S/Cliente') as cliente,
-             pedido_oc as oc,
-             coalesce(estilo_nombre, estilo, 'S/Modelo') as modelo,
-             coalesce(color_nombre, piecol, combina, 'N/D') as color,
-             fecha_programacion,
-             pedido_fecha_salida,
+             lp.programa,
+             lp.lote,
+             lp.pedido,
+             lp.renglon,
+             lp.cliente,
+             lp.corrida,
+             lp.pares,
+             lp.pares_por_talla,
+             l.estilo,
+             l.piecol,
+             l.combina,
+             l.fecha_programacion,
+             l.status_depto,
+             l.cancelado,
+             dense_rank() over (
+               partition by lp.pedido, lp.renglon
+               order by l.fecha_programacion desc nulls last, l.synced_at desc, lp.programa desc
+             ) as generation_rank
+           from public.bigzap_lotes_pedidos lp
+           join public.bigzap_lotes l on l.programa = lp.programa and l.lote = lp.lote
+           join public.bigzap_programacion_renglones pr on pr.pedido = lp.pedido and pr.renglon = lp.renglon
+           where lp.pedido is not null
+         ),
+         current_lotes_source as (
+           select *
+           from ranked_lotes
+           where generation_rank = 1
+             and cancelado = false
+         ),
+         plant_visible_orders as (
+           select distinct lp.pedido
+           from current_lotes_source lp
+           left join last_scans ls on ls.programa = lp.programa and ls.lote = lp.lote
+           where lp.pedido is not null
+             and (
+               -- Programación no depende de un escaneo de producción: la tarjeta
+               -- nace ahí durante la explosión y debe quedar visible hasta avanzar.
+               coalesce(lp.status_depto, '') = '01'
+               or (
+                 coalesce(lp.status_depto, '') in ('15','20','25','30','35','39','40')
+                 and (ls.ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
+               )
+               or (
+                 coalesce(lp.status_depto, '') = '50'
+                 and (ls.ultimo_escaneo at time zone $1)::date = (now() at time zone $1)::date
+               )
+             )
+         ),
+         visible_orders as (
+           select distinct pedido
+           from plant_visible_orders
+           union
+           select distinct pr.pedido
+           from public.bigzap_programacion_renglones pr
+           where pr.pedido is not null
+             and coalesce(pr.pares_aprogramados, 0) > 0
+         ),
+         lotes_raw as (
+           select
+             'PED-' || lp.pedido::text as id,
+             lp.pedido as pedido_folio,
+             lp.programa,
+             lp.lote,
+             coalesce(c.nombre, lp.cliente, p.cliente, 'S/Cliente') as cliente,
+             p.pedido_cliente as oc,
+             coalesce(e.nombre, lp.estilo, 'S/Modelo') as modelo,
+             coalesce(cb.nombre, lp.piecol, lp.combina, 'N/D') as color,
+             lp.fecha_programacion,
+             p.fecha_salida as pedido_fecha_salida,
              coalesce(
-               nullif(stage_id, ''),
-               case coalesce(status_depto, '')
+               nullif(ds.stage_id, ''),
+               case coalesce(lp.status_depto, '')
                  when '01' then 'alta_pedido'
                  when '10' then 'almacen'
                  when '15' then 'inyeccion'
@@ -1222,32 +1383,58 @@ class PgErpService implements ErpService {
                  else 'alta_pedido'
                end
              ) as stage_id,
-             coalesce(pares, 0)::numeric as pares,
-             ultimo_escaneo,
-             coalesce(status_depto, '') = '50' as delivered,
+             coalesce(lp.pares, 0)::numeric as pares,
+             ls.ultimo_escaneo,
              p.origen,
              p.porcentaje_descuento,
              p.dias_credito,
              p.observaciones
-           from public.tarjetas_viajeras tv
-           left join public.bigzap_pedidos p on p.folio = tv.pedido_folio
-           where cancelado = false
-             and pedido_folio is not null
-             and ultimo_escaneo is not null
-             and (
-               (
-                 coalesce(status_depto, '') <> '50'
-                 and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
-               )
-               or (
-                 coalesce(status_depto, '') = '50'
-                 and (ultimo_escaneo at time zone $1)::date = (now() at time zone $1)::date
-               )
-             )
+           from plant_visible_orders vo
+           join current_lotes_source lp on lp.pedido = vo.pedido
+           left join last_scans ls on ls.programa = lp.programa and ls.lote = lp.lote
+           left join public.bigzap_pedidos p on p.folio = lp.pedido
+           left join public.bigzap_clientes c on c.codigo = lp.cliente
+           left join public.bigzap_departamentos ds on ds.codigo = lp.status_depto
+           left join public.bigzap_estilos e on e.codigo = lp.estilo
+           left join public.bigzap_combinaciones cb on cb.codigo = coalesce(lp.combina, lp.piecol)
+         ),
+         programacion_raw as (
+           select
+             'PED-' || pr.pedido::text as id,
+             pr.pedido as pedido_folio,
+             null::int as programa,
+             null::int as lote,
+             coalesce(c.nombre, pr.cliente, p.cliente, 'S/Cliente') as cliente,
+             coalesce(p.pedido_cliente, pr.pedido_cliente) as oc,
+             coalesce(e.nombre, pr.estilo, 'S/Modelo') as modelo,
+             coalesce(cb.nombre, pr.piecol, pr.combina, 'N/D') as color,
+             pr.fecha_programacion,
+             coalesce(p.fecha_salida, pr.fecha_salida) as pedido_fecha_salida,
+             'alta_pedido' as stage_id,
+             coalesce(pr.pares_aprogramados, 0)::numeric as pares,
+             null::timestamp as ultimo_escaneo,
+             p.origen,
+             p.porcentaje_descuento,
+             p.dias_credito,
+             p.observaciones
+           from visible_orders vo
+           join public.bigzap_programacion_renglones pr on pr.pedido = vo.pedido
+           left join public.bigzap_pedidos p on p.folio = pr.pedido
+           left join public.bigzap_clientes c on c.codigo = pr.cliente
+           left join public.bigzap_estilos e on e.codigo = pr.estilo
+           left join public.bigzap_combinaciones cb on cb.codigo = coalesce(pr.combina, pr.piecol)
+           where coalesce(pr.pares_aprogramados, 0) > 0
+         ),
+         order_items as (
+           select *, stage_id in ('embarque', 'facturacion') as produced
+           from lotes_raw
+           union all
+           select *, false as produced
+           from programacion_raw
          ),
          stage_pairs as (
            select id, stage_id, sum(pares)::int as pairs
-           from lotes
+           from order_items
            group by id, stage_id
          ),
          dominant as (
@@ -1272,20 +1459,23 @@ class PgErpService implements ErpService {
              max(l.observaciones) as notes,
              min(l.fecha_programacion)::text as fecha_alta,
              max(l.pedido_fecha_salida)::text as fecha_compromiso,
-             count(*)::int as batches_count,
-             greatest(coalesce(max(nullif(p.pares_pedidos, 0)), 0), coalesce(max(pt.planned_pairs), 0), coalesce(sum(l.pares), 0))::int as total_pares,
-             coalesce(sum(l.pares) filter (where l.delivered), 0)::int as produced_pairs,
-             coalesce(sum(l.pares) filter (where l.delivered), 0)::int as shipped_pairs,
+             (
+               count(distinct (l.programa, l.lote)) filter (where l.programa is not null and l.lote is not null)
+               + count(*) filter (where l.programa is null and l.stage_id = 'alta_pedido')
+             )::int as batches_count,
+             coalesce(nullif(sum(l.pares), 0), max(pt.planned_pairs), max(nullif(p.pares_pedidos, 0)), 0)::int as total_pares,
+             coalesce(sum(l.pares) filter (where l.produced), 0)::int as produced_pairs,
+             coalesce(sum(l.pares) filter (where l.stage_id = 'facturacion'), 0)::int as shipped_pairs,
              greatest(
-               greatest(coalesce(max(nullif(p.pares_pedidos, 0)), 0), coalesce(max(pt.planned_pairs), 0), coalesce(sum(l.pares), 0))
-               - coalesce(sum(l.pares) filter (where l.delivered), 0),
+               coalesce(nullif(sum(l.pares), 0), max(pt.planned_pairs), max(nullif(p.pares_pedidos, 0)), 0)
+               - coalesce(sum(l.pares) filter (where l.stage_id = 'facturacion'), 0),
                0
              )::int as in_process_pairs,
              round(avg(greatest(0, extract(epoch from (now() - l.ultimo_escaneo)) / 60.0)) filter (where l.ultimo_escaneo is not null))::int as avg_time_min
-           from lotes l
+           from order_items l
            left join (
              select pedido, coalesce(sum(pares), 0)::int as planned_pairs
-             from public.bigzap_lotes_pedidos
+             from current_lotes_source
              group by pedido
            ) pt on ('PED-' || pt.pedido::text) = l.id
            left join public.bigzap_pedidos p on ('PED-' || p.folio::text) = l.id
@@ -1294,7 +1484,7 @@ class PgErpService implements ErpService {
          planned_sizes_raw as (
            select 'PED-' || lp.pedido::text as id, sizes.key as talla,
                   sum(sizes.value::int)::int as pairs
-           from public.bigzap_lotes_pedidos lp
+           from current_lotes_source lp
            cross join lateral jsonb_each_text(coalesce(lp.pares_por_talla, '{}'::jsonb)) sizes
            group by lp.pedido, sizes.key
          ),
@@ -1335,20 +1525,87 @@ class PgErpService implements ErpService {
         [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       ),
       this.pool.query<ErpRecord>(
-        `select * from public.tarjetas_viajeras
-         where cancelado = false
-           and ultimo_escaneo is not null
-           and (
-             (
-               coalesce(status_depto, '') <> '50'
-               and (ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
-             )
-             or (
-               coalesce(status_depto, '') = '50'
-               and (ultimo_escaneo at time zone $1)::date = (now() at time zone $1)::date
-             )
-           )
-         order by ultimo_escaneo desc nulls last`,
+        `with last_scans as (
+           select programa, lote, max(escaneado_at) as ultimo_escaneo
+           from public.bigzap_avance
+           where escaneado_at is not null
+           group by programa, lote
+         ),
+         lot_order as (
+           select distinct on (lp.programa, lp.lote)
+             lp.programa,
+             lp.lote,
+             lp.pedido,
+             lp.cliente,
+             lp.corrida,
+             lp.pares_por_talla
+           from public.bigzap_lotes_pedidos lp
+           join public.bigzap_programacion_renglones pr
+             on pr.pedido = lp.pedido and pr.renglon = lp.renglon
+           where lp.pedido is not null
+           order by lp.programa, lp.lote, lp.pedido, lp.renglon
+         )
+         select
+           l.programa::text || '-' || l.lote::text as tarjeta,
+           l.programa,
+           l.lote,
+           l.estilo,
+           e.nombre as estilo_nombre,
+           l.piecol,
+           l.combina,
+           null::text as color_codigo,
+           cb.nombre as color_nombre,
+           lo.corrida,
+           coalesce(l.pares, 0)::int as pares,
+           l.fecha_programacion,
+           l.status_depto,
+           ds.nombre as status_depto_nombre,
+           coalesce(
+             nullif(ds.stage_id, ''),
+             case coalesce(l.status_depto, '')
+               when '01' then 'alta_pedido'
+               when '10' then 'almacen'
+               when '15' then 'inyeccion'
+               when '20' then 'aduana'
+               when '25' then 'aduana'
+               when '30' then 'banda'
+               when '35' then 'banda'
+               when '39' then 'banda'
+               when '40' then 'embarque'
+               when '50' then 'facturacion'
+               else 'alta_pedido'
+             end
+           ) as stage_id,
+           l.status_depto as zona_actual,
+           ds.nombre as zona_actual_nombre,
+           null::text as zona_previa,
+           null::text as zona_previa_nombre,
+           coalesce(ls.ultimo_escaneo, l.fecha_programacion::timestamp at time zone $1) as ultimo_escaneo,
+           l.cancelado,
+           false as tarjeta_impresa,
+           coalesce(l.pares_por_talla, lo.pares_por_talla, '{}'::jsonb) as pares_por_talla,
+           null::text as observacion,
+           lo.pedido as pedido_folio,
+           lo.cliente as cliente_codigo,
+           c.nombre as cliente_nombre,
+           p.pedido_cliente as pedido_oc,
+           p.fecha_salida as pedido_fecha_salida
+         from public.bigzap_lotes l
+         join lot_order lo on lo.programa = l.programa and lo.lote = l.lote
+         left join last_scans ls on ls.programa = l.programa and ls.lote = l.lote
+         left join public.bigzap_departamentos ds on ds.codigo = l.status_depto
+         left join public.bigzap_estilos e on e.codigo = l.estilo
+         left join public.bigzap_combinaciones cb on cb.codigo = coalesce(l.combina, l.piecol)
+         left join public.bigzap_clientes c on c.codigo = lo.cliente
+         left join public.bigzap_pedidos p on p.folio = lo.pedido
+         where l.cancelado = false
+           and coalesce(l.status_depto, '') in ('15','20','25','30','35','39','40')
+           -- Mismo gate de recencia que stagePipeline/plant_visible_orders: lotes cuyo
+           -- LC_STATUS quedo congelado en el ERP (nunca avanzo a facturacion/PT) no deben
+           -- listarse como tarjetas activas.
+           and coalesce(ls.ultimo_escaneo, l.fecha_programacion::timestamp at time zone $1)
+               >= (now() at time zone $1) - ($2::int * interval '1 day')
+         order by stage_id, ultimo_escaneo desc nulls last, l.programa, l.lote`,
         [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
       )
     ]);
@@ -1476,11 +1733,7 @@ class PgErpService implements ErpService {
         lines: lineRows.rows,
         combinations: combinationRows.rows
       },
-      dailyProduction: dailyRows.rows.map((row) => ({
-        fecha: String(row.fecha ?? ''),
-        pares: Number(row.pares ?? 0),
-        tarjetas: Number(row.tarjetas ?? 0)
-      })),
+      dailyProduction: dailyProductionFrom(ejecutivo.produccion),
       wipSummary,
       stagePipeline,
       orderRisk: summarizeOrderRisk(orderPipeline),
@@ -1715,7 +1968,7 @@ class SupabaseErpService implements ErpService {
   }
 
   async getOperational(fechaInicio: string, fechaFin: string): Promise<ErpOperationalResponse> {
-    const [ejecutivo, movements, sync, tarjetasRes, lotesRes, clientesRes, estilosRes, lineasRes, combinacionesRes, deptosRes, pedidosMetaRes, lotesPedidosSizesRes, ptmovSizesRes] = await Promise.all([
+    const [ejecutivo, movements, sync, tarjetasRes, lotesRes, clientesRes, estilosRes, lineasRes, combinacionesRes, deptosRes, pedidosMetaRes, lotesPedidosSizesRes, programacionRes, ptmovSizesRes] = await Promise.all([
       this.getEjecutivoDashboard(fechaInicio, fechaFin),
       this.getMovimientos(fechaInicio, fechaFin, 500),
       this.getSyncStatus(),
@@ -1727,7 +1980,8 @@ class SupabaseErpService implements ErpService {
       this.supabase.from('bigzap_combinaciones').select('codigo, nombre'),
       this.supabase.from('bigzap_departamentos').select('codigo, nombre, stage_id, orden'),
       this.supabase.from('bigzap_pedidos').select('folio, origen, porcentaje_descuento, dias_credito, observaciones'),
-      this.supabase.from('bigzap_lotes_pedidos').select('pedido, pares_por_talla'),
+      this.supabase.from('bigzap_lotes_pedidos').select('programa, lote, pedido, renglon, pares_por_talla'),
+      this.supabase.from('bigzap_programacion_renglones').select('pedido, renglon'),
       this.supabase.from('bigzap_pt_movimientos').select('pedido, movto, tipo, pares_por_talla').eq('movto', '71').eq('tipo', 'F')
     ]);
     if (tarjetasRes.error) throw tarjetasRes.error;
@@ -1739,6 +1993,7 @@ class SupabaseErpService implements ErpService {
     if (deptosRes.error) throw deptosRes.error;
     if (pedidosMetaRes.error) throw pedidosMetaRes.error;
     if (lotesPedidosSizesRes.error) throw lotesPedidosSizesRes.error;
+    if (programacionRes.error) throw programacionRes.error;
     if (ptmovSizesRes.error) throw ptmovSizesRes.error;
 
     const estiloMap = new Map<string, string>();
@@ -1753,10 +2008,22 @@ class SupabaseErpService implements ErpService {
       .filter(Boolean)
       .sort()
       .pop() ?? null;
-    const activeTarjetas = (tarjetasRes.data ?? []).filter((row) =>
-      row.cancelado !== true && String(row.status_depto ?? '') !== '50'
+    const activeProgramRows = new Set(
+      (programacionRes.data ?? []).map((row) => `${row.pedido}|${row.renglon}`)
     );
-    const operationalSummaries = buildOperationalSummariesFromTarjetas((tarjetasRes.data ?? []) as ErpRecord[]);
+    const validLotKeys = new Set<string>();
+    for (const row of lotesPedidosSizesRes.data ?? []) {
+      if (activeProgramRows.has(`${row.pedido}|${row.renglon}`)) {
+        validLotKeys.add(`${row.programa}-${row.lote}`);
+      }
+    }
+    const operationalTarjetas = (tarjetasRes.data ?? []).filter((row) =>
+      validLotKeys.has(`${row.programa}-${row.lote}`)
+    );
+    const activeTarjetas = operationalTarjetas.filter((row) =>
+      row.cancelado !== true && PLANT_FLOOR_STATUSES.has(String(row.status_depto ?? ''))
+    );
+    const operationalSummaries = buildOperationalSummariesFromTarjetas(operationalTarjetas as ErpRecord[]);
     const orderMetaMap = new Map((pedidosMetaRes.data ?? []).map((row) => [String(row.folio), row]));
     const plannedSizeMap = new Map<string, Record<string, number>>();
     for (const row of lotesPedidosSizesRes.data ?? []) {
@@ -1819,20 +2086,15 @@ class SupabaseErpService implements ErpService {
       addSizePairs(existing.paresPorTalla ?? (existing.paresPorTalla = {}), lot.pares_por_talla);
       modelRows.set(key, existing);
     }
-    const dailyMap = new Map<string, { pares: number; tarjetas: number }>();
-    for (const p of ejecutivo.produccion.filter((row) => row.area === 'INYECCION')) {
-      const current = dailyMap.get(p.fecha) ?? { pares: 0, tarjetas: 0 };
-      current.pares += p.produccionReal;
-      current.tarjetas += 1;
-      dailyMap.set(p.fecha, current);
-    }
     const todayIso = dateInTz(new Date(), config.PLANT_TZ);
-    const lotePipeline: Batch[] = (tarjetasRes.data ?? [])
+    const lotePipeline: Batch[] = operationalTarjetas
       .filter((row) => {
         if (row.cancelado === true) return false;
-        const delivered = String(row.status_depto ?? '') === '50' || row.stage_id === 'facturacion';
-        const facturadoHoy = dateInTz(row.ultimo_escaneo, config.PLANT_TZ) === todayIso;
-        return !delivered || facturadoHoy;
+        const status = String(row.status_depto ?? '');
+        if (status === '50') {
+          return dateInTz(row.ultimo_escaneo, config.PLANT_TZ) === todayIso;
+        }
+        return PLANT_FLOOR_STATUSES.has(status);
       })
       .map((row) => mapTarjetaToBatch(row as unknown as TarjetaViajeraRow, config.DEFAULT_TENANT_ID as Batch['tenantId']));
 
@@ -1862,7 +2124,7 @@ class SupabaseErpService implements ErpService {
         lines: (lineasRes.data ?? []).map((row) => ({ id: row.codigo, codigo: row.codigo, name: row.nombre })),
         combinations: (combinacionesRes.data ?? []).map((row) => ({ id: row.codigo, codigo: row.codigo, name: row.nombre }))
       },
-      dailyProduction: Array.from(dailyMap.entries()).map(([fecha, data]) => ({ fecha, ...data })).sort((a, b) => a.fecha.localeCompare(b.fecha)),
+      dailyProduction: dailyProductionFrom(ejecutivo.produccion),
       wipSummary: operationalSummaries.wipSummary,
       stagePipeline: operationalSummaries.stagePipeline,
       orderRisk: operationalSummaries.orderRisk,

@@ -21,6 +21,7 @@ import { DataTable } from '../components/DataTable';
 import { PipelineColumn } from '../components/pipeline/PipelineColumn';
 import { OCRValidation } from '../components/ocr/OCRValidation';
 import { STAGES } from '../data/appConfig';
+import { loteDisplay, batchLoteDisplay } from '../utils/lote';
 import { backendEnabled, dashboardApi, type DailyProductionRow, type EjecutivoData, type ErpOperationalResponse, type ModelPerformanceRow, type MovimientoRow } from '../api/dashboardApi';
 import { AppUser, Batch, PermissionKey, ProductionAreaId, Role, StageId } from '../types';
 import { 
@@ -54,6 +55,7 @@ import {
   ChevronRight,
   ChevronDown,
   ChevronUp,
+  X,
   Edit,
   Eye,
   Search,
@@ -160,7 +162,7 @@ const getCompletedPairsFromStages = (pairsByStage?: Record<string, number>, fall
 };
 
 const getProducedPairsFromStages = (pairsByStage?: Record<string, number>, fallback = 0): number => {
-  const productionStartOrder = STAGES.find(stage => stage.id === 'inyeccion')?.order ?? 3;
+  const productionStartOrder = STAGES.find(stage => stage.id === 'embarque')?.order ?? 7;
   const hasStageData = Object.values(pairsByStage ?? {}).some(pairs => Number(pairs || 0) > 0);
   const producedPairs = Object.entries(pairsByStage ?? {}).reduce((sum, [stageId, pairs]) => {
     const stageOrder = STAGES.find(stage => stage.id === stageId)?.order;
@@ -189,6 +191,40 @@ const dateInPlantTz = (value?: string | Date | null): string => {
 
 const todayPlantDate = (): string => dateInPlantTz(new Date());
 
+const plantDateTime = (value: Date = new Date()): string => {
+  if (Number.isNaN(value.getTime())) return '';
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'America/Mexico_City',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23'
+  }).formatToParts(value);
+  const get = (type: Intl.DateTimeFormatPartTypes) => parts.find(part => part.type === type)?.value ?? '00';
+  return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}`;
+};
+
+const parsePlantDateTime = (value?: string | null): Date | null => {
+  if (!value) return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{2}):(\d{2}))?/.exec(value);
+  if (!match) {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+  }
+  const [, year, month, day, hour = '12', minute = '00'] = match;
+  return new Date(Date.UTC(Number(year), Number(month) - 1, Number(day), Number(hour), Number(minute)));
+};
+
+const hoursBetweenPlantDateTimes = (start?: string | null, end?: string | null): number | null => {
+  const startDate = parsePlantDateTime(start);
+  const endDate = parsePlantDateTime(end);
+  if (!startDate || !endDate) return null;
+  const hours = (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60);
+  return hours >= 0 ? hours : null;
+};
+
 // Calendar dates from the API are date-only (YYYY-MM-DD). Parsing such a string
 // with `new Date(...)` treats it as UTC midnight, so formatting it in a negative
 // offset timezone (e.g. America/Mexico_City) shifts it back one day. Parse and
@@ -214,10 +250,42 @@ const nonZeroPercent = (value: number): string =>
 
 const PRODUCTION_DAY_START_HOUR = 9;
 const PRODUCTION_DAY_END_HOUR = 20;
-const WIP_DAILY_TARGET = 3000;
+const WIP_DAILY_TARGET = 3300;
 const EFFICIENCY_DAILY_TARGET = 3300;
 const PRODUCTION_DAY_HOURS = PRODUCTION_DAY_END_HOUR - PRODUCTION_DAY_START_HOUR;
 const WIP_HOURLY_TARGET = WIP_DAILY_TARGET / PRODUCTION_DAY_HOURS;
+
+/** Mapea el nombre de área del backend (INYECCION, BANDA, CALIDAD...) a la clave interna. */
+const erpAreaKey = (area: string | undefined): string => {
+  const upper = (area ?? '').toUpperCase();
+  if (upper.includes('ALMAC')) return 'almacen';
+  if (upper.includes('INYE')) return 'inyeccion';
+  if (upper.includes('ADUANA') || upper.includes('CALIDAD')) return 'aduana';
+  if (upper.includes('BANDA')) return 'banda';
+  if (upper.includes('EMBAR')) return 'embarque';
+  if (upper.includes('FACT') || upper.includes('ENTREGA')) return 'entregas';
+  if (upper.includes('TERCERA')) return 'salidas_tercera';
+  return 'inyeccion';
+};
+
+/**
+ * Producción REAL por hora ('HH:00') de un área: agrega produccionReal de los escaneos
+ * de la tarjeta viajera (gen_por) que el backend ya entrega en productionHourly. Es
+ * throughput (pares producidos POR el depto), NO el WIP (pares EN el depto).
+ */
+const hourlyProductionForArea = (
+  rows: ReadonlyArray<{ area: string; hora: string; produccionReal: number }> | undefined,
+  areaKey: string
+): Array<{ hour: string; Pares: number }> => {
+  const byHour = new Map<string, number>();
+  for (const row of rows ?? []) {
+    if (erpAreaKey(row.area) !== areaKey) continue;
+    byHour.set(row.hora, (byHour.get(row.hora) ?? 0) + (row.produccionReal ?? 0));
+  }
+  return Array.from(byHour.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([hour, pares]) => ({ hour, Pares: pares }));
+};
 
 const enumerateDateRange = (start: string, end: string): string[] => {
   if (!start || !end || start > end) return [];
@@ -275,6 +343,78 @@ const sumUniqueProductionTarget = (rows: ProductionTargetRow[]): number => {
     if (!targets.has(key)) targets.set(key, row.metaHora || 0);
   });
   return Array.from(targets.values()).reduce((sum, value) => sum + value, 0);
+};
+
+const BOTTLENECK_MINUTES_THRESHOLD = 1500;
+
+type PipelineInsightStage = {
+  id: StageId;
+  name: string;
+  lotCount: number;
+  paresCount: number;
+  avgMins: number;
+  wipPct: number;
+  saturation: 'OPTIMO' | 'SATURADO' | 'CRITICO';
+};
+
+type BottleneckInsight = {
+  primary: PipelineInsightStage | null;
+  secondary: PipelineInsightStage | null;
+  timeDriver: PipelineInsightStage | null;
+  backlog: PipelineInsightStage | null;
+  needsAttention: boolean;
+};
+
+const SATURATION_RANK: Record<PipelineInsightStage['saturation'], number> = {
+  CRITICO: 3,
+  SATURADO: 2,
+  OPTIMO: 1
+};
+
+const stageToneClass = (stage: PipelineInsightStage): string => {
+  if (stage.saturation === 'CRITICO') return 'text-red-400';
+  if (stage.saturation === 'SATURADO') return 'text-amber-500';
+  return 'text-emerald-500';
+};
+
+const sortStagesByBottleneckRisk = (stages: PipelineInsightStage[]): PipelineInsightStage[] =>
+  [...stages].sort((a, b) =>
+    SATURATION_RANK[b.saturation] - SATURATION_RANK[a.saturation]
+    || b.wipPct - a.wipPct
+    || b.paresCount - a.paresCount
+    || b.avgMins - a.avgMins
+    || b.lotCount - a.lotCount
+  );
+
+const buildBottleneckInsight = (stages: PipelineInsightStage[]): BottleneckInsight => {
+  const backlog = stages.find(stage => stage.id === 'alta_pedido' && (stage.paresCount > 0 || stage.lotCount > 0)) ?? null;
+  const productiveStages = stages.filter(stage =>
+    stage.id !== 'alta_pedido'
+    && (stage.paresCount > 0 || stage.lotCount > 0 || stage.avgMins > 0)
+  );
+  const stagesNeedingAttention = productiveStages.filter(stage =>
+    stage.saturation !== 'OPTIMO'
+    || stage.avgMins >= BOTTLENECK_MINUTES_THRESHOLD
+    || stage.wipPct >= 20
+  );
+  const rankedStages = sortStagesByBottleneckRisk(
+    stagesNeedingAttention.length > 0 ? stagesNeedingAttention : productiveStages
+  );
+  const primary = rankedStages[0] ?? null;
+  const secondary = rankedStages.find(stage => stage.id !== primary?.id) ?? null;
+  const timeDriver = [...productiveStages].sort((a, b) =>
+    b.avgMins - a.avgMins
+    || b.paresCount - a.paresCount
+    || b.lotCount - a.lotCount
+  )[0] ?? null;
+
+  return {
+    primary,
+    secondary,
+    timeDriver,
+    backlog,
+    needsAttention: stagesNeedingAttention.length > 0
+  };
 };
 
 export const DashboardEjecutivoView: React.FC = () => {
@@ -360,12 +500,6 @@ export const DashboardEjecutivoView: React.FC = () => {
     dashboardApi.erpOperativo(fechaInicio, fechaFin)
       .then(data => {
         if (cancelled) return;
-        const fallbackDate = data.meta.dataMaxDate;
-        if (data.productionHourly.length === 0 && fallbackDate && fechaInicio === fechaFin && fechaInicio !== fallbackDate) {
-          setFechaInicio(fallbackDate);
-          setFechaFin(fallbackDate);
-          return;
-        }
         setErpData(data);
       })
       .catch(err => {
@@ -494,7 +628,7 @@ export const DashboardEjecutivoView: React.FC = () => {
     if (selectedTurno !== 'TODOS' && p.turno !== selectedTurno) return false;
     return true;
   });
-  const facturacionProdHora = filteredProdHora.filter(p => p.area === 'FACTURACION');
+  const scannedProdHora = filteredProdHora;
 
   // Meta diaria fija: WIP acumulado contra 3,000 de 09:00 a 20:00; eficiencia contra 3,300 del día.
   const selectedDateRange = enumerateDateRange(fechaInicio, fechaFin);
@@ -502,28 +636,27 @@ export const DashboardEjecutivoView: React.FC = () => {
   const expectedWipToNow = Math.max(1, expectedWipProduction(fechaInicio, fechaFin));
   const hourlyTarget = WIP_HOURLY_TARGET;
   const activeDashboardBatches = dashboardWipBatches.filter(b => !isDeliveredBatch(b));
-  const activeDashboardOrderIds = new Set(activeDashboardBatches.map(b => b.orderId).filter(Boolean));
 
   // 2. KPI Ratios (8 indicators)
   // - Pedidos activos: Status PENDIENTE or PROCESANDO
   const kpiActiveOrdersCount = erpData
-    ? activeDashboardOrderIds.size
+    ? (erpData.active.orders ?? 0)
     : filteredOrders.filter(o => o.status === 'PROCESANDO' || o.status === 'PENDIENTE').length;
 
   // - Lotes activos: etapa Actual !== 'embarque'
   const kpiActiveBatchesCount = erpData
-    ? activeDashboardBatches.length
+    ? erpData.wipSummary.activeBatches
     : filteredBatches.filter(b => !isDeliveredBatch(b)).length;
 
   // - Pares activos en planta: Suma totalPares de lotes activos
   const kpiActiveParesCount = erpData
-    ? activeDashboardBatches.reduce((sum, b) => sum + getBatchPairs(b), 0)
+    ? erpData.wipSummary.activePairs
     : filteredBatches
       .filter(b => !isDeliveredBatch(b))
       .reduce((sum, b) => sum + getBatchPairs(b), 0);
 
-  // - Producción del período: pares facturados sobre el rango completo
-  const kpiDailyProdCount = facturacionProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
+  // - Producción del período: pares escaneados en tarjetas viajeras sobre el rango completo
+  const kpiDailyProdCount = scannedProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
 
   // - Avance WIP: promedio acumulado de escaneos por área / meta acumulada esperada del día
   const activeBatchesForProgress = filteredBatches.filter(b => !isDeliveredBatch(b));
@@ -553,10 +686,10 @@ export const DashboardEjecutivoView: React.FC = () => {
   const kpiDefectivePct = totalInspected > 0 ? Number(((totalDefectives / totalInspected) * 100).toFixed(2)) : 0;
 
   // - Cumplimiento contra meta: real total vs 3,300 pares
-  const totalRealPrs = facturacionProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
+  const totalRealPrs = scannedProdHora.reduce((sum, p) => sum + p.produccionReal, 0);
   const totalMetaPrs = EFFICIENCY_DAILY_TARGET;
   const kpiMetaCompliance = totalMetaPrs > 0 ? Number(((totalRealPrs / totalMetaPrs) * 100).toFixed(1)) : 0;
-  const productionStdDev = getStdDev(facturacionProdHora.map(p => p.produccionReal - WIP_HOURLY_TARGET));
+  const productionStdDev = getStdDev(scannedProdHora.map(p => p.produccionReal - WIP_HOURLY_TARGET));
   const complianceStdDev = getStdDev(filteredProdHora.map(p => p.eficiencia));
   const defectStdDev = getStdDev(filteredQuality.map(q => q.porcentajeDefectivo));
   const progressStdDev = erpData ? 0 : getStdDev(activeBatchesForProgress.map(b => b.porcentajeAvance || 0));
@@ -564,13 +697,13 @@ export const DashboardEjecutivoView: React.FC = () => {
   const todayMetaPrs = EFFICIENCY_DAILY_TARGET;
   const kpiDailyStatus = classifyAgainstTarget(kpiDailyProdCount, todayMetaPrs, productionStdDev);
   const kpiProgressStatus = hasPeriodData ? classifyAgainstTarget(kpiGlobalProgress, 100, progressStdDev) : 'neutral';
-  const kpiRiskStatus = hasPeriodData ? classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev) : 'neutral';
+  const kpiRiskStatus = classifyLowerIsBetter(kpiOrdersInRiskCount, 0, riskStdDev);
   const kpiDefectStatus = qualityAvailable ? classifyLowerIsBetter(kpiDefectivePct, 3, defectStdDev) : 'neutral';
   const kpiComplianceStatus = classifyAgainstTarget(kpiMetaCompliance, 100, complianceStdDev);
 
   // Active WIP denominator
   const totalWIPPares = erpData
-    ? activeDashboardBatches.reduce((sum, b) => sum + getBatchPairs(b), 0)
+    ? erpData.wipSummary.activePairs
     : filteredBatches.reduce((sum, b) => sum + getBatchPairs(b), 0);
 
   // 3. Pipeline Stages mapping & stats
@@ -608,7 +741,24 @@ export const DashboardEjecutivoView: React.FC = () => {
     .map(st => {
       const backendRow = erpData?.stagePipeline.find(r => r.stageId === st.id);
       const fallback = fallbackPipelineStages.find(f => f.id === st.id);
-      if (erpData && fallback && fallback.lotCount > 0) {
+      if (erpData && backendRow) {
+        // Pares/lotes EN la etapa (WIP actual) = autoritativo del backend stagePipeline
+        // (universo completo por status_depto). El lotePipeline esta filtrado a pedidos
+        // visibles y subcontaba el WIP (Inyección mostraba 30 vs ~1,530 reales: dejaba
+        // fuera los lotes inyectados sin pedido "visible"). Throughput (pares producidos)
+        // es otra métrica y vive en la vista de Producción por Área.
+        return {
+          ...(fallback ?? st),
+          lotCount: backendRow.batches,
+          paresCount: backendRow.pairs,
+          avgMins: backendRow.avgMinutes ?? 0,
+          saturation: backendRow.saturation,
+          wipPct: backendRow.wipPct
+        };
+      }
+      if (erpData && fallback) {
+        // Etapa sin WIP en el backend (p. ej. estabilización, sin depto propio): conserva
+        // el conteo del lotePipeline para no perder etapas que el backend no agrupa.
         return { ...fallback, avgMins: backendRow?.avgMinutes ?? fallback.avgMins, saturation: backendRow?.saturation ?? fallback.saturation };
       }
       if (backendRow) {
@@ -616,6 +766,7 @@ export const DashboardEjecutivoView: React.FC = () => {
       }
       return fallback ?? { ...st, lotCount: 0, paresCount: 0, avgMins: 0, saturation: 'OPTIMO' as const, wipPct: 0 };
     });
+  const bottleneckInsight = buildBottleneckInsight(pipelineStages);
 
   // 4. Panel derecho de alertas dinámicas (Critical Alerts)
   const generatedAlerts: { id: string; level: 'crítico' | 'advertencia' | 'informativo'; title: string; desc: string; target: string; time: string }[] = [];
@@ -629,8 +780,8 @@ export const DashboardEjecutivoView: React.FC = () => {
         id: `alt-mov-${b.id}`,
         level: b.tiempoEnEtapaMinutos! > 3000 ? 'crítico' : 'advertencia',
         title: 'Lote Retenido sin Movimiento',
-        desc: `Tarv. ${b.tarjetaViajera} detenido en ${STAGES.find(s => s.id === getBatchStageId(b))?.name || getBatchStageId(b)} por soplado residual.`,
-        target: b.id,
+        desc: `Tarv. ${batchLoteDisplay(b)} detenido en ${STAGES.find(s => s.id === getBatchStageId(b))?.name || getBatchStageId(b)} por soplado residual.`,
+        target: batchLoteDisplay(b),
         time: `${Math.round(b.tiempoEnEtapaMinutos! / 60)} horas`
       });
     });
@@ -663,7 +814,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         level: 'crítico',
         title: 'Mermas Fuera de Tolerancia',
         desc: `Modelo ${q.modelo} (${q.color}) reporta un ${q.porcentajeDefectivo}% defectivo.`,
-        target: `Lote ${q.lote}`,
+        target: `Lote ${loteDisplay(q.lote)}`,
         time: `Turno ${q.turno}`
       });
     });
@@ -691,7 +842,7 @@ export const DashboardEjecutivoView: React.FC = () => {
   //   inyección/banda terminan el 2026-04-20). Agregando el rango completo la
   //   gráfica responde a cualquier cambio de fecha inicio/fin.
   const hourlyChartData: Record<string, { value: number; target: number }> = {};
-  for (const p of facturacionProdHora) {
+  for (const p of scannedProdHora) {
     if (!hourlyChartData[p.hora]) hourlyChartData[p.hora] = { value: 0, target: 0 };
     hourlyChartData[p.hora].value += p.produccionReal;
   }
@@ -700,9 +851,11 @@ export const DashboardEjecutivoView: React.FC = () => {
     if (!hourlyChartData[label]) hourlyChartData[label] = { value: 0, target: 0 };
     hourlyChartData[label].target = WIP_HOURLY_TARGET * selectedDaysCount;
   }
-  const hasHourlyData = facturacionProdHora.length > 0;
-  // Días reales con facturación dentro del rango (para el subtítulo).
-  const prodDatesInRange = Array.from(new Set(facturacionProdHora.map(p => p.fecha))).sort();
+  const hasHourlyData = scannedProdHora.length > 0;
+  const selectedTodayOnly = fechaInicio === fechaFin && fechaInicio === todayPlantDate();
+  const noScansToday = Boolean(erpData && selectedTodayOnly && !hasHourlyData);
+  // Días reales con escaneos dentro del rango (para el subtítulo).
+  const prodDatesInRange = Array.from(new Set(scannedProdHora.map(p => p.fecha))).sort();
   const hourlyStdDev = getStdDev(Object.values(hourlyChartData).map(d => d.value - d.target));
   const finalHourlyData = Array.from({ length: 24 }, (_, hour) => {
     const label = `${String(hour).padStart(2, '0')}:00`;
@@ -844,9 +997,7 @@ export const DashboardEjecutivoView: React.FC = () => {
   const erpRiskOrders = (erpData?.orderRisk.rows ?? [])
     .filter(o => temporalFiltersApplied || o.progress < 100)
     .map(o => {
-      // Avance/producido alineado con la sábana SLA (Pipeline por Pedido): se cuenta
-      // lo que ya entró a producción (inyección en adelante), no solo facturación,
-      // para que el % y los pares faltantes coincidan entre ambos módulos.
+      // Producción temporal: lotes que ya llegaron a embarque o facturación.
       const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
       const displayProgress = o.totalPares > 0 ? Math.min(100, Math.round((producedPairs / o.totalPares) * 100)) : 0;
       return {
@@ -931,13 +1082,21 @@ export const DashboardEjecutivoView: React.FC = () => {
             Filtros
             <span className="text-slate-600 ml-1">{filtersExpanded ? '▲' : '▼'}</span>
           </button>
-          <button
-            id="btn-exec-clear"
-            onClick={handleClearFilters}
-            className="text-[10px] text-slate-500 hover:text-red-400 font-mono underline transition"
-          >
-            LIMPIAR FILTROS
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setFiltersExpanded(f => !f)}
+              className="flex items-center gap-1 px-3 py-1.5 bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-white rounded-lg text-xs font-mono transition border border-slate-800 cursor-pointer"
+            >
+              {filtersExpanded ? 'Ocultar filtros' : 'Mostrar filtros'}
+            </button>
+            <button
+              id="btn-exec-clear"
+              onClick={handleClearFilters}
+              className="text-[10px] text-slate-500 hover:text-red-400 font-mono underline transition"
+            >
+              LIMPIAR FILTROS
+            </button>
+          </div>
         </div>
 
         {filtersExpanded && <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-3">
@@ -1053,6 +1212,13 @@ export const DashboardEjecutivoView: React.FC = () => {
         </div>}
       </div>
 
+      {noScansToday && (
+        <div className="border border-amber-300 bg-amber-50 px-4 py-3 rounded-lg text-slate-800 font-mono text-xs flex flex-col md:flex-row md:items-center md:justify-between gap-1">
+          <span className="font-black uppercase tracking-wider text-amber-700">Sin tarjetas viajeras escaneadas hoy</span>
+          <span className="text-[10px] text-slate-600">El filtro está en {fechaInicio}. Ultimo escaneo FDB: {erpData?.meta.dataMaxDate ?? '--'}.</span>
+        </div>
+      )}
+
       {/* 3. Primera Fila de KPIs (8 clean, executive cards) */}
       <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
         {/* Card 1: Pedidos Activos */}
@@ -1088,16 +1254,16 @@ export const DashboardEjecutivoView: React.FC = () => {
             {selectedDaysCount > 1 ? 'PROD. DEL PERÍODO' : 'PROD. DEL DÍA'}
           </span>
           <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
-            {nonZeroNumber(kpiDailyProdCount)}
+            {noScansToday ? '0' : nonZeroNumber(kpiDailyProdCount)}
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiDailyStatus].text}`}>
             Meta {todayMetaPrs.toLocaleString()} / σ {Math.round(productionStdDev)}
           </span>
         </div>
 
-        {/* Card 5: Avance WIP */}
+        {/* Card 5: Avance Acumulado */}
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiProgressStatus].border} ${SEMAPHORE[kpiProgressStatus].bg}`}>
-          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">AVANCE WIP</span>
+          <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">AVANCE ACUMULADO</span>
           <div className="mt-2 flex items-baseline gap-1">
             <span className={`text-2xl font-black font-mono ${SEMAPHORE[kpiProgressStatus].text}`}>{pctMetric(kpiGlobalProgress)}</span>
           </div>
@@ -1113,7 +1279,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md transition-colors ${SEMAPHORE[kpiRiskStatus].border} ${SEMAPHORE[kpiRiskStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">PEDIDOS VENCIDOS ABIERTOS</span>
           <div className={`mt-2 text-2xl font-black font-mono ${SEMAPHORE[kpiRiskStatus].text}`}>
-            {activeMetric(kpiOrdersInRiskCount)}
+            {currentMetric(kpiOrdersInRiskCount)}
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiRiskStatus].text}`}>
             Abiertos fuera compromiso
@@ -1133,7 +1299,7 @@ export const DashboardEjecutivoView: React.FC = () => {
         <div className={`bg-slate-900 border p-4 rounded-lg flex flex-col justify-between shadow-md ${SEMAPHORE[kpiComplianceStatus].border} ${SEMAPHORE[kpiComplianceStatus].bg}`}>
           <span className="text-[9px] font-bold font-mono text-slate-500 uppercase tracking-widest block">EFICIENCIA META</span>
           <div className={`mt-2 text-xl font-black font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>
-            {nonZeroPercent(kpiMetaCompliance)}
+            {noScansToday ? '0%' : nonZeroPercent(kpiMetaCompliance)}
           </div>
           <span className={`text-[10px] block mt-1 font-mono ${SEMAPHORE[kpiComplianceStatus].text}`}>
             Meta {EFFICIENCY_DAILY_TARGET.toLocaleString()} pares
@@ -1188,7 +1354,7 @@ export const DashboardEjecutivoView: React.FC = () => {
                     {/* Metrics in stage */}
                     <div className="mt-3 space-y-1 bg-slate-900/50 p-1.5 rounded">
                       <div className="flex justify-between text-[11px] font-mono">
-                        <span className="text-slate-500">Lotes:</span>
+                        <span className="text-slate-500">{st.id === 'alta_pedido' ? 'Renglones:' : 'Lotes:'}</span>
                         <span className="font-bold text-slate-200">{st.lotCount}</span>
                       </div>
                       <div className="flex justify-between text-[11px] font-mono">
@@ -1201,10 +1367,10 @@ export const DashboardEjecutivoView: React.FC = () => {
                       </div>
                     </div>
 
-                    {/* Percentage WIP */}
+                    {/* WIP % (Alta de Pedido es backlog pre-producción, no WIP de piso) */}
                     <div className="mt-3 pt-1 border-t border-slate-900 text-[10px] font-mono font-black flex justify-between text-slate-500">
-                      <span>WIP %</span>
-                      <span className="text-pink-400">{st.wipPct}%</span>
+                      <span>{st.id === 'alta_pedido' ? 'Backlog' : 'WIP %'}</span>
+                      <span className="text-pink-400">{st.id === 'alta_pedido' ? 'pre-prod' : `${st.wipPct}%`}</span>
                     </div>
                   </div>
                 );
@@ -1213,7 +1379,32 @@ export const DashboardEjecutivoView: React.FC = () => {
           </div>
 
           <div className="mt-4 p-2 bg-slate-950 border border-slate-850 rounded text-[10px] text-slate-400 font-mono leading-relaxed">
-            <span className="font-bold text-cyan-400">INFO DE CUELLOS DE BOTELLA:</span> Los procesos con demora acumulada de más de 1,500 minutos, representados en color <span className="text-red-400 font-bold">Rojo</span>, corresponden principalmente a las fases de <strong className="text-purple-400">Banda (Trimado/Detallado)</strong> y <strong className="text-purple-400">Estabilización</strong> por enfriamiento molecular natural de la resina EVA inyectada.
+            <span className="font-bold text-cyan-400">INSIGHT IA DE CUELLOS DE BOTELLA:</span>{' '}
+            {bottleneckInsight.primary ? (
+              <>
+                <strong className={`font-bold ${stageToneClass(bottleneckInsight.primary)}`}>
+                  {bottleneckInsight.primary.name}
+                </strong>
+                {bottleneckInsight.needsAttention ? ' es la restricción principal' : ' es la cola productiva más grande sin saturación crítica'}: {bottleneckInsight.primary.paresCount.toLocaleString()} pares en {bottleneckInsight.primary.lotCount.toLocaleString()} lotes ({bottleneckInsight.primary.wipPct}% del WIP, {bottleneckInsight.primary.avgMins.toLocaleString()} min prom.).
+                {bottleneckInsight.timeDriver && bottleneckInsight.timeDriver.id !== bottleneckInsight.primary.id && bottleneckInsight.timeDriver.avgMins > 0 && (
+                  <>
+                    {' '}Mayor permanencia en <strong className={`font-bold ${stageToneClass(bottleneckInsight.timeDriver)}`}>{bottleneckInsight.timeDriver.name}</strong> con {bottleneckInsight.timeDriver.avgMins.toLocaleString()} min prom.; revisar primero lotes antiguos ahí.
+                  </>
+                )}
+                {bottleneckInsight.secondary && bottleneckInsight.needsAttention && (
+                  <>
+                    {' '}Segundo foco: <strong className={`font-bold ${stageToneClass(bottleneckInsight.secondary)}`}>{bottleneckInsight.secondary.name}</strong> ({bottleneckInsight.secondary.paresCount.toLocaleString()} pares, {bottleneckInsight.secondary.wipPct}% WIP).
+                  </>
+                )}
+                {bottleneckInsight.backlog && (
+                  <>
+                    {' '}Alta de Pedido suma {bottleneckInsight.backlog.paresCount.toLocaleString()} pares pre-prod y no entra al WIP productivo.
+                  </>
+                )}
+              </>
+            ) : (
+              <>Sin WIP productivo en el filtro actual; no hay cuello de botella medible con estos datos.</>
+            )}
           </div>
         </div>
 
@@ -1292,8 +1483,10 @@ export const DashboardEjecutivoView: React.FC = () => {
           {!hasHourlyData ? (
             <div className="h-[338px] mt-4 flex flex-col items-center justify-center text-center gap-1">
               <Activity className="w-6 h-6 text-slate-700" />
-              <p className="text-[11px] font-mono text-slate-500">Sin escaneos de producción en el rango seleccionado.</p>
-              <p className="text-[9px] font-sans text-slate-600">Ajusta las fechas: ultimo escaneo FDB {erpData?.meta.dataMaxDate ?? '--'}.</p>
+              <p className="text-[11px] font-mono text-slate-500">
+                {noScansToday ? 'Sin tarjetas viajeras escaneadas hoy.' : 'Sin escaneos de producción en el rango seleccionado.'}
+              </p>
+              <p className="text-[9px] font-sans text-slate-600">Ultimo escaneo FDB {erpData?.meta.dataMaxDate ?? '--'}.</p>
             </div>
           ) : (
           <div className="overflow-x-auto mt-4">
@@ -1304,7 +1497,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               const targetPct = d.target > 0 ? (d.target / maxVal) * 100 : 0;
               return (
                 <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative" title={`${d.value} pares / meta ${d.target}`}>
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-slate-900 whitespace-nowrap">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-black whitespace-nowrap">
                     {d.value.toLocaleString()} / {d.target.toLocaleString()} prs
                   </div>
                   <div className="w-full h-full flex items-end relative">
@@ -1343,7 +1536,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               const pct = (d.value / maxVal) * 100;
               return (
                 <div key={i} className="flex-1 flex flex-col items-center justify-end h-full group relative" title={`${d.value} pares`}>
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-slate-900 whitespace-nowrap">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition duration-150 z-20 pointer-events-none text-black whitespace-nowrap">
                     {d.value.toLocaleString()} prs
                   </div>
                   <div 
@@ -1374,7 +1567,7 @@ export const DashboardEjecutivoView: React.FC = () => {
                 <div key={id} className="text-[10px] font-mono space-y-0.5">
                   <div className="flex justify-between text-slate-350">
                     <span className="truncate pr-1 block max-w-[170px]">{item.label}</span>
-                    <span className="font-bold">{item.value.toLocaleString()} prs</span>
+                    <span className="font-bold">{item.value.toLocaleString()}</span>
                   </div>
                   <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
                     <div className="bg-gradient-to-r from-blue-500 to-cyan-400 h-full rounded-full" style={{ width: `${pct}%` }} />
@@ -1488,7 +1681,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               const pct = Math.min(d.value, 120);
               return (
                 <div key={d.label} className="flex-1 h-full flex flex-col justify-end items-center group relative">
-                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition z-20 pointer-events-none text-slate-900 whitespace-nowrap">
+                  <div className="absolute bottom-full left-1/2 -translate-x-1/2 bg-white border border-slate-200 shadow-sm text-[8px] font-mono p-1 rounded opacity-0 group-hover:opacity-100 transition z-20 pointer-events-none text-black whitespace-nowrap">
                     {d.real.toLocaleString()} / {d.target.toLocaleString()} prs
                   </div>
                   <div className="w-full rounded-t-sm transition" style={{ height: `${pct / 1.2}%`, backgroundColor: d.color }} />
@@ -1579,8 +1772,7 @@ export const DashboardEjecutivoView: React.FC = () => {
               {displayedRiskOrders.map((o) => {
                 const isPassed = o.daysLeft <= 0;
                 const isUrgent = o.daysLeft > 0 && o.daysLeft <= semaphoreConfig.yellowDays;
-                // Faltantes must agree with the displayed avance, which is derived
-                // from producedPairs (post-injection), not facturación-only stages.
+                // Faltantes siguen la misma regla que pares producidos: embarque en adelante.
                 const completedPairs = (o as any).producedPairs != null
                   ? Number((o as any).producedPairs)
                   : Math.round(o.quantity * ((o.porcentajeAvance || 0) / 100));
@@ -1674,6 +1866,9 @@ export const DashboardEjecutivoView: React.FC = () => {
   );
 };
 
+const MAX_PIPELINE_STAGE_CARDS = 120;
+const MAX_PIPELINE_INVENTORY_ROWS = 500;
+
 /* 2. Pipeline por Lote View */
 export const PipelineLoteView: React.FC = () => {
   const { 
@@ -1691,7 +1886,7 @@ export const PipelineLoteView: React.FC = () => {
   } = useDashboard();
 
   // Lotes desde el universo completo del FDB (endpoint operativo server-side),
-  // no del bootstrap limitado. Fuente unica que coincide con Pipeline por Pedido.
+  // no del bootstrap limitado. Fuente unica que coincide con el WIP del Ejecutivo.
   const [operationalData, setOperationalData] = useState<ErpOperationalResponse | null>(null);
   const [operationalLoading, setOperationalLoading] = useState(backendEnabled);
   const [operationalError, setOperationalError] = useState<string | null>(null);
@@ -1724,6 +1919,7 @@ export const PipelineLoteView: React.FC = () => {
   const [isEditFechaOpen, setIsEditFechaOpen] = useState(false);
   const [isReportDefectOpen, setIsReportDefectOpen] = useState(false);
   const [showDetailModal, setShowDetailModal] = useState(false);
+  const [showLoteFilters, setShowLoteFilters] = useState(true);
 
   // Filter states
   const [filtroCliente, setFiltroCliente] = useState('');
@@ -1764,9 +1960,9 @@ export const PipelineLoteView: React.FC = () => {
   const [newOrderId, setNewOrderId] = useState('');
 
   const tenantBatches = loteBatches.filter(
-    b => b.tenantId === currentTenant.id && !isArchivedBatch(b)
+    b => b.tenantId === currentTenant.id && !isArchivedBatch(b) && getBatchStageId(b) !== 'alta_pedido'
   );
-  const loteStages = STAGES.filter(stage => stage.id !== 'estabilizacion');
+  const loteStages = STAGES.filter(stage => stage.id !== 'alta_pedido' && stage.id !== 'estabilizacion');
   const normalizeLoteStage = (stage: StageId) => stage === 'estabilizacion' ? 'aduana' : stage;
   const getLoteStageName = (stage: StageId) => loteStages.find(s => s.id === normalizeLoteStage(stage))?.name || stage.replace('_', ' ');
   // Clear filters handler
@@ -1836,8 +2032,8 @@ export const PipelineLoteView: React.FC = () => {
       quantityShoes: newQuantity,
       totalPares: newQuantity,
       paresEnEtapa: newQuantity,
-      stage: 'alta_pedido',
-      etapaActual: 'alta_pedido',
+      stage: 'almacen',
+      etapaActual: 'almacen',
       operatorId: newOperator || 'S/Responsable',
       responsableActual: newOperator || 'S/Responsable',
       status: 'OPTIMO',
@@ -1870,7 +2066,7 @@ export const PipelineLoteView: React.FC = () => {
     setScannedLots(prev => ({ ...prev, [matchedBatch.id]: true }));
     if (nextStage) {
       moveBatchStage(matchedBatch.id, nextStage);
-      addAuditLog('PRODUCCION', 'SCAN_AUTO_ADVANCE', `Escaneo ${scannedValue} avanzó lote ${matchedBatch.id} a ${nextStage}`);
+      addAuditLog('PRODUCCION', 'SCAN_AUTO_ADVANCE', `Escaneo ${scannedValue} avanzó lote ${batchLoteDisplay(matchedBatch)} a ${nextStage}`);
     }
   };
 
@@ -1878,6 +2074,69 @@ export const PipelineLoteView: React.FC = () => {
   const uniqueClientes = Array.from(new Set(tenantBatches.map(b => b.cliente || ''))).filter(Boolean);
   const uniqueModels = Array.from(new Set(tenantBatches.map(b => b.modelo || b.modelName || ''))).filter(Boolean);
   const uniqueColors = Array.from(new Set(tenantBatches.map(b => b.color || ''))).filter(Boolean);
+  const baseDateAnchor = dateOnlyTime(new Date().toISOString()) ?? Date.now();
+
+  type LoteOperationalStatus = 'OPTIMO' | 'ALERTA' | 'CRITICO' | 'DETENIDO' | 'ENTREGADO' | 'ATRASADO';
+
+  const getBatchCommitmentDate = (batch: Batch, relOrder?: (typeof orders)[number]): string =>
+    rescheduledDates[batch.id] || batch.fechaCompromiso || relOrder?.deliveryDate || relOrder?.fechaCompromiso || '';
+
+  const getLoteOperationalStatus = (batch: Batch, commitmentDate = getBatchCommitmentDate(batch)): LoteOperationalStatus => {
+    if (isDeliveredBatch(batch)) return 'ENTREGADO';
+    if (isPastDueDateOnly(commitmentDate, baseDateAnchor)) return 'ATRASADO';
+    const status = batch.status || batch.estatus || 'OPTIMO';
+    if (status === 'DETENIDO') return 'DETENIDO';
+    if (status === 'CRITICO') return 'CRITICO';
+    if (status === 'ALERTA') return 'ALERTA';
+    return 'OPTIMO';
+  };
+
+  const getLoteStatusPresentation = (status: LoteOperationalStatus) => {
+    switch (status) {
+      case 'ENTREGADO':
+        return {
+          text: 'Entregado',
+          cardClass: 'border-emerald-700/60 bg-emerald-950/20 text-emerald-400',
+          tableClass: 'bg-emerald-950/50 text-emerald-400 border border-emerald-900',
+          modalClass: 'border-emerald-700 bg-emerald-950/20 text-emerald-400'
+        };
+      case 'ATRASADO':
+        return {
+          text: 'Atrasado',
+          cardClass: 'border-rose-700/70 bg-rose-950/25 text-rose-300',
+          tableClass: 'bg-rose-950/50 text-rose-300 border border-rose-900',
+          modalClass: 'border-rose-700 bg-rose-950/20 text-rose-300'
+        };
+      case 'DETENIDO':
+        return {
+          text: 'Detenido',
+          cardClass: 'border-slate-700 bg-slate-900/40 text-slate-400',
+          tableClass: 'bg-slate-900/50 text-slate-400 border border-slate-850',
+          modalClass: 'border-slate-700 bg-slate-900/40 text-slate-400'
+        };
+      case 'CRITICO':
+        return {
+          text: 'Crítico',
+          cardClass: 'border-rose-700/60 bg-rose-950/20 text-rose-400',
+          tableClass: 'bg-rose-950/50 text-rose-400 border border-rose-900',
+          modalClass: 'border-rose-700 bg-rose-950/20 text-rose-400'
+        };
+      case 'ALERTA':
+        return {
+          text: 'Alerta',
+          cardClass: 'border-amber-700/60 bg-amber-950/20 text-amber-500',
+          tableClass: 'bg-amber-950/50 text-amber-550 border border-amber-900',
+          modalClass: 'border-amber-700 bg-amber-950/20 text-amber-500'
+        };
+      default:
+        return {
+          text: 'En tiempo',
+          cardClass: 'border-emerald-700/60 bg-emerald-950/20 text-emerald-400',
+          tableClass: 'bg-emerald-950/50 text-emerald-400 border border-emerald-900',
+          modalClass: 'border-emerald-700 bg-emerald-950/20 text-emerald-400'
+        };
+    }
+  };
 
   // Filtering Logic
   const filteredBatches = tenantBatches.filter(b => {
@@ -1886,10 +2145,10 @@ export const PipelineLoteView: React.FC = () => {
     const clientVal = b.cliente || relOrder?.clientName || '';
     const modelVal = b.modelo || b.modelName || '';
     const opVal = b.responsableActual || b.operatorId || '';
-    const currentStatus = b.status || 'OPTIMO';
 
     // Apply Overrides 
-    const currentFechaCompromiso = rescheduledDates[b.id] || b.fechaCompromiso || relOrder?.deliveryDate || '';
+    const currentFechaCompromiso = getBatchCommitmentDate(b, relOrder);
+    const currentStatus = getLoteOperationalStatus(b, currentFechaCompromiso);
 
     if (filtroCliente && !clientVal.toLowerCase().includes(filtroCliente.toLowerCase())) return false;
     if (filtroOC && !ocVal.toLowerCase().includes(filtroOC.toLowerCase())) return false;
@@ -1900,11 +2159,12 @@ export const PipelineLoteView: React.FC = () => {
 
     // Estatus filter: En tiempo, Alerta, Crítico, Detenido, Embarcado
     if (filtroEstatus) {
-      if (filtroEstatus === 'En tiempo' && (currentStatus !== 'OPTIMO' || isDeliveredBatch(b))) return false;
+      if (filtroEstatus === 'En tiempo' && currentStatus !== 'OPTIMO') return false;
+      if (filtroEstatus === 'Atrasado' && currentStatus !== 'ATRASADO') return false;
       if (filtroEstatus === 'Alerta' && currentStatus !== 'ALERTA') return false;
       if (filtroEstatus === 'Crítico' && currentStatus !== 'CRITICO') return false;
       if (filtroEstatus === 'Detenido' && currentStatus !== 'DETENIDO') return false;
-      if (filtroEstatus === 'Entregado' && !isDeliveredBatch(b)) return false;
+      if (filtroEstatus === 'Entregado' && currentStatus !== 'ENTREGADO') return false;
     }
 
     if (filtroFechaCompromiso && !currentFechaCompromiso.includes(filtroFechaCompromiso)) return false;
@@ -1938,17 +2198,17 @@ export const PipelineLoteView: React.FC = () => {
     if (filtroInventarioFechaHasta && (!fechaAlta || fechaAlta > filtroInventarioFechaHasta)) return false;
     return true;
   });
+  const visibleInventoryReportBatches = inventoryReportBatches.slice(0, MAX_PIPELINE_INVENTORY_ROWS);
 
   // KPI Calculations responsive to filters
   const lotesActivos = filteredBatches.filter(b => !isDeliveredBatch(b)).length;
   const paresActivos = filteredBatches.filter(b => !isDeliveredBatch(b)).reduce((acc, b) => acc + getBatchPairs(b), 0);
-  const baseDateAnchor = dateOnlyTime(new Date().toISOString()) ?? Date.now();
   const lotesVencidos = filteredBatches.filter(b => {
-    return isPastDueDateOnly(b.fechaCompromiso, baseDateAnchor) && !isDeliveredBatch(b);
+    return getLoteOperationalStatus(b) === 'ATRASADO';
   }).length;
   const paresVencidos = filteredBatches
     .filter(b => {
-      return isPastDueDateOnly(b.fechaCompromiso, baseDateAnchor) && !isDeliveredBatch(b);
+      return getLoteOperationalStatus(b) === 'ATRASADO';
     })
     .reduce((acc, b) => acc + (b.totalPares || b.quantityShoes || 0), 0);
   const todayIso = dateInPlantTz(new Date());
@@ -1966,6 +2226,9 @@ export const PipelineLoteView: React.FC = () => {
   const bottleneckActual = maxStageDuration.score > 0 ? maxStageDuration.name : 'Ninguno';
 
   const selectedBatch = selectedBatchId ? filteredBatches.find(b => b.id === selectedBatchId) || null : null;
+  const selectedBatchStatusPresentation = selectedBatch
+    ? getLoteStatusPresentation(getLoteOperationalStatus(selectedBatch))
+    : null;
 
   const handleCloseBatchPanel = () => {
     setShowDetailModal(false);
@@ -1993,7 +2256,7 @@ export const PipelineLoteView: React.FC = () => {
     addAuditLog(
       'PRODUCCION',
       'BATCH_RESCHEDULED',
-      `Fecha de compromiso para Lote ${selectedBatch.id} reprogramada a ${editFechaTemp}`
+      `Fecha de compromiso para Lote ${batchLoteDisplay(selectedBatch)} reprogramada a ${editFechaTemp}`
     );
 
     setIsEditFechaOpen(false);
@@ -2011,7 +2274,7 @@ export const PipelineLoteView: React.FC = () => {
     addAuditLog(
       'PRODUCCION',
       'BATCH_OBSERVATIONS_UPDATED',
-      `Observaciones actualizadas para Lote ${selectedBatch.id}: ${obsTemp.substring(0, 30)}...`
+      `Observaciones actualizadas para Lote ${batchLoteDisplay(selectedBatch)}: ${obsTemp.substring(0, 30)}...`
     );
   };
 
@@ -2064,9 +2327,9 @@ export const PipelineLoteView: React.FC = () => {
     addAuditLog(
       'PRODUCCION',
       'PRINT_BATCH_TRAVEL_CARD',
-      `Generado e impreso de Tarjeta Viajera PDF para Lote ${selectedBatch?.id} con código QR integrado.`
+      `Generado e impreso de Tarjeta Viajera PDF para Lote ${selectedBatch ? batchLoteDisplay(selectedBatch) : 'N/A'} con código QR integrado.`
     );
-    alert(`🖨️ Señal de Impresión Enviada: Generando documento de control industrial de alta densidad con QR e ID folio: ${selectedBatch?.tarjetaViajera || 'N/A'}`);
+    alert(`🖨️ Señal de Impresión Enviada: Generando documento de control industrial de alta densidad con QR e ID folio: ${selectedBatch ? batchLoteDisplay(selectedBatch) : 'N/A'}`);
   };
 
   // Saturation indicator calculator helper
@@ -2115,14 +2378,22 @@ export const PipelineLoteView: React.FC = () => {
 
       {/* FILTROS SUPERIORES BANNER */}
       <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-4">
-        <div className="flex items-center gap-1.5 border-b border-slate-900 pb-3">
-          <Filter className="w-4 h-4 text-cyan-400" />
-          <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider">
-            Consola de Filtrado Avanzado e ID Lote
-          </h3>
+        <div className="flex items-center justify-between border-b border-slate-900 pb-3">
+          <div className="flex items-center gap-1.5">
+            <Filter className="w-4 h-4 text-cyan-400" />
+            <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider">
+              Consola de Filtrado Avanzado e ID Lote
+            </h3>
+          </div>
+          <button
+            onClick={() => setShowLoteFilters(f => !f)}
+            className="flex items-center gap-1 px-3 py-1.5 bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-white rounded-lg text-xs font-mono transition border border-slate-800 cursor-pointer"
+          >
+            {showLoteFilters ? 'Ocultar filtros' : 'Mostrar filtros'}
+          </button>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+        {showLoteFilters && <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
           {/* Barcode Search */}
           <div className="space-y-1 col-span-1 sm:col-span-2">
             <label className="text-[10px] uppercase font-mono tracking-wider font-bold text-slate-400 block">
@@ -2250,6 +2521,7 @@ export const PipelineLoteView: React.FC = () => {
             >
               <option value="">-- Todos --</option>
               <option value="En tiempo">🟢 En tiempo</option>
+              <option value="Atrasado">🔴 Atrasado</option>
               <option value="Alerta">🟡 Alerta</option>
               <option value="Crítico">🔴 Crítico</option>
               <option value="Detenido">⚪ Detenido</option>
@@ -2283,9 +2555,9 @@ export const PipelineLoteView: React.FC = () => {
               className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1.5 text-xs text-slate-200 focus:outline-none"
             />
           </div>
-        </div>
+        </div>}
 
-        <div className="flex justify-end pt-2">
+        {showLoteFilters && <div className="flex justify-end pt-2">
           <button
             onClick={handleLimpiarFiltros}
             className="flex items-center gap-1 px-3 py-1.5 bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-white rounded-lg text-xs font-mono transition border border-slate-800 cursor-pointer"
@@ -2293,7 +2565,7 @@ export const PipelineLoteView: React.FC = () => {
             <RotateCcw className="w-3.5 h-3.5" />
             Limpiar Filtros
           </button>
-        </div>
+        </div>}
       </div>
 
       {/* KPI CARDS SUPERIORES */}
@@ -2359,15 +2631,16 @@ export const PipelineLoteView: React.FC = () => {
         </div>
       </div>
 
-      {/* SECCIÓN PRINCIPAL: KANBAN BOARD + DETAIL PANEL */}
-      <div className={`grid grid-cols-1 gap-6 ${showDetailModal && selectedBatch ? 'xl:grid-cols-[minmax(0,1fr)_380px]' : ''}`}>
+      {/* SECCIÓN PRINCIPAL: KANBAN BOARD + PANEL LATERAL */}
+      <div className={`grid grid-cols-1 gap-6 items-start ${showDetailModal && selectedBatch ? 'xl:grid-cols-[minmax(0,1fr)_420px]' : ''}`}>
 
         {/* KANBAN BOARD */}
-        <div className="space-y-3">
+        <div className="space-y-3 min-w-0">
           
           <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin snap-x">
             {loteStages.map(stage => {
               const colBatches = filteredBatches.filter(b => normalizeLoteStage(getBatchStageId(b)) === stage.id);
+              const visibleColBatches = colBatches.slice(0, MAX_PIPELINE_STAGE_CARDS);
               const colParesCount = colBatches.reduce((acc, b) => acc + getBatchPairs(b), 0);
               const totalStageTime = colBatches.reduce((acc, b) => acc + (b.tiempoEnEtapaMinutos || 0), 0);
               const avgStageTime = colBatches.length > 0 ? Math.round(totalStageTime / colBatches.length) : 0;
@@ -2426,30 +2699,14 @@ export const PipelineLoteView: React.FC = () => {
                         <span className="text-[9px] font-mono text-slate-500 uppercase tracking-widest">Sin lotes activos</span>
                       </div>
                     ) : (
-                      colBatches.map(b => {
+                      <>
+                      {visibleColBatches.map(b => {
                         const isSelected = selectedBatch?.id === b.id;
                         const timeInEstacion = formatEtapaTime(b.tiempoEnEtapaMinutos);
 
                         // Overrides lookup
                         const computedFechaCompromiso = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '—';
-
-                        // Estatus colors mapping
-                        let statusColorClasses = "border-emerald-700/60 bg-emerald-950/20 text-emerald-400";
-                        let statusText = "En tiempo";
-
-                        if (isDeliveredBatch(b)) {
-                          statusColorClasses = "border-emerald-700/60 bg-emerald-950/20 text-emerald-400";
-                          statusText = "Entregado";
-                        } else if (b.status === 'DETENIDO') {
-                          statusColorClasses = "border-slate-700 bg-slate-900/40 text-slate-400";
-                          statusText = "Detenido";
-                        } else if (b.status === 'CRITICO') {
-                          statusColorClasses = "border-rose-700/60 bg-rose-950/20 text-rose-400";
-                          statusText = "Crítico";
-                        } else if (b.status === 'ALERTA') {
-                          statusColorClasses = "border-amber-700/60 bg-amber-950/20 text-amber-500";
-                          statusText = "Alerta";
-                        }
+                        const statusPresentation = getLoteStatusPresentation(getLoteOperationalStatus(b, computedFechaCompromiso));
 
                         return (
                           <div
@@ -2465,10 +2722,10 @@ export const PipelineLoteView: React.FC = () => {
                             <div className="flex justify-between items-start">
                               <div className="space-y-0.5">
                                 <span className="text-[9px] text-slate-500 font-mono block leading-none">ID LOTE</span>
-                                <h5 className="text-xs font-mono font-bold text-slate-200">{b.id}</h5>
+                                <h5 className="text-xs font-mono font-bold text-slate-200">{batchLoteDisplay(b)}</h5>
                               </div>
-                              <span className={`text-[9px] px-1.5 py-0.5 border rounded-md font-mono font-bold uppercase ${statusColorClasses}`}>
-                                {statusText}
+                              <span className={`text-[9px] px-1.5 py-0.5 border rounded-md font-mono font-bold uppercase ${statusPresentation.cardClass}`}>
+                                {statusPresentation.text}
                               </span>
                             </div>
 
@@ -2485,7 +2742,7 @@ export const PipelineLoteView: React.FC = () => {
                                 </div>
                                 <div>
                                   <span className="text-slate-500 block text-[8px] uppercase">Color / Talla</span>
-                                  <span className="truncate block max-w-[100px] text-slate-200">{b.color} #{b.size}</span>
+                                  <span className="truncate block max-w-[100px] text-slate-200">{(b as any).colorNombre || (b as any).color_nombre || b.color || 'N/D'} #{b.size}</span>
                                 </div>
                               </div>
                             </div>
@@ -2504,7 +2761,13 @@ export const PipelineLoteView: React.FC = () => {
 
                           </div>
                         );
-                      })
+                      })}
+                      {colBatches.length > visibleColBatches.length && (
+                        <div className="p-3 rounded-xl border border-cyan-900/50 bg-cyan-950/10 text-[10px] font-mono text-cyan-300 leading-normal">
+                          Mostrando {visibleColBatches.length.toLocaleString('es-MX')} de {colBatches.length.toLocaleString('es-MX')} lotes. Usa filtros para acotar la lista; los totales de la columna ya incluyen todos los lotes.
+                        </div>
+                      )}
+                      </>
                     )}
                   </div>
 
@@ -2517,10 +2780,15 @@ export const PipelineLoteView: React.FC = () => {
 
         {/* DETAIL SIDE PANEL */}
         {showDetailModal && selectedBatch && (
-          <aside className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 xl:sticky xl:top-4 self-start max-h-[calc(100vh-8rem)] overflow-y-auto">
-              <div className="flex justify-between items-center border-b border-slate-900 pb-3">
-                <span className="text-[9px] font-mono text-cyan-400 font-bold uppercase tracking-wider">Panel de Diagnóstico Lote</span>
-                <button onClick={handleCloseBatchPanel} className="text-slate-500 hover:text-slate-200 text-lg leading-none">✕</button>
+          <aside className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 w-full xl:w-[420px] max-h-[calc(100vh-7rem)] overflow-y-auto sticky top-4">
+              <div className="flex justify-end border-b border-slate-900 pb-3">
+                <button
+                  onClick={handleCloseBatchPanel}
+                  aria-label="Cerrar panel de diagnóstico"
+                  className="h-7 w-7 flex items-center justify-center rounded-lg border border-slate-800 bg-slate-900 text-slate-500 hover:text-slate-200 hover:border-slate-700 transition"
+                >
+                  <X className="h-4 w-4" />
+                </button>
               </div>
           {selectedBatch ? (
             <div className="space-y-5">
@@ -2532,18 +2800,16 @@ export const PipelineLoteView: React.FC = () => {
                 </span>
                 <div className="flex justify-between items-center mt-0.5">
                   <h3 className="text-base font-bold font-mono text-slate-100 uppercase">
-                    {selectedBatch.id}
+                    {batchLoteDisplay(selectedBatch)}
                   </h3>
-                  <span className={`text-[10px] px-2 py-0.5 border rounded-full font-mono font-bold ${
-                    selectedBatch.status === 'OPTIMO' ? 'border-emerald-700 bg-emerald-950/20 text-emerald-400' :
-                    selectedBatch.status === 'ALERTA' ? 'border-amber-700 bg-amber-950/20 text-amber-500' :
-                    selectedBatch.status === 'CRITICO' ? 'border-rose-700 bg-rose-950/20 text-rose-400' : 'border-slate-700 bg-slate-900/40 text-slate-400'
+                  <span className={`text-[10px] px-2 py-0.5 border rounded-full font-mono font-bold uppercase ${
+                    selectedBatchStatusPresentation?.modalClass ?? 'border-slate-700 bg-slate-900/40 text-slate-400'
                   }`}>
-                    {selectedBatch.status}
+                    {selectedBatchStatusPresentation?.text ?? selectedBatch.status}
                   </span>
                 </div>
                 <p className="text-[10px] text-slate-500 font-mono mt-1">
-                  ID Lote: {selectedBatch.idLote || selectedBatch.id}
+                  ID Lote: {batchLoteDisplay(selectedBatch)}
                 </p>
               </div>
 
@@ -2836,6 +3102,11 @@ export const PipelineLoteView: React.FC = () => {
         </div>
 
         <div className="overflow-x-auto">
+          {inventoryReportBatches.length > visibleInventoryReportBatches.length && (
+            <div className="mb-3 rounded-lg border border-cyan-900/50 bg-cyan-950/10 px-3 py-2 text-[10px] font-mono text-cyan-300">
+              Mostrando {visibleInventoryReportBatches.length.toLocaleString('es-MX')} de {inventoryReportBatches.length.toLocaleString('es-MX')} lotes en la tabla. Los filtros reducen este listado sin cambiar los totales del pipeline.
+            </div>
+          )}
           <table className="w-full text-left border-collapse text-xs">
             <thead>
               <tr className="border-b border-slate-900 text-[10px] text-slate-505 uppercase font-mono tracking-wider font-extrabold bg-slate-900/40">
@@ -2861,30 +3132,14 @@ export const PipelineLoteView: React.FC = () => {
                   </td>
                 </tr>
               ) : (
-                inventoryReportBatches.map(b => {
+                visibleInventoryReportBatches.map(b => {
                   const relOrder = orders.find(o => o.id === b.orderId);
                   const displayOC = b.oc || relOrder?.oc || 'S/O';
                   const displayClient = b.cliente || relOrder?.clientName || 'S/C';
                   const displayModel = b.modelo || b.modelName || 'S/Modelo';
                   const displayFecha = rescheduledDates[b.id] || b.fechaCompromiso?.split('T')[0] || '—';
-                  const currentStatus = b.status || 'OPTIMO';
-
-                  let statusText = "En tiempo";
-                  let statClass = "bg-emerald-950/50 text-emerald-400 border border-emerald-900";
+                  const statusPresentation = getLoteStatusPresentation(getLoteOperationalStatus(b, displayFecha));
                   const batchStage = getBatchStageId(b);
-                  if (isDeliveredBatch(b)) {
-                    statusText = "Entregado";
-                    statClass = "bg-emerald-950/50 text-emerald-400 border border-emerald-900";
-                  } else if (currentStatus === 'DETENIDO') {
-                    statusText = "Detenido";
-                    statClass = "bg-slate-900/50 text-slate-400 border border-slate-850";
-                  } else if (currentStatus === 'CRITICO') {
-                    statusText = "Crítico";
-                    statClass = "bg-rose-950/50 text-rose-400 border border-rose-900";
-                  } else if (currentStatus === 'ALERTA') {
-                    statusText = "Alerta";
-                    statClass = "bg-amber-950/50 text-amber-550 border border-amber-900";
-                  }
 
                   return (
                     <tr
@@ -2896,7 +3151,7 @@ export const PipelineLoteView: React.FC = () => {
                     >
                       <td className="p-3 truncate max-w-[120px] font-sans font-medium text-slate-200">{displayClient}</td>
                       <td className="p-3 text-slate-300 font-bold">{displayOC}</td>
-                      <td className="p-3 text-cyan-400 font-bold">{b.idLote || b.id}</td>
+                      <td className="p-3 text-cyan-400 font-bold">{batchLoteDisplay(b)}</td>
                       <td className="p-3 text-slate-200">{displayModel}</td>
                       <td className="p-3 text-slate-300">{b.color}</td>
                       <td className="p-3 text-right font-bold">{getBatchPairs(b).toLocaleString('es-MX')}</td>
@@ -2905,8 +3160,8 @@ export const PipelineLoteView: React.FC = () => {
                       <td className="p-3 text-slate-400">{formatEtapaTime(b.tiempoEnEtapaMinutos)}</td>
                       <td className="p-3 text-slate-400">{displayFecha}</td>
                       <td className="p-3 text-center">
-                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase inline-block ${statClass}`}>
-                          {statusText}
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded uppercase inline-block ${statusPresentation.tableClass}`}>
+                          {statusPresentation.text}
                         </span>
                       </td>
                       <td className="p-3 truncate max-w-[110px] text-slate-500">{b.responsableActual || b.operatorId}</td>
@@ -3083,7 +3338,7 @@ export const PipelineLoteView: React.FC = () => {
               <div className="grid grid-cols-2 gap-x-2 gap-y-1.5 text-[10px] border-b border-dashed border-slate-900 pb-3">
                 <div>
                   <span className="text-slate-500 block">LOTE ID:</span>
-                  <span className="font-bold text-slate-200">{selectedBatch.id}</span>
+                  <span className="font-bold text-slate-200">{batchLoteDisplay(selectedBatch)}</span>
                 </div>
                 <div>
                   <span className="text-slate-500 block font-sans">TARJETA VIAJERA:</span>
@@ -3182,7 +3437,7 @@ export const PipelineLoteView: React.FC = () => {
 
             <form onSubmit={handleUpdateFechaCompromiso} className="space-y-3.5 text-xs">
               <div className="space-y-1">
-                <span className="text-slate-500 block font-mono">Lote: {selectedBatch.id}</span>
+                <span className="text-slate-500 block font-mono">Lote: {batchLoteDisplay(selectedBatch)}</span>
                 <span className="text-slate-500 block font-mono">Cliente: {selectedBatch.cliente || 'S/Cliente'}</span>
               </div>
 
@@ -3234,7 +3489,7 @@ export const PipelineLoteView: React.FC = () => {
 
             <form onSubmit={handleRegisterDefect} className="space-y-3.5 text-xs">
               <div className="space-y-1">
-                <span className="text-slate-500 block font-mono">Lote Folio: {selectedBatch.id}</span>
+                <span className="text-slate-500 block font-mono">Lote Folio: {batchLoteDisplay(selectedBatch)}</span>
                 <span className="text-slate-500 block font-mono">Modelo: {selectedBatch.modelo || selectedBatch.modelName}</span>
               </div>
 
@@ -3531,6 +3786,17 @@ export const PipelinePedidoView: React.FC = () => {
     'embarque': 'Embarque',
     'facturacion': 'Facturación'
   };
+
+  const STAGE_CHART_COLORS: Record<StageId, string> = {
+    'alta_pedido': '#3b82f6',
+    'almacen': '#64748b',
+    'inyeccion': '#f59e0b',
+    'estabilizacion': '#a855f7',
+    'aduana': '#f43f5e',
+    'banda': '#6366f1',
+    'embarque': '#10b981',
+    'facturacion': '#14b8a6'
+  };
   const mapDeliveryRiskToSignal = (risk: string): 'VERDE' | 'AMARILLO' | 'ROJO' | 'GRIS' => {
     if (risk === 'VENCIDO' || risk === 'ALTO') return 'ROJO';
     if (risk === 'MEDIO') return 'AMARILLO';
@@ -3639,7 +3905,9 @@ export const PipelinePedidoView: React.FC = () => {
   });
   const erpOrdersWithMetrics = (operationalData?.orderPipeline ?? []).map(o => {
     const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
+    const shippedPairs = getCompletedPairsFromStages(o.pairsByStage, o.shippedPairs ?? 0);
     const progress = o.totalPares > 0 ? Math.min(100, Math.round((producedPairs / o.totalPares) * 100)) : 0;
+    const completed = o.totalPares > 0 && shippedPairs >= o.totalPares;
 
     return {
       id: o.id,
@@ -3656,7 +3924,7 @@ export const PipelinePedidoView: React.FC = () => {
       totalMXN: 0,
       createdAt: o.fechaAlta || '',
       deliveryDate: o.fechaCompromiso || '',
-      status: progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+      status: completed ? 'COMPLETADO' : 'PROCESANDO',
       discountAuthorized: false,
       discountPercentage: 0,
       cliente: o.cliente,
@@ -3665,7 +3933,7 @@ export const PipelinePedidoView: React.FC = () => {
       fechaCompromiso: o.fechaCompromiso || undefined,
       totalPares: o.totalPares,
       producedPairs,
-      estatus: progress >= 100 ? 'COMPLETADO' : 'PROCESANDO',
+      estatus: completed ? 'COMPLETADO' : 'PROCESANDO',
       porcentajeAvance: progress,
       riesgoEntrega: o.risk,
       progress,
@@ -3674,16 +3942,17 @@ export const PipelinePedidoView: React.FC = () => {
       risk: mapDeliveryRiskToSignal(o.risk),
       pairsByStage: o.pairsByStage,
       batchesCount: o.batchesCount,
-      shippedPairs: o.shippedPairs,
-      inProcessPairs: Math.max(0, o.totalPares - producedPairs)
+      shippedPairs,
+      inProcessPairs: Math.max(0, o.totalPares - shippedPairs)
     };
   });
   // Fuente unica: pedidos siempre desde el ERP server-side (universo completo del
   // FDB). Sin fallback al bootstrap limitado.
   const allOrders = operationalData ? erpOrdersWithMetrics : [];
+  type PipelineOrderRow = typeof allOrders[number];
   void fallbackOrdersWithMetrics;
-  const isOpenOrder = (o: { progress: number; status?: string; estatus?: string }) =>
-    o.progress < 100 && o.status !== 'CANCELADO' && o.estatus !== 'CANCELADO';
+  const isOpenOrder = (o: { totalPares: number; shippedPairs: number; status?: string; estatus?: string }) =>
+    o.shippedPairs < o.totalPares && o.status !== 'CANCELADO' && o.estatus !== 'CANCELADO';
 
   // Unique attribute pools for Filter dropdowns
   const clientOptions = Array.from(new Set(allOrders.map(o => o.cliente || o.clientName || ''))).filter(Boolean);
@@ -3784,6 +4053,32 @@ export const PipelinePedidoView: React.FC = () => {
     return Math.round((part / total) * 100);
   };
 
+  const getOrderProgressScheduleMetrics = (o: PipelineOrderRow) => {
+    const dateAlta = o.fechaAlta?.split('T')[0] || o.createdAt?.split('T')[0] || 'N/A';
+    const dateComp = o.fechaCompromiso?.split('T')[0] || o.deliveryDate?.split('T')[0] || 'N/A';
+    const programmedDays = daysBetweenDates(dateAlta, dateComp);
+    const elapsedDays = elapsedProductionDays(dateAlta);
+    const productionDaysPct = percentage(elapsedDays, programmedDays);
+    const facturacionPairs = getCompletedPairsFromStages(o.pairsByStage, o.shippedPairs || 0);
+    const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
+    const progressPct = percentage(producedPairs, o.totalPares);
+    const remainingPairs = Math.max(0, o.totalPares - producedPairs);
+    const remainingPct = Math.max(0, 100 - progressPct);
+
+    return {
+      dateAlta,
+      dateComp,
+      programmedDays,
+      elapsedDays,
+      productionDaysPct,
+      facturacionPairs,
+      producedPairs,
+      progressPct,
+      remainingPairs,
+      remainingPct
+    };
+  };
+
   const handleClearFilters = () => {
     setFiltroCliente('');
     setFiltroOC('');
@@ -3798,6 +4093,23 @@ export const PipelinePedidoView: React.FC = () => {
   };
 
   // Stacked Bar Chart data: Top 5 orders by Volume
+  const bulletChartData = filteredOrders
+    .map(o => {
+      const metrics = getOrderProgressScheduleMetrics(o);
+      const scheduleGap = metrics.productionDaysPct - metrics.progressPct;
+      return {
+        ...metrics,
+        id: o.id,
+        cliente: o.cliente || o.clientName,
+        risk: o.risk,
+        totalPares: o.totalPares,
+        scheduleGap
+      };
+    })
+    .filter(o => o.programmedDays !== null)
+    .sort((a, b) => b.scheduleGap - a.scheduleGap)
+    .slice(0, 12);
+
   const stackedChartData = activeOrders.slice(0, 5).map(o => ({
     name: o.id,
     'Alta Pedido': o.pairsByStage['alta_pedido'] || 0,
@@ -3832,17 +4144,16 @@ export const PipelinePedidoView: React.FC = () => {
     .sort((a, b) => b.value - a.value)
     .slice(0, 4);
 
-  // Generate dynamic array data of pairs per stage for selected order for D3 rendering
-  const selectedStagesArray = activeSelectedOrder ? [
-    { name: 'Entrega', value: activeSelectedOrder.pairsByStage['embarque'] || 0, color: '#10b981' },
-    { name: 'Facturación', value: activeSelectedOrder.pairsByStage['facturacion'] || 0, color: '#14b8a6' },
-    { name: 'Banda', value: activeSelectedOrder.pairsByStage['banda'] || 0, color: '#6366f1' },
-    { name: 'Aduana', value: activeSelectedOrder.pairsByStage['aduana'] || 0, color: '#f43f5e' },
-    { name: 'Estabilización', value: activeSelectedOrder.pairsByStage['estabilizacion'] || 0, color: '#a855f7' },
-    { name: 'Inyección', value: activeSelectedOrder.pairsByStage['inyeccion'] || 0, color: '#f59e0b' },
-    { name: 'Almacén', value: activeSelectedOrder.pairsByStage['almacen'] || 0, color: '#64748b' },
-    { name: 'Alta Pedido', value: activeSelectedOrder.pairsByStage['alta_pedido'] || 0, color: '#3b82f6' }
-  ] : [];
+  // Generate pairs per stage in the same department order used by the dashboard.
+  const selectedStagesArray = activeSelectedOrder
+    ? [...STAGES]
+        .sort((a, b) => a.order - b.order)
+        .map(stage => ({
+          name: STAGE_NAMES[stage.id] || stage.name,
+          value: activeSelectedOrder.pairsByStage[stage.id] || 0,
+          color: STAGE_CHART_COLORS[stage.id]
+        }))
+    : [];
 
   // Lookup defects of the batches mapped to selected order
   const orderBatchesIds = activeSelectedOrder 
@@ -4096,6 +4407,115 @@ export const PipelinePedidoView: React.FC = () => {
 
       </div>
 
+      {/* 3. BULLET CHART: AVANCE VS DIAS PROGRAMADOS */}
+      <div className="bg-slate-950 border border-slate-900 rounded-xl p-4 shadow-xl">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-900 pb-3">
+          <div>
+            <h3 className="text-xs font-bold font-mono text-slate-300 uppercase tracking-wider">
+              Avance de Producción vs Días Programados
+            </h3>
+            <p className="mt-1 text-[10px] text-slate-500 font-sans leading-tight">
+              Bullet chart por pedido: barra = % avance producción, marca = % días transcurridos del programa.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2 text-[9px] font-mono uppercase font-bold">
+            <span className="inline-flex items-center gap-1 text-emerald-300"><span className="h-2 w-2 rounded-full bg-emerald-400"></span>En ritmo</span>
+            <span className="inline-flex items-center gap-1 text-amber-300"><span className="h-2 w-2 rounded-full bg-amber-400"></span>Tensión</span>
+            <span className="inline-flex items-center gap-1 text-rose-300"><span className="h-2 w-2 rounded-full bg-rose-500"></span>Atrasado</span>
+          </div>
+        </div>
+
+        <div className="mt-4 overflow-x-auto">
+          {bulletChartData.length === 0 ? (
+            <div className="h-[220px] flex items-center justify-center text-[10px] text-slate-600 font-mono">
+              SIN PEDIDOS CON FECHAS PROGRAMADAS
+            </div>
+          ) : (
+            <div className="min-w-[720px] space-y-3">
+              <div className="grid grid-cols-[140px_minmax(320px,1fr)_150px] gap-4 px-1 text-[9px] font-mono uppercase tracking-wider text-slate-500">
+                <span>Pedido</span>
+                <div className="grid grid-cols-5">
+                  {[0, 25, 50, 75, 100].map(mark => (
+                    <span key={mark} className={mark === 100 ? 'text-right' : ''}>{mark}%</span>
+                  ))}
+                </div>
+                <span className="text-right">Lectura</span>
+              </div>
+
+              {bulletChartData.map(item => {
+                const markerPct = Math.max(0, Math.min(100, item.productionDaysPct));
+                const progressWidth = Math.max(0, Math.min(100, item.progressPct));
+                const statusTone = item.scheduleGap > 10
+                  ? {
+                      label: 'ATRASADO',
+                      fill: 'bg-rose-500',
+                      text: 'text-rose-300',
+                      border: 'border-rose-900/50',
+                      marker: 'bg-rose-200'
+                    }
+                  : item.scheduleGap > 0
+                    ? {
+                        label: 'TENSION',
+                        fill: 'bg-amber-400',
+                        text: 'text-amber-300',
+                        border: 'border-amber-900/50',
+                        marker: 'bg-amber-100'
+                      }
+                    : {
+                        label: 'EN RITMO',
+                        fill: 'bg-emerald-400',
+                        text: 'text-emerald-300',
+                        border: 'border-emerald-900/50',
+                        marker: 'bg-cyan-100'
+                      };
+
+                return (
+                  <div key={item.id} className={`grid grid-cols-[140px_minmax(320px,1fr)_150px] gap-4 items-center rounded-lg border ${statusTone.border} bg-slate-900/35 px-3 py-2`}>
+                    <div className="min-w-0">
+                      <div className="truncate text-[11px] font-mono font-black text-cyan-300" title={item.id}>{item.id}</div>
+                      <div className="truncate text-[9px] text-slate-500" title={item.cliente}>{item.cliente}</div>
+                    </div>
+
+                    <div className="relative h-9">
+                      <div className="absolute inset-x-0 top-3 h-3 rounded-sm bg-slate-800">
+                        {[25, 50, 75].map(mark => (
+                          <span
+                            key={mark}
+                            className="absolute top-0 h-3 w-px bg-slate-700"
+                            style={{ left: `${mark}%` }}
+                          />
+                        ))}
+                        <span
+                          className={`absolute left-0 top-0 h-3 rounded-sm ${statusTone.fill}`}
+                          style={{ width: `${progressWidth}%` }}
+                        />
+                      </div>
+                      <span
+                        className={`absolute top-0 h-9 w-1 rounded-full ${statusTone.marker} shadow-[0_0_0_1px_rgba(15,23,42,0.9)]`}
+                        style={{ left: `${markerPct}%`, transform: 'translateX(-50%)' }}
+                        title={`${item.productionDaysPct}% dias consumidos`}
+                      />
+                    </div>
+
+                    <div className="text-right font-mono">
+                      <div className={`text-[10px] font-black ${statusTone.text}`}>{statusTone.label}</div>
+                      <div className="text-[9px] text-slate-400">
+                        Avance {item.progressPct}% / Dias {item.productionDaysPct}%
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+
+              <div className="flex flex-wrap justify-between gap-2 px-1 text-[9px] font-mono text-slate-500">
+                <span>Ordenado por mayor desfase: % dias transcurridos menos % avance.</span>
+                <span>Top {bulletChartData.length} pedidos filtrados</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* 4. GRÁFICAS RECHARTS SECTION */}
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
         
@@ -4205,7 +4625,7 @@ export const PipelinePedidoView: React.FC = () => {
       </div>
 
       {/* 3. TABLA PRINCIPAL POR PEDIDO + PANEL DERECHO DE DETALLE */}
-      <div className={`grid grid-cols-1 gap-6 ${isOrderPanelOpen ? 'xl:grid-cols-[minmax(0,1fr)_380px]' : ''}`}>
+      <div className="grid grid-cols-1 gap-6">
         
         {/* Table Spreadsheet container */}
         <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl flex flex-col justify-between overflow-hidden">
@@ -4261,16 +4681,7 @@ export const PipelinePedidoView: React.FC = () => {
                   ) : (
                     filteredOrders.map(o => {
                       const isSelected = activeSelectedOrder?.id === o.id;
-                      const dateAlta = o.fechaAlta?.split('T')[0] || o.createdAt?.split('T')[0] || 'N/A';
-                      const dateComp = o.fechaCompromiso?.split('T')[0] || o.deliveryDate?.split('T')[0] || 'N/A';
-                      const programmedDays = daysBetweenDates(dateAlta, dateComp);
-                      const elapsedDays = elapsedProductionDays(dateAlta);
-                      const productionDaysPct = percentage(elapsedDays, programmedDays);
-                      const facturacionPairs = getCompletedPairsFromStages(o.pairsByStage, o.shippedPairs || 0);
-                      const producedPairs = getProducedPairsFromStages(o.pairsByStage, o.producedPairs ?? o.shippedPairs ?? 0);
-                      const progressPct = percentage(producedPairs, o.totalPares);
-                      const remainingPairs = Math.max(0, o.totalPares - producedPairs);
-                      const remainingPct = Math.max(0, 100 - progressPct);
+                      const metrics = getOrderProgressScheduleMetrics(o);
 
                       return (
                         <tr 
@@ -4284,15 +4695,15 @@ export const PipelinePedidoView: React.FC = () => {
                           <td className="py-3 px-3 font-sans font-medium text-slate-350 truncate max-w-[150px]" title={o.cliente || o.clientName}>{o.cliente || o.clientName}</td>
                           <td className="py-3 px-3 text-slate-400">{o.oc || 'N/A'}</td>
                           <td className="py-3 px-3 font-bold text-cyan-400 font-mono">{o.id}</td>
-                          <td className="py-3 px-3 text-slate-450">{dateAlta}</td>
-                          <td className="py-3 px-3 text-slate-300 font-semibold">{dateComp}</td>
-                          <td className="py-3 px-3 text-right text-slate-300">{programmedDays ?? 'N/A'}</td>
-                          <td className="py-3 px-3 text-right text-cyan-300 font-bold">{productionDaysPct}%</td>
-                          <td className="py-3 px-3 text-right text-emerald-300 font-bold">{progressPct}%</td>
+                          <td className="py-3 px-3 text-slate-450">{metrics.dateAlta}</td>
+                          <td className="py-3 px-3 text-slate-300 font-semibold">{metrics.dateComp}</td>
+                          <td className="py-3 px-3 text-right text-slate-300">{metrics.programmedDays ?? 'N/A'}</td>
+                          <td className="py-3 px-3 text-right text-cyan-300 font-bold">{metrics.productionDaysPct}%</td>
+                          <td className="py-3 px-3 text-right text-emerald-300 font-bold">{metrics.progressPct}%</td>
                           <td className="py-3 px-3 text-right font-black text-slate-100">{o.totalPares.toLocaleString()}</td>
-                          <td className="py-3 px-3 text-right font-black text-cyan-300">{producedPairs.toLocaleString()}</td>
-                          <td className="py-3 px-3 text-right font-black text-amber-300">{remainingPairs.toLocaleString()}</td>
-                          <td className="py-3 px-3 text-right text-amber-300 font-bold">{remainingPct}%</td>
+                          <td className="py-3 px-3 text-right font-black text-cyan-300">{metrics.producedPairs.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right font-black text-amber-300">{metrics.remainingPairs.toLocaleString()}</td>
+                          <td className="py-3 px-3 text-right text-amber-300 font-bold">{metrics.remainingPct}%</td>
                           
                           {/* 7 Stage details mapped individually with custom background densities */}
                           <td className="py-3 px-2 text-center text-blue-300 bg-blue-950/5">{(o.pairsByStage['alta_pedido'] || 0).toLocaleString()}</td>
@@ -4302,7 +4713,7 @@ export const PipelinePedidoView: React.FC = () => {
                           <td className="py-3 px-2 text-center text-rose-300 bg-rose-950/5">{(o.pairsByStage['aduana'] || 0).toLocaleString()}</td>
                           <td className="py-3 px-2 text-center text-indigo-300 bg-indigo-950/5">{(o.pairsByStage['banda'] || 0).toLocaleString()}</td>
                           <td className="py-3 px-2 text-center text-emerald-400 bg-emerald-950/5">{(o.pairsByStage['embarque'] || 0).toLocaleString()}</td>
-                          <td className="py-3 px-2 text-center text-teal-300 bg-teal-950/5">{facturacionPairs.toLocaleString()}</td>
+                          <td className="py-3 px-2 text-center text-teal-300 bg-teal-950/5">{metrics.facturacionPairs.toLocaleString()}</td>
                           
                           <td className="py-3 px-3">
                             <span className="px-1.5 py-0.5 rounded-md uppercase font-black text-[9px] bg-slate-900 text-slate-300 border border-slate-800">
@@ -4325,9 +4736,10 @@ export const PipelinePedidoView: React.FC = () => {
 
         </div>
 
-        {/* 5. PANEL DE DETALLE LATERAL (Based on Selected Row) */}
+        {/* 5. PANEL DE DETALLE MODAL */}
           {isOrderPanelOpen && activeSelectedOrder && (
-            <aside className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 xl:sticky xl:top-6 self-start max-h-[calc(100vh-8rem)] overflow-y-auto">
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={handleCloseOrderPanel}>
+            <aside className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-5 w-full max-w-[480px] max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
               
               {/* Detail Header */}
               <div className="border-b border-slate-900 pb-3">
@@ -4461,6 +4873,7 @@ export const PipelinePedidoView: React.FC = () => {
               </div>
 
             </aside>
+            </div>
           )}
 
       </div>
@@ -4786,7 +5199,7 @@ export const ProduccionAreaView: React.FC = () => {
   if (worstVal === Infinity) worstHour = 'N/A';
 
   // Unrecorded timeline calculation (Tiempo sin registro)
-  // Check unique hours of selectedDate (defaults to '2026-05-25')
+  // Check unique hours of selectedDate (defaults to today in plant timezone)
   const loggedHoursOfSelectedDay = Array.from(new Set(
     allProductionLogs.filter(l => l.tenantId === currentTenant.id && l.fecha === selectedFecha && (activeArea === 'TODAS' || l.area === activeArea))
         .map(l => l.hora.split(':')[0])
@@ -5490,7 +5903,7 @@ export const ProduccionAreaView: React.FC = () => {
                     <tr key={log.id} className="hover:bg-slate-900/40 transition">
                       <td className="py-3 px-3 text-slate-450">{log.fecha}</td>
                       <td className="py-3 px-3 text-cyan-400 font-bold">{log.pedido || 'S/Pedido'}</td>
-                      <td className="py-3 px-3 text-slate-300 font-bold">{log.lote || 'S/Lote'}</td>
+                      <td className="py-3 px-3 text-slate-300 font-bold">{loteDisplay(log.lote) || 'S/Lote'}</td>
                       <td className="py-3 px-3 font-bold text-cyan-400">{log.hora}</td>
                       <td className="py-3 px-3 text-slate-300 font-semibold">{log.turno}</td>
                       <td className="py-3 px-3 font-bold">
@@ -5813,6 +6226,9 @@ export const ModelosProductosView: React.FC = () => {
   const [qualityAvailable, setQualityAvailable] = useState(false);
   const [performanceLoading, setPerformanceLoading] = useState(backendEnabled);
   const [performanceError, setPerformanceError] = useState<string | null>(null);
+  // Distingue la carga inicial del módulo (pantalla completa) de recargas por
+  // cambio de filtro/fecha (no deben desmontar la consola de filtros).
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(!backendEnabled);
 
   // Track selected model for detail view (Master-Detail)
   const [selectedProductModel, setSelectedProductModel] = useState<string>('');
@@ -5834,13 +6250,14 @@ export const ModelosProductosView: React.FC = () => {
 
   useEffect(() => {
     setPerformanceLogs([]);
+    setHasLoadedOnce(!backendEnabled);
   }, [currentTenant.id]);
 
   useEffect(() => {
     if (!backendEnabled) return;
     let cancelled = false;
-    const start = filtroFecha || filtroRangoInicio;
-    const end = filtroFecha || filtroRangoFin;
+    const start = filtroFecha ? filtroFecha : filtroRangoInicio;
+    const end = filtroFecha ? filtroFecha : filtroRangoFin;
     setPerformanceLoading(true);
     setPerformanceError(null);
     dashboardApi.erpOperativo(start, end)
@@ -5860,7 +6277,7 @@ export const ModelosProductosView: React.FC = () => {
           setPerformanceError('Modelos y Productos');
         }
       })
-      .finally(() => { if (!cancelled) setPerformanceLoading(false); });
+      .finally(() => { if (!cancelled) { setPerformanceLoading(false); setHasLoadedOnce(true); } });
     return () => { cancelled = true; };
   }, [currentTenant.id, filtroFecha, filtroRangoInicio, filtroRangoFin]);
 
@@ -6109,11 +6526,11 @@ export const ModelosProductosView: React.FC = () => {
     { tag: 'Variabilidad / Volumen', tone: 'indigo' as const, text: 'Se identificará el líder de volumen y el rezago en cumplimiento.' }
   ];
 
-  if (backendEnabled && performanceLoading && performanceLogs.length === 0) {
+  if (backendEnabled && !hasLoadedOnce && performanceLoading) {
     return <ModuleLoadingState label="Modelos y Productos" />;
   }
 
-  if (backendEnabled && performanceError && performanceLogs.length === 0) {
+  if (backendEnabled && !hasLoadedOnce && performanceError) {
     return <ModuleDataErrorState label={performanceError} />;
   }
 
@@ -6242,6 +6659,21 @@ export const ModelosProductosView: React.FC = () => {
   const selectedModelCatalog = modelCatalog.find(model =>
     baseModelName(String(model.name || model.nombre || model.codigo || '')) === selectedProductModel
   );
+  const handleModelDateChange = (value: string) => {
+    setFiltroFecha(value);
+    if (value) {
+      setFiltroRangoInicio(value);
+      setFiltroRangoFin(value);
+    }
+  };
+  const handleModelRangeStartChange = (value: string) => {
+    setFiltroFecha('');
+    setFiltroRangoInicio(value);
+  };
+  const handleModelRangeEndChange = (value: string) => {
+    setFiltroFecha('');
+    setFiltroRangoFin(value);
+  };
 
   const handleClearFiltersAll = () => {
     setFiltroModelo('');
@@ -6280,6 +6712,11 @@ export const ModelosProductosView: React.FC = () => {
           <div className="flex items-center gap-2">
             <Filter className="w-4 h-4 text-cyan-500" />
             <span className="text-xs font-mono text-slate-300 uppercase tracking-wider font-bold">Consola de Ingeniería y Productos</span>
+            {hasLoadedOnce && performanceLoading && (
+              <span className="text-[10px] font-mono text-cyan-500 uppercase tracking-wider animate-pulse">
+                Actualizando…
+              </span>
+            )}
           </div>
           <button
             onClick={handleClearFiltersAll}
@@ -6343,7 +6780,7 @@ export const ModelosProductosView: React.FC = () => {
             <input
               type="date"
               value={filtroFecha}
-              onChange={(e) => setFiltroFecha(e.target.value)}
+              onChange={(e) => handleModelDateChange(e.target.value)}
               className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
             />
           </div>
@@ -6354,7 +6791,7 @@ export const ModelosProductosView: React.FC = () => {
             <input
               type="date"
               value={filtroRangoInicio}
-              onChange={(e) => setFiltroRangoInicio(e.target.value)}
+              onChange={(e) => handleModelRangeStartChange(e.target.value)}
               className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs text-slate-200 focus:outline-none"
             />
           </div>
@@ -6365,7 +6802,7 @@ export const ModelosProductosView: React.FC = () => {
             <input
               type="date"
               value={filtroRangoFin}
-              onChange={(e) => setFiltroRangoFin(e.target.value)}
+              onChange={(e) => handleModelRangeEndChange(e.target.value)}
               className="w-full bg-slate-900 border border-slate-800 rounded-lg p-1 text-xs text-slate-200 focus:outline-none"
             />
           </div>
@@ -6488,13 +6925,13 @@ export const ModelosProductosView: React.FC = () => {
 
       </div>
 
-      {/* 6. AUTOMATED INSIGHTS / RECOMENDACIONES SIMULADAS */}
+      {/* 6. INSIGHTS BAJO DEMANDA (diagnóstico calculado de los registros filtrados) */}
       <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
           <div className="flex items-center gap-2">
             <Activity className="w-5 h-5 text-indigo-400" />
             <h3 className="text-xs font-bold font-mono text-slate-200 uppercase tracking-widest">
-              💡 Insights Automáticos y Diagnóstico Operativo Simulador
+              💡 Insights Automáticos y Diagnóstico Operativo
             </h3>
           </div>
           <button
@@ -6886,14 +7323,14 @@ export const ModelosProductosView: React.FC = () => {
               </div>
             </div>
 
-            {/* Operational recommendation block */}
+            {/* Resumen operativo del modelo (métricas reales del corte) */}
             <div className="p-4 bg-slate-950 rounded-lg border border-slate-850 space-y-2">
               <span className="text-[10px] font-mono text-cyan-400 font-bold block uppercase tracking-wider">
-                💡 RECOMENDACIÓN OPERATIVA SISMULADA CHAT G:
+                📊 Resumen operativo del modelo
               </span>
-              <p className="text-[11.5px] italic text-slate-300 leading-relaxed font-sans font-medium">
+              <p className="text-[11.5px] text-slate-300 leading-relaxed font-sans font-medium">
                 {selectedProductModel && (
-                  <span>Modelo <strong>{selectedProductModel}</strong>: defectivo <strong>{qualityAvailable ? `${selectedModelDefectPct}%` : 'N/D'}</strong>, cumplimiento <strong>{selectedModelCompliance}%</strong>. Recomendación pendiente de análisis AI real.</span>
+                  <span>Modelo <strong>{selectedProductModel}</strong>: defectivo <strong>{qualityAvailable ? `${selectedModelDefectPct}%` : 'N/D (el ERP no registra defectos)'}</strong>, cumplimiento de entrega <strong>{selectedModelCompliance}%</strong> en el corte filtrado.</span>
                 )}
               </p>
             </div>
@@ -7061,6 +7498,81 @@ export const CalidadView: React.FC = () => {
   });
   const sortedModels = Object.entries(modelDefects).sort((a, b) => b[1] - a[1]);
   const modeloCritico = sortedModels[0]?.[0] || 'Ninguno';
+
+  // --- Insights de calidad bajo demanda: solo hallazgos calculados de los registros filtrados ---
+  const [calidadInsights, setCalidadInsights] = useState<{ tag: string; tone: string; text: string }[] | null>(null);
+  const [calidadInsightsGenerating, setCalidadInsightsGenerating] = useState(false);
+
+  const buildCalidadInsights = (): { tag: string; tone: string; text: string }[] => {
+    if (filteredRecords.length === 0) {
+      return [{
+        tag: 'Sin registros',
+        tone: 'slate',
+        text: 'No hay registros de inspección en el corte/filtros actuales. Captura inspecciones o amplía el rango de fechas para generar el diagnóstico.'
+      }];
+    }
+    const cards: { tag: string; tone: string; text: string }[] = [];
+
+    if (totalDefectos > 0) {
+      cards.push({
+        tag: 'Defecto Recurrente',
+        tone: 'rose',
+        text: `La anomalía principal del corte es "${defectoPrincipal}" (${(sortedDefects[0]?.[1] || 0).toLocaleString()} pares), concentrada en el área de ${areaMayorDefecto}.`
+      });
+      cards.push({
+        tag: 'Modelo Bajo Lupa',
+        tone: 'pink',
+        text: `El modelo ${modeloCritico} acumula el mayor defecto del corte (${(sortedModels[0]?.[1] || 0).toLocaleString()} pares afectados).`
+      });
+      cards.push({
+        tag: 'Máquina / Banda Crítica',
+        tone: 'amber',
+        text: `${maquinaBandaCritica} concentra ${(sortedDevices[0]?.[1] || 0).toLocaleString()} pares con defecto, el mayor del corte.`
+      });
+      const turnoDefects: Record<string, number> = {};
+      filteredRecords.forEach(r => { turnoDefects[r.turno] = (turnoDefects[r.turno] || 0) + r.cantidadDefecto; });
+      const turnoCritico = Object.entries(turnoDefects).sort((a, b) => b[1] - a[1])[0];
+      if (turnoCritico && turnoCritico[1] > 0) {
+        cards.push({
+          tag: 'Turno Crítico',
+          tone: 'cyan',
+          text: `El Turno ${turnoCritico[0]} registra ${turnoCritico[1].toLocaleString()} pares con defecto, el mayor entre turnos del corte.`
+        });
+      }
+    } else {
+      cards.push({
+        tag: 'Calidad & Defectos',
+        tone: 'rose',
+        text: `Sin defectos registrados en el corte: ${totalInspeccionado.toLocaleString()} pares inspeccionados sin anomalías capturadas.`
+      });
+    }
+
+    cards.push({
+      tag: 'Tasas del Corte',
+      tone: 'indigo',
+      text: `Sobre ${totalInspeccionado.toLocaleString()} pares inspeccionados: ${pctDefectivo}% defectivo, ${pctSegundas}% segundas, ${totalReproceso.toLocaleString()} reprocesos y ${totalMerma.toLocaleString()} de merma.`
+    });
+
+    return cards;
+  };
+
+  const handleGenerateCalidadInsights = () => {
+    setCalidadInsightsGenerating(true);
+    setTimeout(() => {
+      setCalidadInsights(buildCalidadInsights());
+      setCalidadInsightsGenerating(false);
+      addAuditLog('CALIDAD', 'AI_INSIGHTS_GENERATED', `Insights de calidad generados con ${filteredRecords.length} registros filtrados`);
+    }, 500);
+  };
+
+  const CALIDAD_TONE_CLASSES: Record<string, { wrap: string; tag: string }> = {
+    rose: { wrap: 'bg-rose-950/15 border-rose-900/30', tag: 'text-rose-400' },
+    pink: { wrap: 'bg-pink-950/15 border-pink-900/30', tag: 'text-pink-400' },
+    amber: { wrap: 'bg-amber-950/15 border-amber-900/30', tag: 'text-amber-500' },
+    indigo: { wrap: 'bg-indigo-950/15 border-indigo-900/40', tag: 'text-indigo-400' },
+    cyan: { wrap: 'bg-cyan-950/15 border-cyan-900/30', tag: 'text-cyan-400' },
+    slate: { wrap: 'bg-slate-900/40 border-slate-800', tag: 'text-slate-400' }
+  };
 
   // CLEAR ALL FILTER HANDLER
   const handleClearFilters = () => {
@@ -7587,53 +8099,43 @@ export const CalidadView: React.FC = () => {
 
       </div>
 
-      {/* 6. PANEL DE INSIGHTS AUTOMÁTICOS */}
+      {/* 6. PANEL DE INSIGHTS BAJO DEMANDA (calculados de los registros filtrados) */}
       <div className="bg-slate-950 border border-slate-900 rounded-xl p-5 shadow-2xl space-y-3">
-        <div className="flex items-center gap-2">
-          <Activity className="w-5 h-5 text-pink-500" />
-          <h3 className="text-xs font-bold font-mono text-slate-200 uppercase tracking-widest">
-            💡 Diagnóstico de Gestión de Calidad (Insights Inteligentes Simulados)
-          </h3>
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <div className="flex items-center gap-2">
+            <Activity className="w-5 h-5 text-pink-500" />
+            <h3 className="text-xs font-bold font-mono text-slate-200 uppercase tracking-widest">
+              💡 Diagnóstico de Gestión de Calidad
+            </h3>
+          </div>
+          <button
+            onClick={handleGenerateCalidadInsights}
+            disabled={calidadInsightsGenerating}
+            className="px-3 py-1.5 text-[10px] font-mono font-bold uppercase tracking-wider rounded bg-pink-900 hover:bg-pink-800 text-white transition-colors disabled:opacity-60 disabled:cursor-wait cursor-pointer"
+          >
+            {calidadInsightsGenerating
+              ? 'Analizando…'
+              : calidadInsights ? 'Regenerar insights' : 'Generar insights'}
+          </button>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
-          
-          <div className="p-3.5 bg-rose-950/15 border border-rose-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-rose-400 font-extrabold uppercase tracking-wider block">Defecto Recurrente</span>
-            <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
-              La anomalía principal detectada en planta es <strong className="text-white">{defectoPrincipal}</strong>, concentrada en el área de <strong className="text-white">{areaMayorDefecto}</strong>.
-            </p>
+        {calidadInsights ? (
+          <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-5 gap-4">
+            {calidadInsights.map((card, idx) => {
+              const tone = CALIDAD_TONE_CLASSES[card.tone] || CALIDAD_TONE_CLASSES.slate;
+              return (
+                <div key={idx} className={`p-3.5 border rounded-lg space-y-1 ${tone.wrap}`}>
+                  <span className={`text-[9px] font-mono font-extrabold uppercase tracking-wider block ${tone.tag}`}>{card.tag}</span>
+                  <p className="text-[11px] text-slate-350 leading-relaxed font-sans">{card.text}</p>
+                </div>
+              );
+            })}
           </div>
-
-          <div className="p-3.5 bg-pink-950/15 border border-pink-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-pink-400 font-extrabold uppercase tracking-wider block">Molde Bajo Lupa</span>
-            <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
-              El modelo <strong className="text-white">{modeloCritico}</strong> registra la mayor desviación técnica de inyección EVA, provocando rebaba/porosidades.
-            </p>
-          </div>
-
-          <div className="p-3.5 bg-amber-950/15 border border-amber-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-amber-500 font-extrabold uppercase tracking-wider block">Máquina Crítica</span>
-            <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
-              La máquina <strong className="text-white">{maquinaBandaCritica}</strong> concentra el mayor defecto registrado en FDB/OCR.
-            </p>
-          </div>
-
-          <div className="p-3.5 bg-indigo-950/15 border border-indigo-900/40 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-indigo-400 font-extrabold uppercase tracking-wider block">Banda & Detallado</span>
-            <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
-              La estación <strong className="text-white">Banda Detalle-A</strong> presenta variabilidad en lijado, ocasionando retrabajo/segundas cosméticas.
-            </p>
-          </div>
-
-          <div className="p-3.5 bg-cyan-950/15 border border-cyan-900/30 rounded-lg space-y-1">
-            <span className="text-[9px] font-mono text-cyan-400 font-extrabold uppercase tracking-wider block">Auditoría / Turno</span>
-            <p className="text-[11px] text-slate-350 leading-relaxed font-sans">
-              La inspector <strong className="text-white">Ins. Patricia Ruiz</strong> en <strong className="text-white">Turno 3 (Nocturno)</strong> reporta mayor precisión en mermas críticas.
-            </p>
-          </div>
-
-        </div>
+        ) : (
+          <p className="text-[11px] text-slate-500 italic font-sans">
+            Pulsa «Generar insights» para calcular el diagnóstico (defecto recurrente, modelo y máquina críticos, turno y tasas) sobre los registros del corte actual. No se muestra información que el sistema no registre.
+          </p>
+        )}
       </div>
 
       {/* 3. CONSOLA DE COMPONENTES RECHARTS CON TAB SWITCHER (10 TOTAL GRAPHICS) */}
@@ -7966,7 +8468,7 @@ export const CalidadView: React.FC = () => {
                     <td className="py-2.5 px-3 text-slate-300 whitespace-nowrap">{rec.maquinaOBanda}</td>
                     <td className="py-2.5 px-3 text-slate-400 font-sans whitespace-nowrap">{rec.inspector}</td>
                     <td className="py-2.5 px-3 text-slate-500 font-sans whitespace-nowrap">{rec.lider}</td>
-                    <td className="py-2.5 px-3 text-cyan-400 font-bold">{rec.lote}</td>
+                    <td className="py-2.5 px-3 text-cyan-400 font-bold">{loteDisplay(rec.lote)}</td>
                     <td className="py-2.5 px-3 text-white font-sans font-medium uppercase whitespace-nowrap">{rec.modelo}</td>
                     <td className="py-2.5 px-3 text-slate-400 font-sans whitespace-nowrap">{rec.color}</td>
                     <td className="py-2.5 px-3 text-right text-slate-350">T{rec.talla}</td>
@@ -8331,6 +8833,17 @@ export const InyeccionView: React.FC = () => {
     return true;
   });
 
+  // Producción REAL del área de inyección (escaneos de tarjeta viajera) para la fecha filtrada.
+  const [injProdData, setInjProdData] = useState<ErpOperationalResponse | null>(null);
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    dashboardApi.erpOperativo(filtroFecha, filtroFecha)
+      .then(data => { if (!cancelled) setInjProdData(data); })
+      .catch(err => { console.warn('Inyección: ERP operativo fetch failed', err); });
+    return () => { cancelled = true; };
+  }, [filtroFecha]);
+
   const handleClearFilters = () => {
     setFiltroFecha(todayPlantDate());
     setFiltroTurno('');
@@ -8382,11 +8895,10 @@ export const InyeccionView: React.FC = () => {
 
   // KPI Calculations
   const baseGoal = 15000;
-  const hoyDate = '2026-05-25';
   const selectedTurnCode = filtroTurno === '2' ? 'TARDE' : filtroTurno === '3' ? 'NOCHE' : 'MAÑANA';
   
-  // 1. Pares inyectados hoy matching standard 2026-05-25 or latest date
-  const recordsHoy = filteredRecords.filter(r => r.fecha === (filtroFecha || hoyDate));
+  // 1. Pares inyectados en la fecha filtrada, o hoy si el filtro fue limpiado
+  const recordsHoy = filteredRecords.filter(r => r.fecha === (filtroFecha || todayPlantDate()));
   const paresInyectadosHoy = recordsHoy.reduce((sum, r) => sum + r.totalInspeccionado, 0);
 
   // 2. Meta diaria
@@ -8465,20 +8977,9 @@ export const InyeccionView: React.FC = () => {
 
   // GRAPHICS DATA PROCESSINGS (HEAT / AMBER ORANGE INYECTION PALETTE)
 
-  // 1. Producción por hora en inyección (represented symmetrically as 10 proportional points)
-  const baseHourlyFactor = totalInspeccionadoScope / 16400;
-  const prodHourlyData = [
-    { hour: '06:00', 'Pares': Math.round(520 * baseHourlyFactor) },
-    { hour: '08:00', 'Pares': Math.round(780 * baseHourlyFactor) },
-    { hour: '10:00', 'Pares': Math.round(890 * baseHourlyFactor) },
-    { hour: '12:00', 'Pares': Math.round(810 * baseHourlyFactor) },
-    { hour: '14:00', 'Pares': Math.round(750 * baseHourlyFactor) },
-    { hour: '16:00', 'Pares': Math.round(790 * baseHourlyFactor) },
-    { hour: '18:00', 'Pares': Math.round(910 * baseHourlyFactor) },
-    { hour: '20:00', 'Pares': Math.round(850 * baseHourlyFactor) },
-    { hour: '22:00', 'Pares': Math.round(620 * baseHourlyFactor) },
-    { hour: '00:00', 'Pares': Math.round(480 * baseHourlyFactor) }
-  ];
+  // 1. Producción por hora en inyección — REAL desde los escaneos de la tarjeta viajera
+  //    (gen_por) que el backend agrega en productionHourly. Throughput del área, no WIP.
+  const prodHourlyData = hourlyProductionForArea(injProdData?.productionHourly, 'inyeccion');
 
   // 2. Producción por máquina
   const machineProdChartData = machineCards.map(m => ({
@@ -8956,7 +9457,7 @@ export const InyeccionView: React.FC = () => {
               <h4 className="text-xs font-black font-mono text-slate-350 uppercase mb-1">
                 ⏱️ Producción por Hora en Inyección
               </h4>
-              <p className="text-[9px] text-slate-550 mb-3">Distribución proporcional de vulcanizado EVA en 24 horas.</p>
+              <p className="text-[9px] text-slate-550 mb-3">Pares producidos por hora · escaneos reales de tarjeta viajera (FDB).</p>
               <div className="h-[280px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
@@ -8977,7 +9478,7 @@ export const InyeccionView: React.FC = () => {
               <h4 className="text-xs font-black font-mono text-slate-350 uppercase mb-1">
                 ⚙️ Producción por Máquina Prensa
               </h4>
-              <p className="text-[9px] text-slate-550 mb-3">Volumen inspeccionado por celda termoplástica en el periodo.</p>
+              <p className="text-[9px] text-slate-550 mb-3">Detalle por máquina: captura manual — el FDB no registra máquina en el escaneo.</p>
               <div className="h-[280px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
@@ -9193,7 +9694,7 @@ export const InyeccionView: React.FC = () => {
                   </div>
                   <div className="flex justify-between">
                     <span>Lote:</span>
-                    <strong className="text-cyan-400 truncate max-w-[80px]">{m.lote}</strong>
+                    <strong className="text-cyan-400 truncate max-w-[80px]">{loteDisplay(m.lote)}</strong>
                   </div>
                 </div>
 
@@ -9310,7 +9811,7 @@ export const InyeccionView: React.FC = () => {
                     </td>
                     <td className="p-3 font-semibold font-mono text-slate-200 whitespace-nowrap">{rec.maquina}</td>
                     <td className="p-3 font-mono text-slate-400 text-[10px] whitespace-nowrap">{rec.molde}</td>
-                    <td className="p-3 font-mono font-bold text-cyan-400 whitespace-nowrap">{rec.lote}</td>
+                    <td className="p-3 font-mono font-bold text-cyan-400 whitespace-nowrap">{loteDisplay(rec.lote)}</td>
                     <td className="p-3 font-medium text-slate-200 whitespace-nowrap">{rec.modelo}</td>
                     <td className="p-3 text-slate-400 whitespace-nowrap">{rec.color}</td>
                     <td className="p-3 font-mono text-slate-400">{rec.talla}</td>
@@ -9711,6 +10212,17 @@ export const BandaView: React.FC = () => {
     return true;
   });
 
+  // Producción REAL del área de banda (escaneos de tarjeta viajera) para la fecha filtrada.
+  const [bandaProdData, setBandaProdData] = useState<ErpOperationalResponse | null>(null);
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    dashboardApi.erpOperativo(filtroFecha, filtroFecha)
+      .then(data => { if (!cancelled) setBandaProdData(data); })
+      .catch(err => { console.warn('Banda: ERP operativo fetch failed', err); });
+    return () => { cancelled = true; };
+  }, [filtroFecha]);
+
   const handleClearFilters = () => {
     setFiltroFecha(todayPlantDate());
     setFiltroTurno('');
@@ -9764,9 +10276,8 @@ export const BandaView: React.FC = () => {
   const baseGoal = 12000;
   const selectedTurnCode = filtroTurno === '2' ? 'TARDE' : filtroTurno === '3' ? 'NOCHE' : 'MAÑANA';
   const metaDiariaBanda = getGoalForAreaTurn('banda', selectedTurnCode)?.metaTurno || baseGoal;
-  const hoyDate = '2026-05-25';
   
-  const recordsHoy = filteredRecords.filter(r => r.fecha === (filtroFecha || hoyDate));
+  const recordsHoy = filteredRecords.filter(r => r.fecha === (filtroFecha || todayPlantDate()));
   const paresProcesadosHoy = recordsHoy.reduce((sum, r) => sum + r.totalProcesado, 0);
   const cumplimientoMeta = metaDiariaBanda > 0 ? Number(((paresProcesadosHoy / metaDiariaBanda) * 100).toFixed(1)) : 0;
   const promedioParesPorHora = paresProcesadosHoy > 0 ? Math.round(paresProcesadosHoy / 8) : 0;
@@ -9828,14 +10339,9 @@ export const BandaView: React.FC = () => {
   const activeBandsCount = bandaCards.filter(b => b.estado === 'activa' || b.estado === 'saturada').length;
 
   // Hourly Line charts
-  const baseHourlyFactor = totalProcesadoScope / 12000;
-  const prodHourlyData = [
-    { hour: '06:00', 'Pares': Math.round(410 * baseHourlyFactor) },
-    { hour: '10:00', 'Pares': Math.round(750 * baseHourlyFactor) },
-    { hour: '14:00', 'Pares': Math.round(610 * baseHourlyFactor) },
-    { hour: '18:00', 'Pares': Math.round(730 * baseHourlyFactor) },
-    { hour: '22:00', 'Pares': Math.round(490 * baseHourlyFactor) }
-  ];
+  // Producción por hora en banda — REAL desde los escaneos de la tarjeta viajera (gen_por)
+  // que el backend agrega en productionHourly. Throughput del área, no WIP.
+  const prodHourlyData = hourlyProductionForArea(bandaProdData?.productionHourly, 'banda');
 
   const bandaProdChartData = bandaCards.map(b => ({ name: b.name, 'Pares': b.produccion }));
   const bandaDefChartData = bandaCards.map(b => ({ name: b.name, 'Defectos': b.defectos }));
@@ -10139,7 +10645,7 @@ export const BandaView: React.FC = () => {
                   <span>Color:</span> <strong className="text-slate-200">{bCard.color}</strong>
                 </div>
                 <div className="flex justify-between border-b border-slate-905 pb-1">
-                  <span>Lote:</span> <strong className="text-amber-500">{bCard.lote}</strong>
+                  <span>Lote:</span> <strong className="text-amber-500">{loteDisplay(bCard.lote)}</strong>
                 </div>
                 <div className="flex justify-between border-b border-slate-905 pb-1">
                   <span>Producción turno:</span> <strong className="text-slate-200">{bCard.produccion.toLocaleString()}</strong>
@@ -10193,6 +10699,7 @@ export const BandaView: React.FC = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⏱️ Producción por hora en banda</h4>
+              <p className="text-[9px] text-slate-550 mb-2">Pares producidos por hora · escaneos reales de tarjeta viajera (FDB).</p>
               <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
@@ -10210,6 +10717,7 @@ export const BandaView: React.FC = () => {
 
             <div className="p-4 bg-slate-900/60 border border-slate-850 rounded-xl">
               <h4 className="text-[11px] font-mono text-slate-300 uppercase font-black mb-2">⚙️ Producción por banda</h4>
+              <p className="text-[9px] text-slate-550 mb-2">Detalle por banda: captura manual — el FDB no registra banda en el escaneo.</p>
               <div className="h-[220px] overflow-x-auto">
                 <div className="w-full min-w-[300px] h-full">
                 <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
@@ -10400,7 +10908,7 @@ export const BandaView: React.FC = () => {
                       <td className="p-3 whitespace-nowrap font-bold text-indigo-400">{rec.banda}</td>
                       <td className="p-3 whitespace-nowrap text-[10px] text-slate-300">{rec.inspector}</td>
                       <td className="p-3 whitespace-nowrap text-[10px] text-slate-400">{rec.lider}</td>
-                      <td className="p-3 whitespace-nowrap text-amber-500 font-bold">{rec.lote}</td>
+                      <td className="p-3 whitespace-nowrap text-amber-500 font-bold">{loteDisplay(rec.lote)}</td>
                       <td className="p-3 whitespace-nowrap font-sans text-slate-200 font-medium">{rec.modelo}</td>
                       <td className="p-3 whitespace-nowrap">{rec.color}</td>
                       <td className="p-3 text-center text-slate-300 font-bold">{rec.talla}</td>
@@ -10712,9 +11220,10 @@ export const AduanaLiberacionView: React.FC = () => {
   const selectedRecord = records.find(r => r.id === selectedRecordId) || records[0];
 
   // KPIs calculations
+  const currentPlantDate = todayPlantDate();
   const totalLotes = filteredRecords.length;
   const totalPares = filteredRecords.reduce((sum, r) => sum + r.totalPares, 0);
-  const lotesLiberadosHoy = filteredRecords.filter(r => r.estatus === 'liberado' && r.fecha === '2026-05-25').length;
+  const lotesLiberadosHoy = filteredRecords.filter(r => r.estatus === 'liberado' && r.fecha === currentPlantDate).length;
   const lotesPendientesVal = filteredRecords.filter(r => r.estatus === 'pendiente').length;
   const lotesBloqueados = filteredRecords.filter(r => r.estatus === 'bloqueado').length;
   
@@ -10749,9 +11258,11 @@ export const AduanaLiberacionView: React.FC = () => {
 
     setFormValidationMsg(null);
 
+    const recordDate = todayPlantDate();
+    const nowStr = plantDateTime();
     const newRec: AduanaLiberationRecord = {
       id: `ADU-LOT-${new Date().toISOString().replace(/[-:T]/g, '').slice(2, 8)}-${Math.floor(10 + Math.random() * 90)}`,
-      fecha: '2026-05-25',
+      fecha: recordDate,
       cliente: formCliente,
       oc: formOC,
       lote: formLote,
@@ -10769,7 +11280,7 @@ export const AduanaLiberacionView: React.FC = () => {
       estatus: 'liberado',
       observaciones: formObservaciones,
       historial: [
-        { fecha: '2026-05-25 18:57', accion: 'Registrado directamente y Liberado', usuario: formResponsable }
+        { fecha: nowStr, accion: 'Registrado directamente y Liberado', usuario: formResponsable }
       ]
     };
 
@@ -10800,7 +11311,7 @@ export const AduanaLiberacionView: React.FC = () => {
       if (!selectedRecord.muestraValidada) missingComponents.push('Muestra Física Validada [NO]');
 
       setFeedbackMessage({
-        text: `Error de Aduana: No se puede liberar el lote ${selectedRecord.lote} porque contiene validaciones críticas no cumplidas: ${missingComponents.join(', ')}.`,
+        text: `Error de Aduana: No se puede liberar el lote ${loteDisplay(selectedRecord.lote)} porque contiene validaciones críticas no cumplidas: ${missingComponents.join(', ')}.`,
         type: 'refused'
       });
       addAuditLog('QUALITY', 'LIBERATION_REFUSED', `Intento fallido de liberar lote con faltantes: ${selectedRecord.id}`);
@@ -10808,7 +11319,7 @@ export const AduanaLiberacionView: React.FC = () => {
     }
 
     // Success action
-    const nowStr = '2026-05-25 18:57';
+    const nowStr = plantDateTime();
     const updatedRecords = records.map(r => {
       if (r.id === selectedRecord.id) {
         return {
@@ -10824,9 +11335,9 @@ export const AduanaLiberacionView: React.FC = () => {
     });
 
     setRecords(updatedRecords);
-    addAuditLog('QUALITY', 'RELEASE_ADUANA_BATCH', `Lote ${selectedRecord.lote} liberado exitosamente hacia Logística`);
+    addAuditLog('QUALITY', 'RELEASE_ADUANA_BATCH', `Lote ${loteDisplay(selectedRecord.lote)} liberado exitosamente hacia Logística`);
     setFeedbackMessage({
-      text: `Lote ${selectedRecord.lote} liberado al 100% y enviado a embarques.`,
+      text: `Lote ${loteDisplay(selectedRecord.lote)} liberado al 100% y enviado a embarques.`,
       type: 'success'
     });
     setTimeout(() => setFeedbackMessage(null), 5000);
@@ -10836,7 +11347,7 @@ export const AduanaLiberacionView: React.FC = () => {
   const handleBlock = () => {
     if (!selectedRecord) return;
 
-    const nowStr = '2026-05-25 18:57';
+    const nowStr = plantDateTime();
     const updatedRecords = records.map(r => {
       if (r.id === selectedRecord.id) {
         return {
@@ -10852,9 +11363,9 @@ export const AduanaLiberacionView: React.FC = () => {
     });
 
     setRecords(updatedRecords);
-    addAuditLog('QUALITY', 'BLOCK_ADUANA_BATCH', `Lote ${selectedRecord.lote} bloqueado en aduanas temporalmente`);
+    addAuditLog('QUALITY', 'BLOCK_ADUANA_BATCH', `Lote ${loteDisplay(selectedRecord.lote)} bloqueado en aduanas temporalmente`);
     setFeedbackMessage({
-      text: `El lote ${selectedRecord.lote} ha sido marcado como BLOQUEADO temporalmente.`,
+      text: `El lote ${loteDisplay(selectedRecord.lote)} ha sido marcado como BLOQUEADO temporalmente.`,
       type: 'success'
     });
     setTimeout(() => setFeedbackMessage(null), 5500);
@@ -10864,7 +11375,7 @@ export const AduanaLiberacionView: React.FC = () => {
   const handleCorrection = () => {
     if (!selectedRecord) return;
 
-    const nowStr = '2026-05-25 18:57';
+    const nowStr = plantDateTime();
     const updatedRecords = records.map(r => {
       if (r.id === selectedRecord.id) {
         return {
@@ -10880,7 +11391,7 @@ export const AduanaLiberacionView: React.FC = () => {
     });
 
     setRecords(updatedRecords);
-    addAuditLog('QUALITY', 'REVISION_REQUESTED', `Corrección solicitada para Lote ${selectedRecord.lote}`);
+    addAuditLog('QUALITY', 'REVISION_REQUESTED', `Corrección solicitada para Lote ${loteDisplay(selectedRecord.lote)}`);
     setFeedbackMessage({
       text: `Estado cambiado a Pendiente. Notificación de corrección enviada a preacabados.`,
       type: 'success'
@@ -11147,8 +11658,8 @@ export const AduanaLiberacionView: React.FC = () => {
                         <td className="py-2.5 px-3 text-slate-400 whitespace-nowrap font-mono">{item.fecha.split('-').slice(1).join('/')}</td>
                         <td className="py-2.5 px-3 font-semibold text-slate-200">{item.cliente}</td>
                         <td className="py-2.5 px-3 text-slate-400 font-mono">{item.oc}</td>
-                        <td className="py-2.5 px-3 text-amber-500 font-bold font-mono">{item.lote}</td>
-                        <td className="py-2.5 px-3 text-slate-400 font-mono">{item.tarjetaViajera}</td>
+                        <td className="py-2.5 px-3 text-amber-500 font-bold font-mono">{loteDisplay(item.lote)}</td>
+                        <td className="py-2.5 px-3 text-slate-400 font-mono">{loteDisplay(item.tarjetaViajera)}</td>
                         <td className="py-2.5 px-3">
                           <span className="text-slate-200 font-medium block">{item.modelo}</span>
                           <span className="text-slate-500 text-[10px]">{item.color}</span>
@@ -11240,7 +11751,7 @@ export const AduanaLiberacionView: React.FC = () => {
                   </div>
                   <div>
                     <span>Lote de Banda:</span>
-                    <strong className="block text-amber-500">{selectedRecord.lote}</strong>
+                    <strong className="block text-amber-500">{loteDisplay(selectedRecord.lote)}</strong>
                   </div>
                 </div>
 
@@ -11251,7 +11762,7 @@ export const AduanaLiberacionView: React.FC = () => {
                   </div>
                   <div>
                     <span>Tarjeta Viajera:</span>
-                    <strong className="block text-cyan-400">{selectedRecord.tarjetaViajera}</strong>
+                    <strong className="block text-cyan-400">{loteDisplay(selectedRecord.tarjetaViajera)}</strong>
                   </div>
                 </div>
 
@@ -11662,6 +12173,8 @@ export const EmbarqueView: React.FC = () => {
   const { currentTenant, addAuditLog } = useDashboard();
   const [selectedPedidoId, setSelectedPedidoId] = useState<string>('');
   const [feedbackMessage, setFeedbackMessage] = useState<{ text: string; type: 'success' | 'info' } | null>(null);
+  const [operationalLoading, setOperationalLoading] = useState(backendEnabled);
+  const [operationalError, setOperationalError] = useState<string | null>(null);
 
   // Partial shipping flow input state
   const [partialShipAmount, setPartialShipAmount] = useState<number>(50);
@@ -11674,8 +12187,73 @@ export const EmbarqueView: React.FC = () => {
     setSelectedPedidoId('');
   }, [currentTenant.id]);
 
+  useEffect(() => {
+    if (!backendEnabled) return;
+    let cancelled = false;
+    const today = todayPlantDate();
+    setOperationalLoading(true);
+    setOperationalError(null);
+    dashboardApi.erpOperativo(today, today)
+      .then(data => {
+        if (cancelled) return;
+        const embarqueRecords = data.lotePipeline
+          .filter(batch => {
+            const stage = getBatchStageId(batch);
+            return batch.tenantId === currentTenant.id && (stage === 'embarque' || stage === 'facturacion' || isDeliveredBatch(batch));
+          })
+          .map((batch): EmbarqueRecord => {
+            const stage = getBatchStageId(batch);
+            const totalPares = getBatchPairs(batch);
+            const fechaMovimiento = dateInPlantTz(batch.lastUpdate || batch.ultimoEscaneo || batch.fechaAlta || new Date());
+            const fechaCompromiso = (batch.fechaCompromiso || '').slice(0, 10) || fechaMovimiento;
+            const delivered = stage === 'facturacion' || isDeliveredBatch(batch);
+            const overdue = !delivered && isPastDueDateOnly(fechaCompromiso, dateOnlyTime(new Date().toISOString()) ?? Date.now());
+            const paresEmbarcados = delivered ? totalPares : 0;
+
+            return {
+              id: batch.id,
+              fecha: fechaMovimiento,
+              cliente: batch.cliente || 'S/Cliente',
+              oc: batch.oc || 'N/A',
+              pedido: batch.orderId || 'S/Pedido',
+              lote: batch.idLote || batch.tarjetaViajera || batch.id,
+              modelo: batch.modelo || batch.modelName || 'S/Modelo',
+              color: batch.color || 'N/D',
+              totalParesPedido: totalPares,
+              paresListos: totalPares,
+              paresEmbarcados,
+              paresPendientes: Math.max(0, totalPares - paresEmbarcados),
+              fechaCompromiso,
+              fechaEmbarque: delivered ? fechaMovimiento : undefined,
+              estatus: delivered ? 'Embarcado completo' : overdue ? 'Vencido' : 'Listo para embarque',
+              responsable: batch.responsableActual || batch.operatorId || 'Logística',
+              observaciones: batch.observaciones || (stage === 'embarque' ? 'Lote en embarque desde ERP.' : 'Lote facturado desde ERP.'),
+              historial: [
+                {
+                  fecha: batch.ultimoEscaneo ? plantDateTime(new Date(batch.ultimoEscaneo)) : plantDateTime(),
+                  accion: delivered ? 'Lote cerrado/facturado en ERP.' : 'Lote recibido en embarque desde ERP.',
+                  usuario: batch.responsableActual || 'ERP BixApp'
+                }
+              ]
+            };
+          })
+          .sort((a, b) => b.fecha.localeCompare(a.fecha) || a.lote.localeCompare(b.lote));
+        setRecords(embarqueRecords);
+      })
+      .catch(err => {
+        if (!cancelled) {
+          console.warn('Embarque: ERP operativo fetch failed', err);
+          setOperationalError('Embarque');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setOperationalLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [currentTenant.id]);
+
   // Filters state
-  const [filtroFecha, setFiltroFecha] = useState(() => todayPlantDate());
+  const [filtroFecha, setFiltroFecha] = useState('');
   const [filtroCliente, setFiltroCliente] = useState('');
   const [filtroOC, setFiltroOC] = useState('');
   const [filtroPedido, setFiltroPedido] = useState('');
@@ -11683,7 +12261,7 @@ export const EmbarqueView: React.FC = () => {
   const [filtroModelo, setFiltroModelo] = useState('');
   const [filtroColor, setFiltroColor] = useState('');
   const [filtroEstatus, setFiltroEstatus] = useState('');
-  const [filtroFechaCompromiso, setFiltroFechaCompromiso] = useState(() => todayPlantDate());
+  const [filtroFechaCompromiso, setFiltroFechaCompromiso] = useState('');
   const [filtroResponsable, setFiltroResponsable] = useState('');
 
   // Extract filter source candidates
@@ -11710,7 +12288,7 @@ export const EmbarqueView: React.FC = () => {
   const selectedRecord = records.find(r => r.id === selectedPedidoId) || records[0];
 
   const clearFilters = () => {
-    setFiltroFecha(todayPlantDate());
+    setFiltroFecha('');
     setFiltroCliente('');
     setFiltroOC('');
     setFiltroPedido('');
@@ -11718,17 +12296,18 @@ export const EmbarqueView: React.FC = () => {
     setFiltroModelo('');
     setFiltroColor('');
     setFiltroEstatus('');
-    setFiltroFechaCompromiso(todayPlantDate());
+    setFiltroFechaCompromiso('');
     setFiltroResponsable('');
   };
 
   // KPIs calculations
+  const currentPlantDate = todayPlantDate();
   // Pares listos para embarque (pares terminados but not yet fully shipped)
   const totalParesListosParaEmbarque = filteredRecords.reduce((sum, r) => sum + Math.max(0, r.paresListos - r.paresEmbarcados), 0);
   
-  // Pares embarcados hoy (pares embarcados on index day '2026-05-25')
+  // Pares embarcados hoy en fecha de planta
   const totalParesEmbarcadosHoy = filteredRecords.reduce((sum, r) => {
-    return sum + (r.fechaEmbarque === '2026-05-25' ? r.paresEmbarcados : 0);
+    return sum + (r.fechaEmbarque === currentPlantDate ? r.paresEmbarcados : 0);
   }, 0);
 
   const countCompletos = filteredRecords.filter(r => r.estatus === 'Embarcado completo').length;
@@ -11742,11 +12321,18 @@ export const EmbarqueView: React.FC = () => {
     ? Number(((countCompletos * 100) / (countCompletos + countVencidos || 1)).toFixed(1)) 
     : 100.0;
   
-  const avgCloseTimeHours = 12.8; // Standarized KPI metric for logging closing cycle
+  const closeTimeSamples = filteredRecords
+    .filter(r => r.estatus === 'Embarcado completo')
+    .map(r => hoursBetweenPlantDateTimes(r.fecha, r.fechaEmbarque))
+    .filter((hours): hours is number => hours !== null);
+  const avgCloseTimeHours = closeTimeSamples.length > 0
+    ? Number((closeTimeSamples.reduce((sum, hours) => sum + hours, 0) / closeTimeSamples.length).toFixed(1))
+    : 0;
 
   const handleMarkAsShipped = () => {
     if (!selectedRecord) return;
-    const nowStr = '2026-05-25 19:01';
+    const recordDate = todayPlantDate();
+    const nowStr = plantDateTime();
     
     const updated = records.map(r => {
       if (r.id === selectedRecord.id) {
@@ -11755,7 +12341,7 @@ export const EmbarqueView: React.FC = () => {
           paresEmbarcados: r.totalParesPedido,
           paresPendientes: 0,
           estatus: 'Embarcado completo' as const,
-          fechaEmbarque: '2026-05-25',
+          fechaEmbarque: recordDate,
           historial: [
             ...r.historial,
             { fecha: nowStr, accion: 'Embarque total completado y registrado', usuario: 'Jorge Ruiz (Logística)' }
@@ -11766,7 +12352,7 @@ export const EmbarqueView: React.FC = () => {
     });
 
     setRecords(updated);
-    addAuditLog('QUALITY', 'COMPLETE_SHIPMENT_DISPATCH', `Pedido: ${selectedRecord.pedido}, Lote: ${selectedRecord.lote} marcado como Embarcado completo`);
+    addAuditLog('QUALITY', 'COMPLETE_SHIPMENT_DISPATCH', `Pedido: ${selectedRecord.pedido}, Lote: ${loteDisplay(selectedRecord.lote)} marcado como Embarcado completo`);
     
     setFeedbackMessage({
       text: `Pedido ${selectedRecord.pedido} despachado al 100%. Se emitió el manifiesto de carga digital.`,
@@ -11792,7 +12378,8 @@ export const EmbarqueView: React.FC = () => {
       return;
     }
 
-    const nowStr = '2026-05-25 19:01';
+    const recordDate = todayPlantDate();
+    const nowStr = plantDateTime();
     const nextEmbarcados = selectedRecord.paresEmbarcados + amount;
     const nextPendientes = selectedRecord.totalParesPedido - nextEmbarcados;
     const isCompleted = nextPendientes === 0;
@@ -11804,7 +12391,7 @@ export const EmbarqueView: React.FC = () => {
           paresEmbarcados: nextEmbarcados,
           paresPendientes: nextPendientes,
           estatus: (isCompleted ? 'Embarcado completo' : 'Embarque parcial') as any,
-          fechaEmbarque: '2026-05-25',
+          fechaEmbarque: recordDate,
           historial: [
             ...r.historial,
             { fecha: nowStr, accion: `Despacho parcial registrado de: ${amount} pares`, usuario: 'Clara S. (Embarques)' }
@@ -11824,6 +12411,14 @@ export const EmbarqueView: React.FC = () => {
     setPartialShipAmount(50);
     setTimeout(() => setFeedbackMessage(null), 5000);
   };
+
+  if (backendEnabled && operationalLoading && records.length === 0) {
+    return <ModuleLoadingState label="Embarque" />;
+  }
+
+  if (backendEnabled && operationalError && records.length === 0) {
+    return <ModuleDataErrorState label={operationalError} />;
+  }
 
   // GRAPH DATA GATHERING
  
@@ -11873,6 +12468,19 @@ export const EmbarqueView: React.FC = () => {
     };
   });
 
+  // 5b. Pares embarcados por mes
+  const paresEmbarcadosPorMes: { mes: string; pares: number }[] = (() => {
+    const map = new Map<string, number>();
+    records.forEach(r => {
+      const mes = (r.fecha || '').slice(0, 7);
+      if (!mes) return;
+      map.set(mes, (map.get(mes) ?? 0) + (r.paresEmbarcados || 0));
+    });
+    return Array.from(map.entries())
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([mes, pares]) => ({ mes, pares }));
+  })();
+
   return (
     <div className="space-y-6">
 
@@ -11895,8 +12503,8 @@ export const EmbarqueView: React.FC = () => {
           <button 
             id="print_manifest_btn"
             onClick={() => {
-              addAuditLog('QUALITY', 'PRINT_SHIPPING_MANIFEST', `Impresión de manifiesto para lote ${selectedRecord?.lote || 'Global'}`);
-              alert(`🖨️ Generando manifiesto físico de aduanas y guía de transportista para Lote: ${selectedRecord?.lote || 'General'}`);
+              addAuditLog('QUALITY', 'PRINT_SHIPPING_MANIFEST', `Impresión de manifiesto para lote ${selectedRecord ? loteDisplay(selectedRecord.lote) : 'Global'}`);
+              alert(`🖨️ Generando manifiesto físico de aduanas y guía de transportista para Lote: ${selectedRecord ? loteDisplay(selectedRecord.lote) : 'General'}`);
             }}
             className="flex items-center gap-1.5 px-4.5 py-2 bg-emerald-600 hover:bg-emerald-555 text-slate-950 text-xs font-mono font-black rounded-lg transition border border-emerald-400 cursor-pointer"
           >
@@ -12128,7 +12736,7 @@ export const EmbarqueView: React.FC = () => {
                         <td className="py-2.5 px-2 font-semibold text-slate-200">{item.cliente}</td>
                         <td className="py-2.5 px-2 font-mono text-slate-400">{item.oc}</td>
                         <td className="py-2.5 px-2 font-mono text-slate-300">{item.pedido}</td>
-                        <td className="py-2.5 px-2 text-amber-500 font-bold font-mono">{item.lote}</td>
+                        <td className="py-2.5 px-2 text-amber-500 font-bold font-mono">{loteDisplay(item.lote)}</td>
                         <td className="py-2.5 px-2 text-slate-200 font-sans">{item.modelo}</td>
                         <td className="py-2.5 px-2 text-slate-450">{item.color}</td>
                         <td className="py-2.5 px-2 text-right font-mono font-bold text-slate-350">{item.totalParesPedido}</td>
@@ -12209,7 +12817,7 @@ export const EmbarqueView: React.FC = () => {
                 <div className="grid grid-cols-2 gap-3 text-[11px] font-mono border-b border-slate-850 pb-2">
                   <div>
                     <span className="text-slate-500 block">Lote Relacionado:</span>
-                    <strong className="text-amber-500 font-bold block">{selectedRecord.lote}</strong>
+                    <strong className="text-amber-500 font-bold block">{loteDisplay(selectedRecord.lote)}</strong>
                   </div>
                   <div>
                     <span className="text-slate-500 block">Modelo & Color:</span>
@@ -12408,15 +13016,15 @@ export const EmbarqueView: React.FC = () => {
             </div>
           </div>
 
-          {/* Graffic 5: Backlog pendiente de embarque */}
+          {/* Gráfica 5: Pares embarcados por mes */}
           <div className="bg-slate-900 p-4.5 border border-slate-800 rounded-xl space-y-2 shadow-sm">
-            <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">5. Backlog Pendiente por Cliente</span>
+            <span className="text-[10px] font-mono font-black text-slate-400 uppercase block">5. Pares Embarcados por Mes</span>
             <div className="h-[220px] w-full overflow-x-auto">
               <div className="w-full min-w-[300px] h-full">
               <RechartsResponsiveContainer width="100%" height="100%" minWidth={1} minHeight={1}>
-                <RechartsBarChart data={backlogPendienteClienteData} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
+                <RechartsBarChart data={paresEmbarcadosPorMes} margin={{ top: 5, right: 5, left: -25, bottom: 5 }}>
                   <RechartsCartesianGrid strokeDasharray="3 3" stroke="#cbd5e1" />
-                  <RechartsXAxis dataKey="cliente" stroke="#475569" className="text-[9px] font-bold" />
+                  <RechartsXAxis dataKey="mes" stroke="#475569" className="text-[9px] font-bold" />
                   <RechartsYAxis stroke="#475569" className="text-[9px] font-bold" />
                   <RechartsTooltip contentStyle={{ backgroundColor: '#ffffff', borderColor: '#cbd5e1', color: '#0f172a' }} />
                   <RechartsBar dataKey="pares" fill="#be123c" radius={[4, 4, 0, 0]} />
@@ -12547,7 +13155,7 @@ export const ReportesHistoricosView: React.FC = () => {
               {archivedBatches.map(b => (
                 <div key={b.id} className="p-3 bg-slate-950 border border-slate-850 rounded flex justify-between items-center text-xs">
                   <div>
-                    <span className="font-mono font-black text-slate-250 block">{b.id}</span>
+                    <span className="font-mono font-black text-slate-250 block">{batchLoteDisplay(b)}</span>
                     <p className="text-[10px] text-slate-550 font-sans">
                       Modelo: {b.modelName} ({b.color}) | Cantidad: {b.quantityShoes} Prs
                     </p>
@@ -12558,7 +13166,7 @@ export const ReportesHistoricosView: React.FC = () => {
                   <button
                     onClick={() => {
                       restoreBatch(b.id);
-                      alert(`Lote ${b.id} restaurado con éxito.`);
+                      alert(`Lote ${batchLoteDisplay(b)} restaurado con éxito.`);
                     }}
                     className="px-3 py-1 bg-emerald-950 text-emerald-400 hover:bg-emerald-900 border border-emerald-800/40 rounded font-mono text-[10px] uppercase font-bold cursor-pointer"
                   >
@@ -12669,7 +13277,7 @@ export const ReportesHistoricosView: React.FC = () => {
                   return (
                     <tr key={idx} className="hover:bg-slate-850/45 transition-colors text-[11px]">
                       <td className="p-2.5 font-mono text-cyan-400 font-black">{m.idMovimiento}</td>
-                      <td className="p-2.5 font-mono text-slate-300 font-bold">{m.idLote}</td>
+                      <td className="p-2.5 font-mono text-slate-300 font-bold">{loteDisplay(m.idLote)}</td>
                       <td className="p-2.5 text-slate-400">{m.etapa}</td>
                       <td className="p-2.5 font-mono text-[10px] text-slate-500">{new Date(m.fechaEntrada).toLocaleDateString()}</td>
                       <td className="p-2.5 font-mono text-[10px] text-slate-500">

@@ -15,3 +15,9 @@ migrated to Supabase/Postgres (direct PG connection). Gemini via `@google/genai`
 ## Notes
 - "Dashboard Ejecutivo" uses real Firebird data; backend has direct Postgres→Supabase connection.
 - Verify data scripts pass before shipping dashboard changes. Spanish UI.
+
+## Skill discovery
+
+Follow the "Skill discovery" section of `AGENTS.md`: use the `find-skills` skill
+(`.claude/skills/find-skills/`) before hand-rolling a specialized workflow, and
+never install anything without explicit approval.
