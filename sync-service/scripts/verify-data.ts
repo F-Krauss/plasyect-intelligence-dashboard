@@ -21,16 +21,28 @@ async function main() {
     union all select 'bigzap_pedidos', count(*)::int from public.bigzap_pedidos
     union all select 'bigzap_lotes_pedidos', count(*)::int from public.bigzap_lotes_pedidos
     union all select 'bigzap_pt_movimientos', count(*)::int from public.bigzap_pt_movimientos
+    union all select 'bigzap_programacion_renglones', count(*)::int from public.bigzap_programacion_renglones
     union all select 'bigzap_estilos', count(*)::int from public.bigzap_estilos
+    union all select 'bigzap_lineas', count(*)::int from public.bigzap_lineas
+    union all select 'bigzap_combinaciones', count(*)::int from public.bigzap_combinaciones
     union all select 'bigzap_clientes', count(*)::int from public.bigzap_clientes
     union all select 'bigzap_departamentos', count(*)::int from public.bigzap_departamentos
-    union all select 'bigzap_subdeptos', count(*)::int from public.bigzap_subdeptos`);
+    union all select 'bigzap_subdeptos', count(*)::int from public.bigzap_subdeptos
+    union all select 'bigzap_lote_observaciones', count(*)::int from public.bigzap_lote_observaciones`);
 
   await q('Rangos de fechas', `
     select 'avance.fecha' as campo, min(fecha)::text as minimo, max(fecha)::text as maximo from public.bigzap_avance
     union all select 'lotes.fecha_programacion', min(fecha_programacion)::text, max(fecha_programacion)::text from public.bigzap_lotes
+    union all select 'programacion.fecha_programacion', min(fecha_programacion)::text, max(fecha_programacion)::text from public.bigzap_programacion_renglones
     union all select 'pedidos.fecha_pedido', min(fecha_pedido)::text, max(fecha_pedido)::text from public.bigzap_pedidos
     union all select 'ptmov.fecha_movimiento', min(fecha_movimiento)::text, max(fecha_movimiento)::text from public.bigzap_pt_movimientos`);
+
+  await q('Programacion alta (RENGLON -> alta_pedido)', `
+    select fecha_programacion::text as fecha, count(*)::int as renglones, sum(pares_programar)::int as pares
+    from public.bigzap_programacion_renglones
+    where fecha_programacion >= current_date - interval '7 days'
+    group by fecha_programacion
+    order by fecha_programacion desc`);
 
   await q('Vista tarjetas_viajeras (muestra + total)', `
     select count(*)::int as total_tarjetas,

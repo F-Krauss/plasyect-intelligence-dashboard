@@ -4,6 +4,7 @@ import { ZodError } from 'zod';
 import { config, corsOrigins, hasDatabaseUrl, hasSupabaseConfig } from './config.js';
 import { createRepository } from './repository.js';
 import { createRoutes } from './routes.js';
+import { repairTextEncodingDeep } from './textEncoding.js';
 
 const app = express();
 
@@ -15,6 +16,11 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
+app.use((_req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = ((body?: unknown) => json(repairTextEncodingDeep(body))) as typeof res.json;
+  next();
+});
 app.use(createRoutes(createRepository()));
 
 const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {

@@ -29,7 +29,7 @@ export const config = {
     ssl: (process.env.PGSSL ?? 'true') !== 'false'
   },
   plantTz: process.env.PLANT_TZ ?? 'America/Mexico_City',
-  pollSeconds: optionalNumber('SYNC_INTERVAL_SECONDS', 15),
+  pollSeconds: optionalNumber('SYNC_INTERVAL_SECONDS', 900),
   overlapDays: optionalNumber('SYNC_OVERLAP_DAYS', 2),
   fullResyncHour: process.env.FULL_RESYNC_HOUR === '' ? null : optionalNumber('FULL_RESYNC_HOUR', 3),
   watchPath: process.env.FDB_WATCH_PATH || null,

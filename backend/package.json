@@ -11,6 +11,7 @@
     "create:supabase": "node scripts/create-supabase-project.mjs"
   },
   "dependencies": {
+    "@google/genai": "^2.10.0",
     "@supabase/supabase-js": "^2.107.0",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",

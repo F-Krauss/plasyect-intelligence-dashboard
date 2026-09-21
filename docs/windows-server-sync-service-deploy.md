@@ -67,13 +67,17 @@ DATABASE_URL="postgresql://postgres.PROJECT_REF:PASSWORD@aws-...pooler.supabase.
 PGSSL="true"
 
 FDB_WATCH_PATH="C:\\Empresas\\BigFire\\BIGZAP.FDB"
-SYNC_INTERVAL_SECONDS="15"
+SYNC_INTERVAL_SECONDS="900"
+SYNC_OVERLAP_DAYS="2"
 FULL_RESYNC_HOUR="3"
 PLANT_TZ="America/Mexico_City"
 ```
 
 Use the real Firebird database path, Firebird password, and Supabase/PostgreSQL
 connection string.
+
+`SYNC_INTERVAL_SECONDS="900"` publica cada 15 minutos. El watcher solo detecta
+actividad del archivo para aplicar debounce; no adelanta la publicacion.
 
 ## 5. Install And Build
 
@@ -106,6 +110,22 @@ node dist\index.js --once --full
 ```
 
 If the command exits without crashing, continue.
+
+### Modelo de sincronizacion (espejo + incremental)
+
+- **Espejo completo cada ciclo** (`replaceJson` = truncate+insert transaccional): `LOTCAB`→
+  `bigzap_lotes`, `LOTDET`→`bigzap_lotes_pedidos`, `RENGLON`→`bigzap_programacion_renglones`,
+  `OBSLOT`→`bigzap_lote_observaciones`. Sin filtros de negocio y sin watermark: la tabla es
+  un espejo 1:1 de la FDB en cada corrida, asi que los lotes que salen de `LOTCAB` (graduados
+  a producto terminado o purgados) desaparecen solos. Esto **corrige el WIP por etapa**
+  (antes inflado ~3x) y **Alta de Pedido / Pares X Prog** (`SUM(RE_PARAPRO)`, antes recortado
+  por filtrar `RE_PARPRO>0`) en el primer ciclo, sin pasos de limpieza manuales.
+- **Incremental por fecha** (watermark + `SYNC_OVERLAP_DAYS`): solo los logs append-only y
+  voluminosos `AVANCE`, `PTMOV`, `PTLOTCAB`. El `--full` (y el diario `FULL_RESYNC_HOUR=3`)
+  re-baselinea estos releyendo toda su historia.
+
+`replaceJson` se niega a truncar una tabla poblada si la extraccion viene vacia (protege
+contra una lectura fallida de Firebird). El primer `--once` ya deja Supabase consistente.
 
 ## 8. Install Windows Service
 
@@ -152,11 +172,22 @@ Run:
 
 ```sql
 select * from erp_sync_runs order by started_at desc limit 5;
+select payload->'counts' from erp_sync_runs order by started_at desc limit 1;
 select count(*) from bigzap_lotes;
+select count(*) from bigzap_programacion_renglones;
 select * from tarjetas_viajeras order by ultimo_escaneo desc nulls last limit 10;
+
+-- WIP por etapa: debe coincidir con "Planta Productiva" de BixApp.
+select status_depto, count(*) as lotes, sum(coalesce(pares,0)) as pares
+from bigzap_lotes
+where coalesce(cancelado,false) = false
+  and coalesce(status_depto,'') in ('15','20','25','30','35','39')
+group by status_depto
+order by status_depto;
 ```
 
-If rows appear, the sync service is working.
+If rows appear, the sync service is working. La consulta de WIP por etapa debe
+coincidir con BixApp (inyeccion=15, aduana=20/25, banda=30/35/39).
 
 ## Troubleshooting
 

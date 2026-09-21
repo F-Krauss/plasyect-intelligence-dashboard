@@ -1,11 +1,16 @@
 import { Router } from 'express';
+import { createAiChatService, type AiChatService } from './ai.js';
 import { issueToken, requireAuth } from './auth.js';
 import { createErpService, getTarjetaViajeraStub, type ErpService } from './erp.js';
 import type { DashboardRepository } from './repository.js';
 import { defaultUser } from './seed.js';
-import { dateRangeQuerySchema, discountBodySchema, entitySchema, erpListQuerySchema, idParamSchema, movimientosQuerySchema, patchSchema, stageBodySchema, statusBodySchema } from './validation.js';
+import { aiChatBodySchema, dateRangeQuerySchema, discountBodySchema, entitySchema, erpListQuerySchema, idParamSchema, movimientosQuerySchema, patchSchema, stageBodySchema, statusBodySchema } from './validation.js';
 
-export function createRoutes(repository: DashboardRepository, erp: ErpService = createErpService()): Router {
+export function createRoutes(
+  repository: DashboardRepository,
+  erp: ErpService = createErpService(),
+  aiChat: AiChatService = createAiChatService(erp)
+): Router {
   const router = Router();
 
   router.get('/health', (_req, res) => {
@@ -162,6 +167,21 @@ export function createRoutes(repository: DashboardRepository, erp: ErpService = 
     try {
       const { fechaInicio, fechaFin, limit } = movimientosQuerySchema.parse(req.query);
       res.json(await erp.getMovimientos(fechaInicio, fechaFin, limit));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  router.post('/api/ai/chat', async (req, res, next) => {
+    try {
+      const body = aiChatBodySchema.parse(req.body);
+      if (!aiChat.enabled) {
+        return res.status(503).json({
+          error: 'ai_disabled',
+          message: 'Asistente IA no disponible: falta GEMINI_API_KEY o la conexion a datos ERP en el backend.'
+        });
+      }
+      res.json(await aiChat.chat(body.message, body.history));
     } catch (error) {
       next(error);
     }

@@ -30,7 +30,7 @@ async function main(): Promise<void> {
     console.log(`   version: ${String(rows[0].version).split(' ').slice(0, 2).join(' ')}`);
 
     // Tablas que el sync-service espera escribir.
-    const expected = ['bigzap_sync_state', 'erp_sync_runs'];
+    const expected = ['bigzap_sync_state', 'erp_sync_runs', 'bigzap_programacion_renglones'];
     const { rows: tables } = await pool.query(
       `select table_name from information_schema.tables
        where table_schema = 'public' and table_name = any($1)`,

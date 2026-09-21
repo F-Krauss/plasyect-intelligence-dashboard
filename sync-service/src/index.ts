@@ -33,10 +33,9 @@ function startWatcher(): void {
   fs.watchFile(config.watchPath, { interval: 2000 }, (curr, prev) => {
     if (curr.mtimeMs !== prev.mtimeMs || curr.size !== prev.size) {
       dirty = true;
-      wake?.();
     }
   });
-  log.info(`Observando escrituras en ${config.watchPath} (solo mtime, no abre el archivo)`);
+  log.info(`Observando escrituras en ${config.watchPath} (solo mtime; publica en el siguiente intervalo)`);
 }
 
 async function main(): Promise<void> {
@@ -61,6 +60,8 @@ async function main(): Promise<void> {
   while (!stopping) {
     const today = new Date();
     const isoToday = today.toISOString().slice(0, 10);
+    // El full solo re-baselinea los logs incrementales (AVANCE/PTMOV/PTLOTCAB); las tablas
+    // mutables ya se espejean completas cada ciclo.
     const scheduledFull =
       config.fullResyncHour !== null && today.getHours() === config.fullResyncHour && lastFullDay !== isoToday;
     const full = (firstCycle && config.forceFull) || scheduledFull;

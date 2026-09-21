@@ -12,6 +12,7 @@
     "start:once": "node dist/index.js --once",
     "migrate": "tsx scripts/apply-migrations.ts",
     "test:connection": "tsx scripts/test-connection.ts",
+    "test": "node --test --import tsx src/*.test.ts",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

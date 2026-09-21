@@ -9,6 +9,8 @@ const sampleRow: TarjetaViajeraRow = {
   estilo_nombre: 'RUBBY DAMA 22-26 GANCHO',
   piecol: '001002226',
   combina: '10029',
+  color_codigo: '10029',
+  color_nombre: 'NEGRO',
   corrida: '01',
   pares: 456,
   fecha_programacion: '2026-04-21',
@@ -27,7 +29,7 @@ const sampleRow: TarjetaViajeraRow = {
   cliente_codigo: '00005',
   cliente_nombre: 'ZAMISKA',
   pedido_oc: 'OC-9912',
-  pedido_fecha_salida: '2026-04-22'
+  pedido_fecha_salida: '2099-04-22'
 };
 
 describe('mapTarjetaToBatch', () => {
@@ -38,14 +40,41 @@ describe('mapTarjetaToBatch', () => {
     expect(batch.tenantId).toBe('plasyect_matriz');
     expect(batch.stage).toBe('embarque');
     expect(batch.etapaActual).toBe('embarque');
-    expect(batch.estatus).toBe('ENTREGADO'); // depto 40 / embarque
+    expect(batch.estatus).toBe('OPTIMO');
     expect(batch.totalPares).toBe(456);
     expect(batch.modelo).toBe('RUBBY DAMA 22-26 GANCHO');
+    expect(batch.color).toBe('NEGRO');
     expect(batch.cliente).toBe('ZAMISKA');
     expect(batch.orderId).toBe('PED-547');
     expect(batch.oc).toBe('OC-9912');
     expect(batch.zonaPrevia).toBe('PROGRAMACION');
     expect(batch.zonaActual).toBe('EMBARQUE');
+  });
+
+  it('maps depto 50 to facturacion and keeps delivered status', () => {
+    const batch = mapTarjetaToBatch(
+      { ...sampleRow, status_depto: '50', status_depto_nombre: 'FACTURACION', stage_id: 'facturacion', zona_actual: '50', zona_actual_nombre: 'FACTURACION' },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
+    expect(batch.stage).toBe('facturacion');
+    expect(batch.estatus).toBe('ENTREGADO');
+  });
+
+  it('marks open tarjetas with past commitment dates as critical', () => {
+    const batch = mapTarjetaToBatch(
+      { ...sampleRow, pedido_fecha_salida: '2000-01-01', status_depto: '40', stage_id: 'embarque' },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
+    expect(batch.status).toBe('CRITICO');
+    expect(batch.estatus).toBe('CRITICO');
+  });
+
+  it('falls back to color code when color name is missing', () => {
+    const batch = mapTarjetaToBatch(
+      { ...sampleRow, color_nombre: null },
+      'plasyect_matriz'
+    ) as Record<string, unknown>;
+    expect(batch.color).toBe('001002226');
   });
 
   it('derives stage from depto when stage_id is missing, and flags cancelled', () => {

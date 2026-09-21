@@ -8,7 +8,12 @@ const MIGRATIONS = [
   '../../backend/migrations/001_initial_schema.sql',
   '../../backend/migrations/002_bigzap_tarjetas.sql',
   '../../backend/migrations/003_ocr_tables.sql',
-  '../../backend/migrations/004_tarjetas_viajeras_oc.sql'
+  '../../backend/migrations/004_tarjetas_viajeras_oc.sql',
+  '../../backend/migrations/005_facturacion_color_combinaciones.sql',
+  '../../backend/migrations/006_erp_extended_data.sql',
+  '../../backend/migrations/007_perf_indexes.sql',
+  '../../backend/migrations/008_programacion_renglones.sql',
+  '../../backend/migrations/009_pt_lotes.sql'
 ];
 
 async function main(): Promise<void> {
