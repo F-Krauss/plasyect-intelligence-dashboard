@@ -25,7 +25,7 @@ const DEPTO_STAGE: Record<string, StageId> = {
   '01': 'alta_pedido',
   '10': 'almacen',
   '15': 'inyeccion',
-  '20': 'aduana',
+  '20': 'estabilizacion',
   '25': 'aduana',
   '30': 'banda',
   '35': 'banda',

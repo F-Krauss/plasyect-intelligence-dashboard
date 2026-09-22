@@ -105,7 +105,7 @@ export interface ModelPerformanceRow {
   entregasCumplidas: number;
   entregasTotal: number;
   entregaCumplida: boolean;
-  etapaActiva: 'Inyección' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Facturación' | 'Almacén';
+  etapaActiva: 'Inyección' | 'Calidad' | 'Estabilización' | 'Aduana' | 'Banda' | 'Embarque' | 'Facturación' | 'Almacén';
   estatus: 'Active' | 'Warning' | 'Critical';
 }
 
@@ -271,7 +271,7 @@ function stageFromDepto(depto: unknown): ModelPerformanceRow['etapaActiva'] {
   switch (String(depto ?? '').trim()) {
     case '10': return 'Almacén';
     case '15': return 'Inyección';
-    case '20':
+    case '20': return 'Calidad';
     case '25': return 'Aduana';
     case '30':
     case '35':
@@ -308,7 +308,9 @@ const STAGE_NAMES: Record<string, string> = {
   alta_pedido: 'Alta Pedido',
   almacen: 'Almacén',
   inyeccion: 'Inyección',
-  estabilizacion: 'Estabilización',
+  // BigZap llama "Calidad" al status 20; se conserva el id interno para no
+  // romper los contratos históricos del tablero.
+  estabilizacion: 'Calidad',
   aduana: 'Aduana',
   banda: 'Banda',
   embarque: 'Embarque',
@@ -326,7 +328,7 @@ function stageIdFromDepto(depto: unknown, stageId?: unknown): string {
     case '01': return 'alta_pedido';
     case '10': return 'almacen';
     case '15': return 'inyeccion';
-    case '20':
+    case '20': return 'estabilizacion';
     case '25': return 'aduana';
     case '30':
     case '35':
@@ -848,69 +850,28 @@ class PgErpService implements ErpService {
         [fechaInicio, fechaFin]
       ),
       this.pool.query<ErpRecord>(
-        // WIP "Pares en Proceso" = snapshot de LOTCAB.LC_STATUS para lotes con actividad
-        // reciente (mismo gate de BIGZAP_PLANT_ACTIVE_DAYS que stagePipeline/lotePipeline
-        // mas abajo). LOTCAB no borra lotes que ya salieron de piso (graduaron a PT o se
-        // facturaron): sin este gate, lotes "congelados" en status 40 desde hace meses/años
-        // inflaban este total muy por encima de lo que stagePipeline reporta por etapa.
-        `with last_scans as (
-           select programa, lote, max(escaneado_at) as ultimo_escaneo
-           from public.bigzap_avance
-           where escaneado_at is not null
-           group by programa, lote
-         ),
-         current_plant as (
+        // Misma regla que "Visualización de Planta Productiva" en BigZap:
+        // cada tarjeta LOTCAB vigente entra una vez, según LC_STATUS. No se
+        // deduplica por pedido/renglón ni se mezcla RE_PARAPRO, pues ambos son
+        // conceptos de la sábana de pedidos, no del WIP de planta.
+        `with plant_snapshot as (
            select l.programa, l.lote, l.pares,
-             lp.pedido as pedido_folio
+             (
+               select lp.pedido
+               from public.bigzap_lotes_pedidos lp
+               where lp.programa = l.programa and lp.lote = l.lote
+               order by lp.pedido, lp.renglon
+               limit 1
+             ) as pedido_folio
            from public.bigzap_lotes l
-           left join last_scans ls on ls.programa = l.programa and ls.lote = l.lote
-           left join lateral (
-             select lp.pedido
-             from public.bigzap_lotes_pedidos lp
-             join public.bigzap_programacion_renglones pr
-               on pr.pedido = lp.pedido and pr.renglon = lp.renglon
-             where lp.programa = l.programa and lp.lote = l.lote
-             order by lp.pedido, lp.renglon limit 1
-           ) lp on true
            where l.cancelado = false
-             and coalesce(l.status_depto, '') in ('15','20','25','30','35','39','40')
-             and lp.pedido is not null
-             and coalesce(ls.ultimo_escaneo, l.fecha_programacion::timestamp at time zone $1)
-                 >= (now() at time zone $1) - ($2::int * interval '1 day')
-         ),
-         backlog_orders as (
-           select distinct pedido as pedido_folio
-           from public.bigzap_programacion_renglones
-           where coalesce(pares_aprogramados, 0) > 0
-             and pedido is not null
-         ),
-         programming_orders as (
-           -- Las tarjetas creadas por explosión viven en 01 hasta que el lote
-           -- entra al piso. Son pedidos vigentes, aunque todavía no sean WIP.
-           select distinct lp.pedido as pedido_folio
-           from public.bigzap_lotes_pedidos lp
-           join public.bigzap_lotes l on l.programa = lp.programa and l.lote = lp.lote
-           join public.bigzap_programacion_renglones pr
-             on pr.pedido = lp.pedido and pr.renglon = lp.renglon
-           where lp.pedido is not null
-             and l.cancelado = false
-             and coalesce(l.status_depto, '') = '01'
+             and coalesce(l.status_depto, '') in ('01','15','20','25','30','35','39')
          )
          select
-           (
-             select count(distinct pedido_folio)::int
-             from (
-               select pedido_folio from current_plant where pedido_folio is not null
-               union all
-               select pedido_folio from backlog_orders
-               union all
-               select pedido_folio from programming_orders
-             ) active_orders
-           ) as orders,
+           count(distinct pedido_folio)::int as orders,
            count(*)::int as batches,
            coalesce(sum(coalesce(pares, 0)), 0)::int as pairs
-         from current_plant`,
-        [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
+         from plant_snapshot`
       ),
       this.pool.query<ErpRecord>(
         `with lot_dim as (
@@ -1169,95 +1130,27 @@ class PgErpService implements ErpService {
            where escaneado_at is not null
            group by programa, lote
          ),
-         -- El universo de lotes tiene que ser EXACTAMENTE el mismo que el de la sabana de
-         -- pedidos (segunda query de este Promise.all): misma dedup por generacion y misma
-         -- visibilidad por pedido. Antes esta query aplicaba el gate de recencia lote por
-         -- lote mientras la sabana lo aplica por pedido, y las dos vistas se contradecian:
-         -- Inyeccion mostraba 1,040 pares en el pipeline vs 1,910 en la sabana (35 lotes
-         -- con ultimo escaneo a 83 dias, colgados de pedidos que si estaban activos).
-         ranked_lotes as (
-           select
-             lp.pedido,
-             lp.renglon,
-             lp.programa,
-             lp.lote,
-             lp.pares,
-             l.fecha_programacion,
-             l.status_depto,
-             l.cancelado,
-             dense_rank() over (
-               partition by lp.pedido, lp.renglon
-               order by l.fecha_programacion desc nulls last, l.synced_at desc, lp.programa desc
-             ) as generation_rank
-           from public.bigzap_lotes_pedidos lp
-           join public.bigzap_lotes l on l.programa = lp.programa and l.lote = lp.lote
-           join public.bigzap_programacion_renglones pr
-             on pr.pedido = lp.pedido and pr.renglon = lp.renglon
-           where lp.pedido is not null
-         ),
-         current_lotes_source as (
-           select *
-           from ranked_lotes
-           where generation_rank = 1
-             and cancelado = false
-         ),
-         -- El gate de recencia protege sólo al piso productivo. Las tarjetas creadas
-         -- por explosión permanecen legítimamente en Programación (01), incluso sin
-         -- un escaneo posterior, hasta que se transfieran a producción.
-         plant_visible_orders as (
-           select distinct lp.pedido
-           from current_lotes_source lp
-           left join last_scans ls on ls.programa = lp.programa and ls.lote = lp.lote
-           where lp.pedido is not null
-             and (
-               coalesce(lp.status_depto, '') = '01'
-               or (
-                 coalesce(lp.status_depto, '') in ('15','20','25','30','35','39','40')
-                 and (ls.ultimo_escaneo at time zone $1)::date >= (now() at time zone $1)::date - ($2::int * interval '1 day')
-               )
-               or (
-                 coalesce(lp.status_depto, '') = '50'
-                 and (ls.ultimo_escaneo at time zone $1)::date = (now() at time zone $1)::date
-               )
-             )
-         ),
+         -- Snapshot crudo de LOTCAB. Es deliberadamente distinto de orderPipeline:
+         -- aquí BigZap cuenta cada tarjeta del área, aunque pertenezca a la misma
+         -- línea/pedido que otra tarjeta. Tampoco se filtra por antigüedad: BigZap
+         -- conserva la tarjeta en la etapa hasta que cambia LC_STATUS.
          active as (
            select
-             coalesce(
-               nullif(ds.stage_id, ''),
-               case coalesce(lp.status_depto, '')
-                 when '01' then 'alta_pedido'
-                 when '10' then 'almacen'
-                 when '15' then 'inyeccion'
-                 when '20' then 'aduana'
-                 when '25' then 'aduana'
-                 when '30' then 'banda'
-                 when '35' then 'banda'
-                 when '39' then 'banda'
-                 when '40' then 'embarque'
-                 when '50' then 'facturacion'
-                 else 'alta_pedido'
-               end
-             ) as stage_id,
-             coalesce(lp.pares, 0)::numeric as pares,
-             coalesce(ls.ultimo_escaneo, lp.fecha_programacion::timestamp at time zone $1) as age_anchor
-           from plant_visible_orders vo
-           join current_lotes_source lp on lp.pedido = vo.pedido
-           left join last_scans ls on ls.programa = lp.programa and ls.lote = lp.lote
-           left join public.bigzap_departamentos ds on ds.codigo = lp.status_depto
-           where coalesce(lp.status_depto, '') in ('01','15','20','25','30','35','39','40')
-           union all
-           select
-             -- "Alta de Pedido" = pantalla "Programación de la Producción" de BixApp.
-             -- "Pares X Prog" = backlog de renglones listos para crear lote pero aún sin
-             -- iniciar = SUM(pares_aprogramados) (RE_PARAPRO), sin filtro de fecha. (RE_PARPRO
-             -- son pares todavía NO liberados a programación; RE_PARAPRO los ya liberados
-             -- pendientes de volverse lote.) Verificado contra BixApp: 20,700.
-             'alta_pedido' as stage_id,
-             coalesce(pares_aprogramados, 0)::numeric as pares,
-             fecha_programacion::timestamp at time zone $1 as age_anchor
-           from public.bigzap_programacion_renglones
-           where coalesce(pares_aprogramados, 0) > 0
+             case coalesce(l.status_depto, '')
+               when '01' then 'alta_pedido'
+               when '15' then 'inyeccion'
+               when '20' then 'estabilizacion'
+               when '25' then 'aduana'
+               when '30' then 'banda'
+               when '35' then 'banda'
+               when '39' then 'banda'
+             end as stage_id,
+             coalesce(l.pares, 0)::numeric as pares,
+             coalesce(ls.ultimo_escaneo, l.fecha_programacion::timestamp at time zone $1) as age_anchor
+           from public.bigzap_lotes l
+           left join last_scans ls on ls.programa = l.programa and ls.lote = l.lote
+           where l.cancelado = false
+             and coalesce(l.status_depto, '') in ('01','15','20','25','30','35','39')
          ),
          grouped as (
            select
@@ -1269,25 +1162,23 @@ class PgErpService implements ErpService {
            group by stage_id
          ),
          total as (
-           -- "Pares en Proceso" del piso (= BixApp Planta Productiva, p.ej. 9,846). Alta de
-           -- Pedido es backlog pre-producción y NO entra al denominador del WIP%, para que
-           -- los % del piso cuadren con el total mostrado y no se diluyan.
-           select coalesce(sum(pares), 0)::numeric as total_pairs from active where stage_id <> 'alta_pedido'
+           -- "Pares en Proceso" de BigZap es la suma de Programación, Inyección,
+           -- Calidad, Aduana y Banda. No incluye Embarque ni Facturación.
+           select coalesce(sum(pares), 0)::numeric as total_pairs from active
          )
          select
            sd.stage_id,
            coalesce(g.batches, 0)::int as batches,
            coalesce(g.pairs, 0)::int as pairs,
            g.avg_minutes,
-           case when sd.stage_id = 'alta_pedido' then 0::float
-                when total.total_pairs > 0 then round((coalesce(g.pairs, 0)::numeric / total.total_pairs) * 100, 1)::float
+           case when total.total_pairs > 0 then round((coalesce(g.pairs, 0)::numeric / total.total_pairs) * 100, 1)::float
                 else 0 end as wip_pct
         from stage_defs sd
         cross join total
         left join grouped g on g.stage_id = sd.stage_id
          order by sd.sort_order`
         ,
-        [config.PLANT_TZ, config.BIGZAP_PLANT_ACTIVE_DAYS]
+        [config.PLANT_TZ]
       ),
       this.pool.query<ErpRecord>(
         `with last_scans as (

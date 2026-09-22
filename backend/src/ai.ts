@@ -29,7 +29,7 @@ const SYSTEM_PROMPT = `Eres el asistente del Plasyect Intelligence Dashboard, un
 
 ## Fuente de los datos
 - Los datos operativos vienen del ERP BixApp (Firebird, BIGZAP.FDB) sincronizados a Postgres/Supabase por un sync-service. Cada "tarjeta viajera" equivale a un lote; cada escaneo de tarjeta es un movimiento entre etapas.
-- Etapas del proceso: Alta de Pedido → Almacén → Inyección → Estabilización → Aduana → Banda → Embarque → Facturación.
+- Etapas del proceso: Alta de Pedido → Almacén → Inyección → Calidad → Aduana → Banda → Embarque → Facturación.
 - El FDB NO registra defectos ni calidad reales (todos los movimientos llegan con calidad "primera"). Si preguntan por defectos, segundas o mermas reales, aclara que el sistema aún no los recibe del ERP.
 - Los datos de OCR y registros de inspección de calidad se capturan manualmente en el dashboard.
 
